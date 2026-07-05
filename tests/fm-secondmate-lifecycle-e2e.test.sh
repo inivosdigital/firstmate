@@ -130,6 +130,10 @@ phase_spawn() {
   assert_no_grep 'notify=' "$LOG" "secondmate codex launch included the parent turn-end notify hook"
   assert_no_grep 'turn-ended' "$LOG" "secondmate codex launch referenced a parent turn-ended signal"
   assert_no_grep 'treehouse get' "$LOG" "secondmate spawn ran a project treehouse get"
+  # A secondmate operates in its own persistent home, not a per-task pool
+  # worktree, so it never gets the docker-compose isolation marker.
+  assert_absent "$SUB/.treehouse-compose-project" "secondmate spawn wrongly wrote a compose-project marker into its home"
+  assert_no_grep 'compose_project=' "$meta" "secondmate spawn meta wrongly recorded compose_project="
   pass "spawn: launches in the subhome with persistent charter, records routing meta"
 }
 
