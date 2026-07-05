@@ -34,6 +34,9 @@
 #   local-only   implement on branch, stop and report "ready in branch" (no push/PR);
 #                firstmate reviews, captain approves, firstmate merges to local main
 # Ship briefs begin with a worktree-isolation assertion before the branch step.
+# Both ship and scout briefs include a docker-compose isolation note telling the
+# crewmate to read .treehouse-compose-project and pass it on every docker
+# compose invocation (docs/configuration.md "Docker Compose project isolation").
 # Scout tasks ignore mode - their deliverable is a report, not a merge.
 # Every scaffold's status protocol distinguishes the configured
 # declared-external-wait verb (FM_CLASSIFY_PAUSED_VERB, default "paused") from
