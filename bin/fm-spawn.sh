@@ -79,6 +79,12 @@
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> mode=<mode> yolo=<on|off> window=<backend-target> worktree=<path>
 # mode/yolo are resolved per-project from data/projects.md for ship/scout tasks;
 # secondmate spawns record mode=secondmate, yolo=off, home=, and projects=.
+# Ship/scout spawns also derive a Docker-Compose-safe project name from the
+# worktree's own pool-slot path, write it to <worktree>/.treehouse-compose-project
+# (excluded from git via .git/info/exclude, like the per-harness turn-end hook
+# files below), and record it in meta as compose_project=<name>, so two
+# worktrees of the same project never collide on Compose's default
+# project-naming (fm-brief.sh documents how a crewmate consumes it).
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -426,6 +432,50 @@ shell_quote() {
   printf "'"
   printf '%s' "$1" | sed "s/'/'\\\\''/g"
   printf "'"
+}
+
+# Appends a path (relative to a worktree root) to that worktree's own
+# .git/info/exclude, so a firstmate-owned pointer/marker file never blocks
+# teardown's dirty-worktree check or leaks into a crewmate's commit. Shared by
+# every per-harness turn-end hook file below and the docker-compose isolation
+# marker. Operates on $WT, which callers must have already resolved.
+exclude_path() {
+  local rel=$1 EXCL
+  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
+  [ -n "$EXCL" ] || return 0
+  mkdir -p "$(dirname "$EXCL")"
+  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
+}
+
+# Derives a unique, Docker-Compose-safe project name from a worktree's own
+# pool-slot path (AGENTS.md "Layout and state"; a treehouse pool worktree is
+# .../<project>-<hash>/<slot>/<repo-name>), so two worktrees of the same
+# project - which always share the same leaf directory basename, e.g.
+# "wealthsync" - never collide on Compose's default project-naming (derived
+# from cwd basename) for container/volume/network names. Stable across
+# respawns into the same pool slot, so a stale stack left behind by a prior
+# task in that slot is superseded rather than orphaned under a new name;
+# distinct across the fleet because no two live tasks occupy the same slot at
+# once. Falls back to the worktree's own leaf name, then the task id, when the
+# path does not have two parent directories (e.g. a non-treehouse backend).
+fm_compose_project_name() {  # <worktree-abs-path> <fallback-tag>
+  local wt=$1 fallback=$2 slot pool raw name
+  slot=$(basename "$(dirname "$wt")" 2>/dev/null || true)
+  pool=$(basename "$(dirname "$(dirname "$wt")")" 2>/dev/null || true)
+  if [ -n "$slot" ] && [ "$slot" != / ] && [ -n "$pool" ] && [ "$pool" != / ]; then
+    raw="$pool-$slot"
+  else
+    raw=$(basename "$wt")
+  fi
+  name=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | tr -s '-' | sed 's/^-//; s/-$//')
+  if [ -z "$name" ]; then
+    name=$(printf '%s' "wt-$fallback" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g' | tr -s '-' | sed 's/^-//; s/-$//')
+  fi
+  case "$name" in
+    [a-z0-9]*) : ;;
+    *) name="wt-$name" ;;
+  esac
+  printf '%s\n' "$name"
 }
 
 model_flag_for_harness() {
@@ -861,6 +911,18 @@ if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
   validate_spawn_worktree "treehouse get" "$T"
 fi
 
+# Docker Compose isolation marker (ship/scout only; a secondmate operates in
+# its own firstmate home, not a per-task pool worktree). Two treehouse
+# worktrees of the same project share a leaf directory basename, so Compose's
+# default project-naming collides across them; drop a stable, worktree-scoped
+# name here that the crewmate's brief (fm-brief.sh) tells it to pass on every
+# docker/docker-compose invocation.
+if [ "$KIND" != secondmate ]; then
+  COMPOSE_PROJECT=$(fm_compose_project_name "$WT" "$ID")
+  printf '%s\n' "$COMPOSE_PROJECT" > "$WT/.treehouse-compose-project"
+  exclude_path '.treehouse-compose-project'
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -875,13 +937,6 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-exclude_path() {
-  local rel=$1 EXCL
-  EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
-  [ -n "$EXCL" ] || return 0
-  mkdir -p "$(dirname "$EXCL")"
-  grep -qxF "$rel" "$EXCL" 2>/dev/null || echo "$rel" >> "$EXCL"
-}
 if [ "$KIND" != secondmate ]; then
   case "$HARNESS" in
     claude*)
@@ -1001,6 +1056,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  [ "$KIND" = secondmate ] || echo "compose_project=$COMPOSE_PROJECT"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
   # data/fm-backend-design-d7's P1 compatibility contract).
