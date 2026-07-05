@@ -50,6 +50,15 @@ The caller-facing label remains `fm-<id>`, but the actual cmux workspace title i
 Test cleanup must use the guarded path described in [`docs/cmux-backend.md`](cmux-backend.md)'s "Test safety" section, never enumerate-and-close every workspace.
 The `config/backend` file is not inherited by secondmate homes.
 
+## Docker Compose project isolation (per-worktree)
+
+Two treehouse worktrees of the same project always share the same leaf directory basename (e.g. `wealthsync`), so Docker Compose's default project-naming, derived from the current directory's basename, collides across them on container, volume, and network names.
+For every ship/scout spawn, regardless of runtime backend, `fm-spawn.sh` derives a stable, Compose-safe project name from the worktree's own pool-slot path once it is resolved (a treehouse pool worktree is `.../<project>-<hash>/<slot>/<repo-name>`; the name is `<pool>-<slot>`, lowercased, with non-`[a-z0-9-]` characters replaced by `-` and repeats collapsed), falling back to the worktree's own leaf name or the task id when the path lacks that pool-slot shape (e.g. a non-treehouse backend).
+The name is written to `.treehouse-compose-project` in the worktree root, excluded from git via that worktree's own `.git/info/exclude` so it never blocks teardown's dirty-worktree check or leaks into a crewmate's commit, and recorded in `state/<id>.meta` as `compose_project=<name>`.
+It is stable across respawns into the same pool slot, not per task id, so a stale Compose stack left by a prior task in that slot is naturally superseded rather than accumulating orphaned volumes under a new name every respawn.
+Secondmates never get this marker or meta field; they run in their own firstmate home, not a per-task pool worktree.
+`fm-brief.sh` tells the crewmate, in both ship and scout briefs, to read `.treehouse-compose-project` and pass it explicitly on every `docker compose` invocation (e.g. `docker compose -p "$(cat .treehouse-compose-project)" up -d`), since exported env vars do not reliably persist across separate tool-call invocations; it also flags fixed host ports as a related collision vector and recommends `docker compose port <service> <container-port>` or another deterministic per-worktree-derived port instead of a hard-coded one.
+
 ## Away-mode supervisor backend (FM_SUPERVISOR_BACKEND / FM_SUPERVISOR_TARGET)
 
 The `/afk` sub-supervisor injects escalation digests into firstmate's own pane independently of where new task endpoints are spawned.
