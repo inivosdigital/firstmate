@@ -108,7 +108,7 @@ test_two_worktrees_same_leaf_get_distinct_compose_names() {
 # never trips teardown's dirty-worktree check or leaks into a crewmate commit.
 
 test_marker_is_git_excluded() {
-  local tmp proj fakebin wt out status_out
+  local tmp proj fakebin wt status_out
   tmp=$(fm_test_tmproot fm-spawn-compose-excl)
   proj=$(fm_git_init_commit "$tmp/proj" && printf '%s\n' "$tmp/proj")
   fakebin=$(make_spawn_fakebin "$tmp/fake")
@@ -116,7 +116,7 @@ test_marker_is_git_excluded() {
   wt="$tmp/excltest-9ab1/3/excltest"
   git -C "$proj" worktree add -q --detach "$wt" || fail "setup: worktree add failed"
 
-  out=$(run_spawn "$tmp/home" excl-task-c "$proj" "$wt" "$fakebin")
+  run_spawn "$tmp/home" excl-task-c "$proj" "$wt" "$fakebin" >/dev/null
   expect_code 0 "$?" "spawn should succeed"
   assert_present "$wt/.treehouse-compose-project" "worktree missing the compose-project marker"
 
