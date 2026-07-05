@@ -16,7 +16,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
-| `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
+| `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs, including the docker-compose isolation note for ship/scout |
 | `fm-herdr-lab.sh`        | Provision and guardedly operate an isolated, never-default Herdr lab session         |
 | `fm-ensure-agents-md.sh` | Ensure a project's real `AGENTS.md`, its `CLAUDE.md` symlink, and the canonical self-governance section |
 | `fm-guard.sh`            | Warn on primary-checkout tangles, pending queued wakes, and stale watcher liveness   |
@@ -26,7 +26,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
-| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
+| `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend, recording a per-worktree docker-compose project name for ship/scout tasks (`compose_project=`; docs/configuration.md "Docker Compose project isolation") |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
