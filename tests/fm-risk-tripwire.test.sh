@@ -250,6 +250,263 @@ test_usage_error_exit_code() {
   pass "fm-risk-tripwire uses a distinct exit code for malformed invocations"
 }
 
+test_embedded_comment_task_body_still_scanned() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/embedded-comment"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  # A column-0 "# " line inside the task body (a shell comment in an example
+  # command) must NOT end the Task-section scan, or the risk words after it are
+  # silently dropped - the dangerous direction for a safety floor.
+  printf '# Task\nImplement the DB runner. Example invocation:\n# then run the schema migration and rotate the tokens\n./run up\n\n# Setup\nnothing risky here.\n' \
+    > "$case_dir/data/task-x1/brief.md"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "embedded-comment: risk text after an embedded '# ' line must still be scanned"
+  assert_contains "$out" "schema" "embedded-comment: should surface the term on the embedded comment line"
+  assert_contains "$out" "migration" "embedded-comment: should surface the migration term after the comment line"
+  pass "fm-risk-tripwire keeps scanning the task body past an embedded '# ' comment line"
+}
+
+test_auth_verbs_trip_wire() {
+  local verb case_dir out status i=0
+  for verb in authorize authorized authorizing authenticate authenticated; do
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/auth-verb-$i"
+    mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+    printf '# Task\nAdd middleware to %s admin requests.\n\n# Setup\nx\n' "$verb" \
+      > "$case_dir/data/task-x1/brief.md"
+
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "auth-verb: '$verb' must trip the wire"
+    assert_contains "$out" "RISK: brief for task-x1" "auth-verb: '$verb' should name the brief hit"
+  done
+  pass "fm-risk-tripwire trips on auth verbs (authorize/authenticate families)"
+}
+
+test_auth_nouns_do_not_false_positive() {
+  local word case_dir out status i=0
+  for word in authoritative author; do
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/auth-noun-$i"
+    mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+    printf '# Task\nMake the loader the %s source of config.\n\n# Setup\nx\n' "$word" \
+      > "$case_dir/data/task-x1/brief.md"
+
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+    status=$?
+    set -e
+
+    expect_code 0 "$status" "auth-noun: '$word' must not trip the wire"
+    [ -z "$out" ] || fail "auth-noun: '$word' expected no RISK output, got: $out"
+  done
+  pass "fm-risk-tripwire does not treat 'authoritative'/'author' as auth hits"
+}
+
+test_session_start_bin_path_does_not_trip() {
+  local case_dir out status
+  case_dir=$(make_case session-start)
+  printf 'Tune the digest ordering.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/bin"
+  printf 'digest tweak\n' > "$case_dir/wt/bin/fm-session-start.sh"
+  git -C "$case_dir/wt" add bin/fm-session-start.sh
+  git -C "$case_dir/wt" commit -qm "tweak session-start"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "session-start: 'session' as a hyphen fragment of a supervision script must not trip"
+  [ -z "$out" ] || fail "session-start: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire does not trip on bin/fm-session-start.sh"
+}
+
+test_auth_setup_bin_path_trips() {
+  local case_dir out status
+  case_dir=$(make_case auth-setup)
+  printf 'Wire up the setup helper.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/bin"
+  printf 'setup\n' > "$case_dir/wt/bin/auth-setup.sh"
+  git -C "$case_dir/wt" add bin/auth-setup.sh
+  git -C "$case_dir/wt" commit -qm "add auth setup"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "auth-setup: 'auth' as a real hyphen token must still trip under bin/"
+  assert_contains "$out" "bin/auth-setup.sh" "auth-setup: should list the risky path"
+  pass "fm-risk-tripwire still trips on bin/auth-setup.sh via its auth token"
+}
+
+test_dot_delimited_strong_token_trips() {
+  local case_dir out status
+  case_dir=$(make_case dot-token)
+  printf 'Update the generated config file.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/config"
+  printf 'x\n' > "$case_dir/wt/config/db.schema.json"
+  git -C "$case_dir/wt" add config/db.schema.json
+  git -C "$case_dir/wt" commit -qm "add db schema config"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "dot-token: 'schema' as an interior dot token must trip"
+  assert_contains "$out" "config/db.schema.json" "dot-token: should list the risky path"
+  pass "fm-risk-tripwire trips on a strong risk word as a dot-delimited token"
+}
+
+test_authors_doc_path_does_not_trip() {
+  local case_dir out status
+  case_dir=$(make_case authors-doc)
+  printf 'Add a contributors list.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/docs"
+  printf 'names\n' > "$case_dir/wt/docs/authors.md"
+  git -C "$case_dir/wt" add docs/authors.md
+  git -C "$case_dir/wt" commit -qm "add authors doc"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "authors-doc: 'authors' is not the 'auth' token, must not trip"
+  [ -z "$out" ] || fail "authors-doc: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire does not trip on docs/authors.md"
+}
+
+test_migrate_verbs_trip_wire() {
+  local verb case_dir out status i=0
+  for verb in migrate migrating migrated; do
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/migrate-verb-$i"
+    mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+    printf '# Task\n%s the customers table to the new engine.\n\n# Setup\nx\n' "$verb" \
+      > "$case_dir/data/task-x1/brief.md"
+
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "migrate-verb: '$verb' must trip the wire"
+    assert_contains "$out" "RISK: brief for task-x1" "migrate-verb: '$verb' should name the brief hit"
+  done
+  pass "fm-risk-tripwire trips on migrate verb forms (migrate/migrating/migrated)"
+}
+
+test_auth_prefix_forms_trip_wire() {
+  local word case_dir out status i=0
+  for word in unauthorized unauthenticated reauthenticate deauthorize; do
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/auth-prefix-$i"
+    mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+    printf '# Task\nReject %s requests at the gateway.\n\n# Setup\nx\n' "$word" \
+      > "$case_dir/data/task-x1/brief.md"
+
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "auth-prefix: '$word' must trip the wire"
+  done
+  pass "fm-risk-tripwire trips on prefixed auth forms (unauthorized/unauthenticated/...)"
+}
+
+test_authenticator_noun_trips_wire() {
+  local word case_dir out status i=0
+  for word in authenticator authenticators; do
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/authenticator-$i"
+    mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+    printf '# Task\nAdd support for hardware %s at login.\n\n# Setup\nx\n' "$word" \
+      > "$case_dir/data/task-x1/brief.md"
+
+    set +e
+    out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "authenticator: '$word' must trip the wire"
+  done
+  pass "fm-risk-tripwire trips on authenticator/authenticators nouns"
+}
+
+test_snake_case_risk_word_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/snake-case"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nImplement the runner. Call run_schema_migration_now to apply it.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "snake-case: a risk word inside a snake_case identifier must trip"
+  assert_contains "$out" "schema" "snake-case: should surface the schema token"
+  assert_contains "$out" "migration" "snake-case: should surface the migration token"
+  pass "fm-risk-tripwire splits snake_case identifiers so embedded risk words trip"
+}
+
+test_task_body_inline_heading_still_scanned() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/inline-heading"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  # A bare "# Setup" quoted inline in the task body (not blank-line-preceded, as
+  # the real scaffold heading always is) must NOT terminate the scan early.
+  printf '# Task\nDo the thing. Configuration follows:\n# Setup\nRotate the credentials and run the migration.\n\n# Setup\nbenign boilerplate goes here.\n' \
+    > "$case_dir/data/task-x1/brief.md"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "inline-heading: risk text after an inline (non-blank-preceded) '# Setup' must still be scanned"
+  assert_contains "$out" "credential" "inline-heading: should surface the credentials term"
+  assert_contains "$out" "migration" "inline-heading: should surface the migration term"
+  pass "fm-risk-tripwire keeps scanning past an inline heading that is not the scaffold boundary"
+}
+
+test_authorizer_path_trips() {
+  local case_dir out status
+  case_dir=$(make_case authorizer-path)
+  printf 'Refactor the request pipeline.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/app/authorizers"
+  printf 'x\n' > "$case_dir/wt/app/authorizers/user_authorizer.rb"
+  git -C "$case_dir/wt" add app/authorizers/user_authorizer.rb
+  git -C "$case_dir/wt" commit -qm "add user authorizer"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "authorizer-path: an 'authorizer' component must trip (path authoriz stem parity)"
+  assert_contains "$out" "app/authorizers/user_authorizer.rb" "authorizer-path: should list the risky path"
+  pass "fm-risk-tripwire trips on authorizer paths"
+}
+
 test_clean_brief_and_diff_passes
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
@@ -261,5 +518,18 @@ test_word_boundary_avoids_substring_false_positive
 test_inflected_keyword_still_trips
 test_supervision_bin_path_does_not_trip
 test_usage_error_exit_code
+test_embedded_comment_task_body_still_scanned
+test_auth_verbs_trip_wire
+test_auth_nouns_do_not_false_positive
+test_session_start_bin_path_does_not_trip
+test_auth_setup_bin_path_trips
+test_dot_delimited_strong_token_trips
+test_authors_doc_path_does_not_trip
+test_migrate_verbs_trip_wire
+test_auth_prefix_forms_trip_wire
+test_authenticator_noun_trips_wire
+test_snake_case_risk_word_trips
+test_task_body_inline_heading_still_scanned
+test_authorizer_path_trips
 
 echo "# all fm-risk-tripwire tests passed"
