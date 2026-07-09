@@ -49,6 +49,18 @@ run_tripwire() {
     "$TRIPWIRE" task-x1
 }
 
+# Scaffold a real ship brief via bin/fm-brief.sh, then substitute the {TASK}
+# placeholder with the given task text - exercising the actual scaffold
+# boilerplate rather than a hand-written stand-in.
+scaffold_brief() {
+  local case_dir=$1 task=$2 brief
+  mkdir -p "$case_dir/state"
+  FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-brief.sh" task-x1 someproject >/dev/null 2>&1
+  brief="$case_dir/data/task-x1/brief.md"
+  sed "s|{TASK}|$task|" "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
+}
+
 test_clean_brief_and_diff_passes() {
   local case_dir out status
   case_dir=$(make_case clean)
@@ -137,10 +149,117 @@ test_nothing_to_check_errors() {
   pass "fm-risk-tripwire errors distinctly when neither a brief nor a usable worktree exists"
 }
 
+test_scaffolded_brief_boilerplate_does_not_trip() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/scaffold-clean"
+  scaffold_brief "$case_dir" "Fix a typo in the CLI help text."
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "scaffold-clean: a real scaffolded ship brief with a benign task must not trip"
+  [ -z "$out" ] || fail "scaffold-clean: expected no RISK output from scaffold boilerplate, got: $out"
+  pass "fm-risk-tripwire does not trip on fm-brief.sh scaffold boilerplate"
+}
+
+test_scaffolded_brief_risky_task_still_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/scaffold-risky"
+  scaffold_brief "$case_dir" "Rotate the payment credentials and run the schema migration."
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "scaffold-risky: a risk-worded task body inside a real scaffold must still trip"
+  assert_contains "$out" "RISK: brief for task-x1" "scaffold-risky: should name the brief hit"
+  pass "fm-risk-tripwire still scans the task body of a scaffolded brief"
+}
+
+test_word_boundary_avoids_substring_false_positive() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/word-boundary"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nMake the config loader the authoritative source of truth.\n\n# Setup\nnothing risky here.\n' \
+    > "$case_dir/data/task-x1/brief.md"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "word-boundary: 'authoritative' must not match the 'auth' keyword"
+  [ -z "$out" ] || fail "word-boundary: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire does not treat 'authoritative' as an auth keyword hit"
+}
+
+test_inflected_keyword_still_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/inflected"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nRun the pending database migrations and rotate the tokens.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "inflected: a plural risk word must still trip (no false negative)"
+  assert_contains "$out" "migration" "inflected: should surface the matched migration term"
+  pass "fm-risk-tripwire still trips on inflected/plural risk words"
+}
+
+test_supervision_bin_path_does_not_trip() {
+  local case_dir out status
+  case_dir=$(make_case bin-path)
+  printf 'Tune the watcher poll cadence.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/bin"
+  printf 'watcher tweak\n' > "$case_dir/wt/bin/fm-watch.sh"
+  printf 'guard tweak\n' > "$case_dir/wt/bin/fm-guard.sh"
+  git -C "$case_dir/wt" add bin/fm-watch.sh bin/fm-guard.sh
+  git -C "$case_dir/wt" commit -qm "tweak supervision backbone"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "bin-path: a supervision-backbone bin/ change alone must not trip the wire"
+  [ -z "$out" ] || fail "bin-path: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire does not trip on a supervision-backbone bin/ path"
+}
+
+test_usage_error_exit_code() {
+  local status
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" "$TRIPWIRE" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 2 "$status" "usage-empty-id: a malformed invocation must exit 2, not 1 (the RISK code)"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" "$TRIPWIRE" one two >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 2 "$status" "usage-extra-args: extra args must exit 2, not 1 (the RISK code)"
+  pass "fm-risk-tripwire uses a distinct exit code for malformed invocations"
+}
+
 test_clean_brief_and_diff_passes
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
 test_brief_only_mode_before_worktree_exists
 test_nothing_to_check_errors
+test_scaffolded_brief_boilerplate_does_not_trip
+test_scaffolded_brief_risky_task_still_trips
+test_word_boundary_avoids_substring_false_positive
+test_inflected_keyword_still_trips
+test_supervision_bin_path_does_not_trip
+test_usage_error_exit_code
 
 echo "# all fm-risk-tripwire tests passed"
