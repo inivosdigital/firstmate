@@ -97,6 +97,7 @@ state/               volatile runtime signals; gitignored
   <id>.grok-turnend-token   firstmate-owned grok hook registry token for the task; removed by teardown
   <id>.meta          written by fm-spawn: window=, worktree=, project=, harness=, model=, effort=, kind=, mode=, yolo=, tasktmp=; a ship/scout task also records compose_project=, a Docker-Compose-safe project name derived from the worktree's pool-slot path (docs/configuration.md "Docker Compose project isolation"), while kind=secondmate omits it and instead records home= and projects=; a non-default runtime backend records further backend-specific fields (docs/configuration.md "Runtime backend"; bin/fm-backend.sh, section 8); fm-pr-check, including through fm-pr-merge, appends pr= and GitHub's pr_head= when available; fm-x-link appends x_request=, x_request_ts=, x_followups=, and optional x_platform=/x_reply_max_chars= for an X-mode-originated task (section 14)
   <id>.check.sh      optional slow poll you write per task (e.g. merged-PR check)
+  <id>.ultracode     present only when the dispatched profile set ultracode=true; role=<ultracode_role>, plus reviewed_by=<reviewer-task-id> once bin/fm-ultracode-guard.sh confirms an independent second pass ran (section 4)
   x-watch.check.sh   generated X-mode relay poll shim; present only when opted in (section 14)
   x-inbox/           generated X-mode pending mention payloads; fmx-respond drains it (section 14)
   x-context/         generated X-mode durable per-request reply context (platform/budget), keyed by request_id; survives inbox cleanup so a delayed follow-up recovers the original platform (section 14; bin/fm-x-lib.sh)
@@ -190,13 +191,20 @@ Pick the single best-fit rule using your own judgment.
 This is explicitly not first-match: weigh all rules, their `when` text, and their `why` rationales against the actual task.
 For a chosen rule with a single-object `use`, or an array `use` with no `select`, resolve the first profile directly.
 For a chosen rule with `select: "quota-balanced"`, pipe the full rule JSON to `bin/fm-dispatch-select.sh` and use the compact JSON profile it prints.
-Extract that chosen concrete profile `(harness, model, effort)` and pass it to `bin/fm-spawn.sh` with explicit `--harness`, `--model`, and `--effort` flags for the axes that are set.
+Extract that chosen concrete profile `(harness, model, effort, ultracode?)` and pass the first three to `bin/fm-spawn.sh` with explicit `--harness`, `--model`, and `--effort` flags for the axes that are set.
+When the resolved profile also sets `ultracode`, run `bin/fm-ultracode-guard.sh flag <id> <ultracode_role>` right after spawn, so the independent-review requirement is tracked mechanically instead of resting on memory.
 If no rule fits, use `default`.
 If `default` is absent, fall back to `config/crew-harness` through `bin/fm-harness.sh crew`, exactly as the static path did before dispatch profiles, but still pass that resolved harness explicitly.
 This is enforced: when `config/crew-dispatch.json` exists, `bin/fm-spawn.sh` refuses crewmate and scout launches that do not include an explicit harness (`--harness <name>`, a positional adapter name, or a raw launch command).
 That refusal is the consultation backstop, so the rules are never silently skipped.
 The requirement is gated only on the file's presence; when the file is absent, `fm-spawn.sh` keeps resolving the crewmate harness from `config/crew-harness` as before.
 Secondmate launches are exempt because they resolve through `fm-harness.sh secondmate`, not the crewmate dispatch-profile rules.
+
+**Risk floor (mechanical, applies after any rule match).**
+Before passing the resolved profile to `fm-spawn.sh`, and again once the task has a brief or a diff, run `bin/fm-risk-tripwire.sh <id>`.
+A hit floors the model/effort to the safety-critical profile (`opus`/`xhigh`, ultracode `independent-review`) regardless of which rule the natural-language match picked - a second, structurally different check from that judgment call, so a misclassified risky task cannot slip through on a single reasoning pass.
+On a hit, also run `bin/fm-ultracode-guard.sh flag <id> independent-review` so the independent-review requirement is tracked mechanically even when the matched rule did not set ultracode.
+Re-run it at Validate time against the actual diff; a hit discovered only then still floors the task in place and is never silently downgraded afterward.
 
 `quota-balanced` selection is deterministic and owned by `bin/fm-dispatch-select.sh`; its header documents the general-window rules, freshness margin, and every fallback, and it degrades to the first array element whenever quota data is unusable.
 Quota trouble must never block dispatch.
@@ -212,6 +220,10 @@ Never select an unverified harness.
 Validate every selected harness name against the verified adapter list above.
 If a dispatch rule or default names an unverified harness, ignore that profile, fall back to the next valid source, and note the problem when it affects the dispatch.
 The shell scripts never parse or match the natural-language rules; firstmate does the matching and passes only concrete flags to `fm-spawn`.
+
+The same discipline applies to a rule's `model`, not just its harness: `fm-spawn.sh` passes any `--model` string through unvalidated.
+Before a dispatch rule may name a specific non-default model, such as `opus` or `haiku`, verify that model end-to-end on a trivial supervised task, including any advisor or sub-agent tool path its harness exposes, exactly as this section already requires before naming a new harness adapter.
+Do not copy a rule naming an unverified model into a live `config/crew-dispatch.json` until that verification has been done on this fleet.
 
 Per-harness model/effort flags: `harness-adapters` (loaded before every spawn per section 4's closing trigger).
 
@@ -494,6 +506,15 @@ During the `ci` monitor phase, `bin/fm-crew-state.sh` also reads the ci step log
 - `outcome: failed` or `cancelled` - the helper reports `failed`; inspect the run details and recover or report failure with evidence.
 - Red flag - self-fix duplication: a validating crewmate making fresh hand-commits, aborting the run, or re-running it mid-validation is re-doing work the pipeline already owns.
   Steer it back to no-mistakes' respond flow; the pipeline, not the crewmate, applies validation fixes.
+
+**Escalation triggers (mechanical, never rest on self-report alone).**
+For a task assigned the trivial tier (Haiku/low), run `bin/fm-tier-guard.sh <id>` during Validate, or whenever a heartbeat review touches it, to check whether its diff or elapsed time has outgrown that tier's envelope; any tier also escalates once its diff crosses the script's general heavy-scale ceiling.
+A report escalates the task to at least Sonnet/high in place, without losing its branch or context, mirroring `bin/fm-promote.sh`'s in-place promotion.
+A crewmate's own report - it cannot find root cause, a "confirmed" fix touches a shared path, or it raised a tradeoff buried in seemingly mechanical work - is a second, non-mechanical trigger with the same effect.
+Either way, escalate the model/effort in place and never silently de-escalate for the rest of that task's life.
+
+**Ultracode confirmation.**
+Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`; it refuses until a genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - has reviewed the finished diff and its findings were addressed, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`.
 
 ### PR ready
 
