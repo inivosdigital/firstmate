@@ -9,8 +9,13 @@
 # Usage: fm-tier-guard.sh <task-id>
 #
 # Reads state/<task-id>.meta for model=/effort=, and that file's own mtime as a
-# spawn-time proxy. Reuses bin/fm-review-diff.sh --stat for the actual diff size
-# instead of re-deriving the authoritative base/PR-head resolution here.
+# best-effort spawn-time proxy for the age check - NOT authoritative. A later
+# append to meta (bin/fm-pr-check.sh recording pr=/pr_head=, or fm-x-link
+# recording X-mode fields) resets the mtime, so a long-running task can read as
+# younger than it is and slip the age ceiling; the diff size/file ceilings are
+# the primary signal and are unaffected by that reset. Reuses
+# bin/fm-review-diff.sh --stat for the actual diff size instead of re-deriving
+# the authoritative base/PR-head resolution here.
 #
 # Prints one "ESCALATE: <reason>" line per triggered condition and exits 1 if
 # any fired; exits 0 (silent) when the task is within its tier's envelope.
