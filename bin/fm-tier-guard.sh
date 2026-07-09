@@ -17,8 +17,12 @@
 # bin/fm-review-diff.sh --stat for the actual diff size instead of re-deriving
 # the authoritative base/PR-head resolution here.
 #
-# Prints one "ESCALATE: <reason>" line per triggered condition and exits 1 if
-# any fired; exits 0 (silent) when the task is within its tier's envelope.
+# Prints one "ESCALATE: <reason>" line per triggered condition. Exit codes:
+#   0  within the tier's envelope (silent)
+#   1  at least one escalation fired
+#   2  usage or setup error (bad args, missing meta, or fm-review-diff failed)
+# Distinct codes let a caller branching on $? tell a real escalation from a
+# malformed invocation, matching the sibling guardrail bin/fm-risk-tripwire.sh.
 # Only the trivial (Haiku/low) tier has a size/age ceiling checked here; every
 # other tier is covered only by the general, tier-independent ceiling below.
 # On an escalation, bump the task's model/effort in place per AGENTS.md
@@ -55,11 +59,11 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 fi
 
 ID=${1:-}
-[ -n "$ID" ] || { usage; exit 1; }
-[ $# -le 1 ] || { usage; exit 1; }
+[ -n "$ID" ] || { usage; exit 2; }
+[ $# -le 1 ] || { usage; exit 2; }
 
 META="$STATE/$ID.meta"
-[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
+[ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 2; }
 
 MODEL=$(grep '^model=' "$META" | tail -1 | cut -d= -f2- || true)
 EFFORT=$(grep '^effort=' "$META" | tail -1 | cut -d= -f2- || true)
@@ -85,7 +89,7 @@ is_trivial_tier() {
 
 STAT_OUT=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" --stat 2>/dev/null) || {
   echo "error: fm-review-diff.sh failed for $ID" >&2
-  exit 1
+  exit 2
 }
 
 FILES=0
