@@ -52,27 +52,48 @@ ID=${1:-}
 [ -n "$ID" ] || { usage; exit 2; }
 [ $# -le 1 ] || { usage; exit 2; }
 
-# Case-insensitive, word-bounded match (tolerating plural/verb inflections such
-# as migration -> migrations and encrypt -> encryption) against the brief's prose.
-# Word boundaries stop substring false positives like "auth" inside
-# "authoritative"; inflection tolerance keeps the safety bias intact, since a
-# missed plural is a false negative and false negatives are the dangerous
-# direction for a safety floor.
-TEXT_KEYWORDS='auth|authentication|authorization|session|credential|password|secret|token|payment|billing|migration|schema|security|encrypt|decrypt|permission|access.control|data.deletion|bulk.mutation|public.exposure|breaking.change'
+# Case-insensitive, word-bounded match against the brief's prose, tolerating the
+# inflections and affixes real task phrasing uses. Word boundaries stop substring
+# false positives like "auth" inside "authoritative", but three things must still
+# reach the scan or a genuinely risky task slips to a cheap tier (the dangerous
+# direction for a safety floor):
+#   - verb forms need their own stems: appending the outer (s|ed|ing|ion|...)
+#     suffix to a bare NOUN literal cannot reach the verb, so "migration" alone
+#     could only become "migrations", never "migrate"/"migrating"/"migrated",
+#     and the bare "auth" branch never reaches "authorize"/"authenticate".
+#   - the un/re/de/pre prefixes ("unauthorized"/"unauthenticated" - the most
+#     common access-control phrasing) glue a letter onto the stem's front and
+#     defeat the leading \<, so the auth stems carry an explicit optional prefix.
+#   - a bare auth\w* stem is still avoided, so "authoritative"/"author" stay shut.
+# Snake_case identifiers in the body are split on '_' before matching (the '_' is
+# a regex word char, so "run_schema_migration" would otherwise hide its words).
+TEXT_KEYWORDS='auth|authentication|authorization|(un|re|de|pre)?authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|session|credential|password|secret|token|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission|access.control|data.deletion|bulk.mutation|public.exposure|breaking.change'
 TEXT_REGEX="\\<(${TEXT_KEYWORDS})(s|es|ed|ing|ion|ions)?\\>"
 
 # Scan only the task-specific body of the brief (the # Task section up to the
-# next top-level heading), never the fixed scaffold boilerplate bin/fm-brief.sh
-# writes into every brief - that boilerplate contains benign words like
-# "authoritative" and "future session" that would otherwise trip the wire on
-# every task. Falls back to the whole brief when there is no # Task section
-# (a non-standard or hand-written brief), keeping the permissive safety bias.
+# next scaffold section heading), never the fixed scaffold boilerplate
+# bin/fm-brief.sh writes into every brief - that boilerplate contains benign
+# words like "authoritative" and "future session" that would otherwise trip the
+# wire on every task. The section boundary is one of the scaffold's own known
+# headings (# Setup/# Rules/# Project memory/# Definition of done), not any
+# column-0 "# " line: a shell/code comment embedded in the task body (e.g.
+# "# then run the schema migration") must NOT end the scan, or the risk words
+# after it are silently dropped - the dangerous direction for a safety floor.
+# A boundary heading must also be blank-line-preceded, as every real scaffold
+# heading is (bin/fm-brief.sh emits a blank line before each), so a task body
+# that itself quotes a bare "# Setup" line inline does not cut the scan short.
+# Lines inside a fenced code block are likewise never treated as a boundary.
+# Falls back to the whole brief when there is no # Task section (a non-standard
+# or hand-written brief), keeping the permissive safety bias.
 brief_task_body() {
   local body
   body=$(awk '
-    /^# Task[[:space:]]*$/ { intask=1; next }
-    intask && /^# / { intask=0 }
+    { blank = ($0 ~ /^[[:space:]]*$/) }
+    /^```/ { fence = !fence; prevblank = blank; next }
+    !fence && /^# Task[[:space:]]*$/ { intask=1; prevblank = blank; next }
+    intask && !fence && prevblank && /^# (Setup|Rules|Project memory|Definition of done)[[:space:]]*$/ { intask=0 }
     intask { print }
+    { prevblank = blank }
   ' "$1")
   if [ -n "$body" ]; then
     printf '%s\n' "$body"
@@ -81,18 +102,46 @@ brief_task_body() {
   fi
 }
 
-# Substring match against one changed file's path (already lowercased by the
-# caller). Deliberately NOT a blanket bin/* match: firstmate's own supervision
-# backbone lives under bin/ and is routed by an explicit dispatch rule (see
-# docs/examples/crew-dispatch.json), so flooring every bin/ change here would
-# override that rule and defeat the finer tiers. A genuinely risky script still
-# trips via its name (e.g. bin/run-migration.sh, bin/auth-setup.sh).
+# Component/token match against one changed file's path (already lowercased by
+# the caller). Deliberately NOT a blanket bin/* match: firstmate's own
+# supervision backbone lives under bin/ and is routed by an explicit dispatch
+# rule (see docs/examples/crew-dispatch.json), so flooring every bin/ change
+# here would override that rule and defeat the finer tiers.
+#
+# The same word-boundary discipline as the brief-text scan applies here, so a
+# risk word must be a real path component or delimited token, not a bare
+# substring: "strong" words (auth/migrat/schema/... families) match anywhere
+# they appear as a /, -, _, or . delimited token, catching bin/auth-setup.sh,
+# bin/run-migration.sh, and db/schema.sql; the weaker "session" matches only as
+# a whole path component or filename base (lib/auth/session.rb,
+# app/models/session.rb), never as a hyphen fragment - otherwise the
+# supervision backbone bin/fm-session-start.sh would over-match. Bare-substring
+# false positives like "auth" inside AUTHORS/docs/authors.md no longer trip.
+# The flip side is intentional: a risk word glued into a compound component with
+# NO delimiter (e.g. "authsetup.rb") is not matched, because catching it would
+# require substring matching again and reopen exactly those false positives; the
+# brief-text scan and the delimiter tokenization below cover the realistic cases.
+PATH_STRONG_REGEX='^(auth|authn|authz|authoriz(e|ed|es|ing|ation|ations|er|ers)?|authenticat(e|ed|es|ing|ion|ions|or|ors)?|migrat(e|ed|es|ing|ion|ions)|schema|schemas|secret|secrets|credential|credentials|payment|payments|billing|security)$'
+PATH_WEAK_REGEX='^(session|sessions)$'
 path_is_risky() {
-  case "$1" in
+  local path=$1 comp base
+  case "$path" in
     .github/workflows/*|*/.github/workflows/*) return 0 ;;
     *dockerfile*|*docker-compose*) return 0 ;;
-    *auth*|*migrat*|*schema*|*secret*|*credential*|*payment*|*billing*|*security*|*session*) return 0 ;;
   esac
+  while IFS= read -r comp; do
+    [ -n "$comp" ] || continue
+    base=${comp%.*}
+    # Whole path component or filename base equal to a strong or weak word.
+    if printf '%s\n%s\n' "$comp" "$base" | grep -Eiq "$PATH_STRONG_REGEX|$PATH_WEAK_REGEX"; then
+      return 0
+    fi
+    # Strong words also match as a ., -, or _ delimited token inside a compound
+    # name (e.g. config.schema.json, run-migration.sh), the fail-safe direction.
+    if printf '%s\n' "$base" | tr '._-' '\n' | grep -Eiq "$PATH_STRONG_REGEX"; then
+      return 0
+    fi
+  done < <(printf '%s\n' "$path" | tr '/' '\n')
   return 1
 }
 
@@ -102,7 +151,7 @@ CHECKED=0
 BRIEF="$DATA/$ID/brief.md"
 if [ -f "$BRIEF" ]; then
   CHECKED=1
-  hit=$(brief_task_body "$BRIEF" | grep -Eoi "$TEXT_REGEX" | tr '[:upper:]' '[:lower:]' | sort -u | tr '\n' ',' | sed 's/,$//')
+  hit=$(brief_task_body "$BRIEF" | tr '_' ' ' | grep -Eoi "$TEXT_REGEX" | tr '[:upper:]' '[:lower:]' | sort -u | tr '\n' ',' | sed 's/,$//')
   if [ -n "$hit" ]; then
     echo "RISK: brief for $ID mentions risk-adjacent term(s): $hit"
     FOUND=1
@@ -115,6 +164,12 @@ if [ -f "$META" ]; then
   PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -n "$WT" ] && [ -n "$PROJ" ] && [ -d "$WT" ] && [ -d "$PROJ" ]; then
     CHECKED=1
+    # The base resolution below duplicates bin/fm-review-diff.sh's origin fetch
+    # and origin/<default> verification on purpose: this scan needs the changed
+    # PATH LIST, but fm-review-diff.sh only exposes --stat (a diffstat), not a
+    # --name-only path list, so there is nothing to reuse for a name scan.
+    # Adding a --name-only mode to that script is the clean fix and is left as a
+    # follow-up rather than expanding this task's scope into another owner.
     DEFAULT=$(fm_default_branch "$PROJ" 2>/dev/null || true)
     if [ -n "$DEFAULT" ]; then
       BASE="$DEFAULT"
