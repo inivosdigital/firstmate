@@ -14,14 +14,16 @@
 #   - the worktree's changed file paths vs its project's default branch, if
 #     state/<task-id>.meta records worktree=/project= (works after spawn, at
 #     Validate time - the second, binding checkpoint against the real diff)
-# Errors (exit 2) if neither is available; that means there is nothing to
-# check yet.
-#
-# Prints one "RISK: <reason>" line per hit and exits 1 if any fired; exits 0
-# (silent) when neither surface matched. A hit means: floor this task's
-# model/effort to the safety-critical profile (opus/xhigh, ultracode
-# independent-review) regardless of which rule the natural-language dispatch
-# match picked, per AGENTS.md section 4's risk floor.
+# Exit codes:
+#   0  no risk signal found
+#   1  a RISK hit fired (one "RISK: <reason>" line per hit is printed)
+#   2  could not check: a malformed invocation, or neither a brief nor a usable
+#      worktree/project exists yet (nothing to check)
+# Distinct codes matter so a caller branching on $? cannot mistake a malformed
+# invocation for a real risk hit. A hit means: floor this task's model/effort to
+# the safety-critical profile (opus/xhigh, ultracode independent-review)
+# regardless of which rule the natural-language dispatch match picked, per
+# AGENTS.md section 4's risk floor.
 #
 # This is a coarse, unpushed-diff-vs-default-branch name-only comparison, not
 # the PR-aware exact diff bin/fm-review-diff.sh computes - good enough for a
@@ -47,19 +49,47 @@ if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
 fi
 
 ID=${1:-}
-[ -n "$ID" ] || { usage; exit 1; }
-[ $# -le 1 ] || { usage; exit 1; }
+[ -n "$ID" ] || { usage; exit 2; }
+[ $# -le 1 ] || { usage; exit 2; }
 
-# Case-insensitive substring match against the brief's prose. Permissive by
-# design (a false positive just means "double-check"; a false negative is the
-# dangerous direction for a safety floor).
+# Case-insensitive, word-bounded match (tolerating plural/verb inflections such
+# as migration -> migrations and encrypt -> encryption) against the brief's prose.
+# Word boundaries stop substring false positives like "auth" inside
+# "authoritative"; inflection tolerance keeps the safety bias intact, since a
+# missed plural is a false negative and false negatives are the dangerous
+# direction for a safety floor.
 TEXT_KEYWORDS='auth|authentication|authorization|session|credential|password|secret|token|payment|billing|migration|schema|security|encrypt|decrypt|permission|access.control|data.deletion|bulk.mutation|public.exposure|breaking.change'
+TEXT_REGEX="\\<(${TEXT_KEYWORDS})(s|es|ed|ing|ion|ions)?\\>"
 
-# Substring match against one changed file's path (already lowercased by the caller).
+# Scan only the task-specific body of the brief (the # Task section up to the
+# next top-level heading), never the fixed scaffold boilerplate bin/fm-brief.sh
+# writes into every brief - that boilerplate contains benign words like
+# "authoritative" and "future session" that would otherwise trip the wire on
+# every task. Falls back to the whole brief when there is no # Task section
+# (a non-standard or hand-written brief), keeping the permissive safety bias.
+brief_task_body() {
+  local body
+  body=$(awk '
+    /^# Task[[:space:]]*$/ { intask=1; next }
+    intask && /^# / { intask=0 }
+    intask { print }
+  ' "$1")
+  if [ -n "$body" ]; then
+    printf '%s\n' "$body"
+  else
+    cat "$1"
+  fi
+}
+
+# Substring match against one changed file's path (already lowercased by the
+# caller). Deliberately NOT a blanket bin/* match: firstmate's own supervision
+# backbone lives under bin/ and is routed by an explicit dispatch rule (see
+# docs/examples/crew-dispatch.json), so flooring every bin/ change here would
+# override that rule and defeat the finer tiers. A genuinely risky script still
+# trips via its name (e.g. bin/run-migration.sh, bin/auth-setup.sh).
 path_is_risky() {
   case "$1" in
     .github/workflows/*|*/.github/workflows/*) return 0 ;;
-    bin/*|*/bin/*) return 0 ;;
     *dockerfile*|*docker-compose*) return 0 ;;
     *auth*|*migrat*|*schema*|*secret*|*credential*|*payment*|*billing*|*security*|*session*) return 0 ;;
   esac
@@ -72,7 +102,7 @@ CHECKED=0
 BRIEF="$DATA/$ID/brief.md"
 if [ -f "$BRIEF" ]; then
   CHECKED=1
-  hit=$(grep -Eoi "$TEXT_KEYWORDS" "$BRIEF" | tr '[:upper:]' '[:lower:]' | sort -u | tr '\n' ',' | sed 's/,$//')
+  hit=$(brief_task_body "$BRIEF" | grep -Eoi "$TEXT_REGEX" | tr '[:upper:]' '[:lower:]' | sort -u | tr '\n' ',' | sed 's/,$//')
   if [ -n "$hit" ]; then
     echo "RISK: brief for $ID mentions risk-adjacent term(s): $hit"
     FOUND=1
