@@ -261,6 +261,7 @@ Secondmate launches are exempt because they resolve through `fm-harness.sh secon
 **Risk floor (mechanical, applies after any rule match).**
 Before passing the resolved profile to `fm-spawn.sh`, and again once the task has a brief or a diff, run `bin/fm-risk-tripwire.sh <id>`.
 A hit floors the model/effort to the safety-critical profile (`opus`/`xhigh`, ultracode `independent-review`) regardless of which rule the natural-language match picked - a second, structurally different check from that judgment call, so a misclassified risky task cannot slip through on a single reasoning pass.
+On a hit, also run `bin/fm-ultracode-guard.sh flag <id> independent-review` so the independent-review requirement is tracked mechanically even when the matched rule did not set ultracode.
 Re-run it at Validate time against the actual diff; a hit discovered only then still floors the task in place and is never silently downgraded afterward.
 
 `quota-balanced` is deterministic.
