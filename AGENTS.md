@@ -88,6 +88,7 @@ When a resolved profile sets `ultracode` (schema in `docs/configuration.md` "Cre
 
 **Risk floor.** Run `bin/fm-risk-tripwire.sh <id>` before spawn and again once the task has a brief or a diff.
 A hit floors the model/effort to the safety-critical profile (`opus`/`xhigh`, ultracode `independent-review`) regardless of which rule matched, and a hit found only at Validate time still floors the task in place and is never silently downgraded afterward.
+On a hit, also run `bin/fm-ultracode-guard.sh flag <id> independent-review` so the independent-review requirement is tracked mechanically even when the matched rule did not set ultracode.
 
 Before a dispatch rule may name a specific non-default model, verify it end-to-end on a trivial supervised task, exactly as this section already requires before naming a new harness adapter; do not use an unverified model live.
 
