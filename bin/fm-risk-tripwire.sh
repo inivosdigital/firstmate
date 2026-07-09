@@ -53,7 +53,7 @@ ID=${1:-}
 [ $# -le 1 ] || { usage; exit 2; }
 
 # Case-insensitive, word-bounded match against the brief's prose, tolerating the
-# inflections and affixes real task phrasing uses. Word boundaries stop substring
+# inflections and affixes real task phrasing uses. Word bounding stops substring
 # false positives like "auth" inside "authoritative", but three things must still
 # reach the scan or a genuinely risky task slips to a cheap tier (the dangerous
 # direction for a safety floor):
@@ -62,13 +62,22 @@ ID=${1:-}
 #     could only become "migrations", never "migrate"/"migrating"/"migrated",
 #     and the bare "auth" branch never reaches "authorize"/"authenticate".
 #   - the un/re/de/pre prefixes ("unauthorized"/"unauthenticated" - the most
-#     common access-control phrasing) glue a letter onto the stem's front and
-#     defeat the leading \<, so the auth stems carry an explicit optional prefix.
-#   - a bare auth\w* stem is still avoided, so "authoritative"/"author" stay shut.
-# Snake_case identifiers in the body are split on '_' before matching (the '_' is
-# a regex word char, so "run_schema_migration" would otherwise hide its words).
-TEXT_KEYWORDS='auth|authentication|authorization|(un|re|de|pre)?authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|session|credential|password|secret|token|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission|access.control|data.deletion|bulk.mutation|public.exposure|breaking.change'
-TEXT_REGEX="\\<(${TEXT_KEYWORDS})(s|es|ed|ing|ion|ions)?\\>"
+#     common access-control phrasing) glue a letter onto the stem's front, so
+#     the auth stems carry an explicit optional prefix.
+#   - a bare "auth"-anything stem is still avoided, so "authoritative"/"author"
+#     stay shut.
+# Word bounding is done by splitting the body into whole tokens (below), NOT by
+# grep's \< / \> anchors: those are a GNU extension BSD grep does not honor, so
+# on macOS they would silently match nothing and let every risky brief through -
+# a false negative in the dangerous direction. Whole-token matching is identical
+# on GNU and BSD grep and, unlike a boundary-consuming grep -o pattern, still
+# reports BOTH words of an adjacent risk pair like "session token" (a consumed
+# shared delimiter would drop the second). Single-word keywords go in WORD_REGEX;
+# the multi-word phrases have no lone token and are matched on the
+# space-normalized stream via PHRASE_REGEX.
+WORD_KEYWORDS='auth|authentication|authorization|(un|re|de|pre)?authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|session|credential|password|secret|token|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission'
+WORD_REGEX="(${WORD_KEYWORDS})(s|es|ed|ing|ion|ions)?"
+PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]]+mutation|public[[:space:]]+exposure|breaking[[:space:]]+change)(s|es|ed|ing|ion|ions)?'
 
 # Scan only the task-specific body of the brief (the # Task section up to the
 # next scaffold section heading), never the fixed scaffold boilerplate
@@ -151,7 +160,13 @@ CHECKED=0
 BRIEF="$DATA/$ID/brief.md"
 if [ -f "$BRIEF" ]; then
   CHECKED=1
-  hit=$(brief_task_body "$BRIEF" | tr '_' ' ' | grep -Eoi "$TEXT_REGEX" | tr '[:upper:]' '[:lower:]' | sort -u | tr '\n' ',' | sed 's/,$//')
+  lc=$(brief_task_body "$BRIEF" | tr '[:upper:]' '[:lower:]')
+  # Split on every non-alnum char so each word is its own token (this also
+  # splits snake_case identifiers like run_schema_migration), then match whole
+  # tokens; phrases keep their inter-word gap on the space-normalized stream.
+  word_hits=$(printf '%s\n' "$lc" | tr -c '[:alnum:]' '\n' | grep -xE "$WORD_REGEX" || true)
+  phrase_hits=$(printf '%s\n' "$lc" | tr -c '[:alnum:]' ' ' | tr -s ' ' | grep -oE "$PHRASE_REGEX" || true)
+  hit=$(printf '%s\n%s\n' "$word_hits" "$phrase_hits" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
   if [ -n "$hit" ]; then
     echo "RISK: brief for $ID mentions risk-adjacent term(s): $hit"
     FOUND=1

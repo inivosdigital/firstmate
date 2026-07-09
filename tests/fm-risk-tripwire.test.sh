@@ -507,7 +507,74 @@ test_authorizer_path_trips() {
   pass "fm-risk-tripwire trips on authorizer paths"
 }
 
+test_bare_auth_matches_but_authoritative_does_not() {
+  # Guards the portable word boundary against silently no-op'ing on BSD grep: a
+  # no-op that matches nothing would miss the bare 'auth' (part b), and a no-op
+  # that matches substrings would trip on 'authoritative' (part a). Both asserted.
+  local case_dir out status
+  # (a) 'authoritative' alone must not match the 'auth' keyword.
+  case_dir="$TMP_ROOT/authoritative-only"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nMake the loader the authoritative config source only.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+  expect_code 0 "$status" "authoritative-only: 'authoritative' must not match the auth keyword"
+  [ -z "$out" ] || fail "authoritative-only: expected no RISK output, got: $out"
+
+  # (b) a bare 'auth' word appearing mid-line (not at the string edges) must trip.
+  case_dir="$TMP_ROOT/bare-auth-midline"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nPlease auth the request before the handler runs.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "bare-auth-midline: a standalone mid-line 'auth' must trip the wire"
+  assert_contains "$out" "auth" "bare-auth-midline: should surface the auth token"
+  pass "fm-risk-tripwire matches a bare mid-line 'auth' but never 'authoritative'"
+}
+
+test_adjacent_keywords_both_reported() {
+  # A boundary-consuming grep -o pattern drops the second word of an adjacent
+  # pair (the shared delimiter is eaten); whole-token matching reports both.
+  local case_dir out status
+  case_dir="$TMP_ROOT/adjacent-pair"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nRotate the session token on every login.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "adjacent-pair: adjacent risk words must trip"
+  assert_contains "$out" "session" "adjacent-pair: should surface session"
+  assert_contains "$out" "token" "adjacent-pair: should surface the adjacent token too"
+  pass "fm-risk-tripwire reports both words of an adjacent risk pair"
+}
+
+test_multiword_phrase_keyword_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/phrase-keyword"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf '# Task\nEnforce access control and handle data deletion on the endpoint.\n\n# Setup\nx\n' \
+    > "$case_dir/data/task-x1/brief.md"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+  expect_code 1 "$status" "phrase-keyword: a multi-word risk phrase must still trip"
+  assert_contains "$out" "access control" "phrase-keyword: should surface the access control phrase"
+  pass "fm-risk-tripwire still trips on multi-word risk phrases"
+}
+
 test_clean_brief_and_diff_passes
+test_bare_auth_matches_but_authoritative_does_not
+test_adjacent_keywords_both_reported
+test_multiword_phrase_keyword_trips
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
 test_brief_only_mode_before_worktree_exists
