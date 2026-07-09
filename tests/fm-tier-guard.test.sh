@@ -176,9 +176,25 @@ test_missing_meta_errors() {
   status=$?
   set -e
 
-  expect_code 1 "$status" "missing-meta: no meta file must error, not silently pass"
+  expect_code 2 "$status" "missing-meta: no meta file must exit 2 (setup error), not 1 (an escalation)"
   assert_contains "$out" "no meta for task" "missing-meta: should report the missing meta file"
-  pass "fm-tier-guard errors when the task has no recorded meta"
+  pass "fm-tier-guard errors distinctly (exit 2) when the task has no recorded meta"
+}
+
+test_usage_error_exit_code() {
+  local status
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" "$TIER_GUARD" >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 2 "$status" "usage-empty-id: a malformed invocation must exit 2, not 1 (the escalation code)"
+
+  set +e
+  FM_ROOT_OVERRIDE="$ROOT" "$TIER_GUARD" one two >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 2 "$status" "usage-extra-args: extra args must exit 2, not 1 (the escalation code)"
+  pass "fm-tier-guard uses a distinct exit code for malformed invocations"
 }
 
 test_trivial_tier_within_envelope_passes
@@ -188,5 +204,6 @@ test_trivial_tier_stale_age_escalates
 test_non_trivial_tier_small_diff_no_ceiling
 test_any_tier_past_heavy_scale_escalates
 test_missing_meta_errors
+test_usage_error_exit_code
 
 echo "# all fm-tier-guard tests passed"
