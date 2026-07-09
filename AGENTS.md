@@ -93,6 +93,7 @@ Before naming a specific non-default model in a dispatch rule, verify that model
 
 A dispatch profile's `ultracode: true` means the matched task must get a genuinely independent second pass on its finished diff before PR-ready, launched as its own separately dispatched task rather than a sub-task the implementing crewmate spawns itself; `bin/fm-ultracode-guard.sh` tracks this mechanically (`flag` right after spawn, `check`/`reviewed` at the PR-ready gate in section 7's Validate step).
 As a second, structurally independent check, run `bin/fm-risk-tripwire.sh <id>` before spawn and again at Validate time against the actual diff; a hit floors the model/effort to `opus`/`xhigh` with ultracode `independent-review` regardless of which rule matched, and is never silently downgraded afterward.
+On a hit, also run `bin/fm-ultracode-guard.sh flag <id> independent-review` so the independent-review requirement is tracked mechanically even when the matched rule did not set ultracode.
 
 ## 5. Recovery
 
