@@ -89,6 +89,11 @@ Do not add model-specific versions of that policy.
 Dispatch only on a backend that `fm-spawn` validates as spawn-capable.
 A missing dependency, authentication failure, unsupported backend, or version refusal is a blocker; never silently retry on another backend.
 
+Before naming a specific non-default model in a dispatch rule, verify that model end-to-end on a trivial supervised task, exactly as for a new harness adapter; never copy an unverified model into a live `config/crew-dispatch.json`.
+
+A dispatch profile's `ultracode: true` means the matched task must get a genuinely independent second pass on its finished diff before PR-ready, launched as its own separately dispatched task rather than a sub-task the implementing crewmate spawns itself; `bin/fm-ultracode-guard.sh` tracks this mechanically (`flag` right after spawn, `check`/`reviewed` at the PR-ready gate in section 7's Validate step).
+As a second, structurally independent check, run `bin/fm-risk-tripwire.sh <id>` before spawn and again at Validate time against the actual diff; a hit floors the model/effort to `opus`/`xhigh` with ultracode `independent-review` regardless of which rule matched, and is never silently downgraded afterward.
+
 ## 5. Recovery
 
 After the one session-start digest, reconcile reality with durable records before taking new work.
@@ -205,6 +210,15 @@ Judge validation by the branch-matched run step through `bin/fm-crew-state.sh`, 
 Running, fixing, or CI states remain working; parked approval or fix-review states require the worker to follow the active gate help; passed or checks-passed is done; failed or cancelled is failed.
 A worker hand-editing, committing, aborting, or restarting during an active validation run duplicates pipeline ownership; steer it back to the gate response flow.
 The worker reports the PR when CI first becomes green rather than waiting for merge monitoring to finish.
+
+**Escalation triggers (mechanical, never rest on self-report alone).**
+For a task assigned the trivial tier (Haiku/low), run `bin/fm-tier-guard.sh <id>` during Validate, or whenever a heartbeat review touches it, to check whether its diff or elapsed time has outgrown that tier's envelope; any tier also escalates once its diff crosses the script's general heavy-scale ceiling.
+A report escalates the task to at least Sonnet/high in place, without losing its branch or context, mirroring `bin/fm-promote.sh`'s in-place promotion.
+A crewmate's own report - it cannot find root cause, a "confirmed" fix touches a shared path, or it raised a tradeoff buried in seemingly mechanical work - is a second, non-mechanical trigger with the same effect.
+Either way, escalate the model/effort in place and never silently de-escalate for the rest of that task's life.
+
+**Ultracode confirmation.**
+Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`; it refuses until a genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - has reviewed the finished diff and its findings were addressed, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`.
 
 ### PR ready, landing, and teardown
 
