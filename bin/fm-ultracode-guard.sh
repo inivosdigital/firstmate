@@ -56,9 +56,7 @@ cmd_flag() {
   # Overwrites any existing marker: re-flagging (e.g. after an escalation)
   # deliberately clears a prior reviewed_by=, since that review was against an
   # earlier version of the diff and the requirement starts over.
-  {
-    echo "role=$role"
-  } > "$MARKER"
+  echo "role=$role" > "$MARKER"
   echo "flagged $ID ultracode role=$role"
 }
 
