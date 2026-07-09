@@ -18,6 +18,21 @@
       ],
       "select": "quota-balanced",
       "why": "Use a strong coding profile for broad design and implementation work."
+    },
+    {
+      "when": "The task changes this firstmate repo's own supervision backbone: bin/fm-watch.sh, bin/fm-guard.sh, a harness turnend-guard hook, or other logic the always-on watcher/guard rely on for correctness.",
+      "use": { "harness": "claude", "model": "sonnet", "effort": "xhigh" },
+      "why": "A narrow set of scripts backs every other task's supervision; a subtle regression here is silent and fleet-wide, so it earns deeper reasoning than the general firstmate-repo default even though the model tier does not need to change."
+    },
+    {
+      "when": "Safety-critical, security-sensitive, or hard-to-reverse work: schema or data migrations, auth/session/credential changes, payment or billing logic, or anything touching a frozen or safety-critical spec.",
+      "use": { "harness": "claude", "model": "opus", "effort": "xhigh", "ultracode": true, "ultracode_role": "independent-review" },
+      "why": "A model reviewing its own irreversible change has anchoring bias; an independent pass and the strongest available model are both cheap relative to the cost of a bad migration or a broken safety-flow."
+    },
+    {
+      "when": "A genuine architectural or product tradeoff with long-term consequences that the crewmate must reason through and justify, not just implement.",
+      "use": { "harness": "claude", "model": "opus", "effort": "xhigh" },
+      "why": "The deliverable's entire value is the quality of the argued judgment call; this is low-volume, high-stakes work, so the cost delta of the top model is bounded and well spent."
     }
   ],
   "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }

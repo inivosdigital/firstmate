@@ -176,7 +176,7 @@ This section is the single owner of the canonical schema and its per-field seman
     {
       "when": "<natural-language condition describing a kind of task>",
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>" }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max, optional>", "ultracode": "<optional bool>", "ultracode_role": "<optional string, e.g. independent-review>" }
       ],
       "select": "<optional strategy>",
       "why": "<optional rationale that helps firstmate choose>"
@@ -189,6 +189,9 @@ This section is the single owner of the canonical schema and its per-field seman
 Per rule, `when` and `use` are required.
 `use` may be a single profile object or an ordered array of profile objects; the single-object form stays fully backward-compatible, and every profile needs `harness`.
 `use.model`, `use.effort`, and `why` are optional.
+`use.ultracode` and `use.ultracode_role` are optional.
+A profile with `ultracode: true` means a task matched to this rule must get a genuinely independent second pass on its finished diff before PR-ready, launched as its own separately dispatched task, never a sub-task the implementing crewmate spawns itself; `ultracode_role` is a short label for what that pass should do (`independent-review` is the only role this fleet's own rules use today).
+`bin/fm-ultracode-guard.sh` tracks this mechanically; AGENTS.md section 4 covers when firstmate flags it and section 7's Validate step covers the PR-ready gate it backs.
 `select` is optional and currently supports `quota-balanced`.
 Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
 `default` is optional.
