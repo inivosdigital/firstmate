@@ -86,7 +86,7 @@ The generic effort fallback and its precedence are owned by `harness-adapters`: 
 Do not add model-specific versions of that policy.
 
 A profile's `use.ultracode` marks a task that needs a genuinely independent second pass on its finished diff before PR-ready, launched as its own separately dispatched task, never a sub-task the flagged crewmate spawns itself; run `bin/fm-ultracode-guard.sh flag <id> <ultracode_role>` right after spawn and `check <id>` before PR-ready (section 7's Validate).
-Run `bin/fm-risk-tripwire.sh <id>` after resolving the profile and again once the task has a brief or diff; a hit floors the model/effort to `opus`/`xhigh` with ultracode `independent-review` regardless of the matched rule, and a hit discovered only at Validate time still floors the task in place and is never silently downgraded afterward.
+Run `bin/fm-risk-tripwire.sh <id>` after resolving the profile and again once the task has a brief or diff; a hit floors the model/effort to `opus`/`xhigh` with ultracode `independent-review` regardless of the matched rule, and also run `bin/fm-ultracode-guard.sh flag <id> independent-review` so the requirement is tracked mechanically even when the matched rule did not set ultracode; a hit discovered only at Validate time still floors the task in place and is never silently downgraded afterward.
 The unverified-adapter discipline also covers models: verify a non-default `model` end-to-end on a trivial supervised task, including any sub-agent path its harness exposes, before a dispatch rule may name it, and never copy an unverified model into a live `config/crew-dispatch.json`.
 
 `secondmate-provisioning` owns secondmate harness pins and config inheritance, while `harness-adapters` owns the harness consequences.
