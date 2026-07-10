@@ -143,7 +143,12 @@ SH
 
 run_session_start() {  # <home> <root> <path>
   local home=$1 root=$2 path=$3
-  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
+  # Unset the harness environment markers so the faked `ps` is the sole source of
+  # harness detection. Run from inside a real harness session (e.g. CLAUDECODE=1),
+  # fm-harness.sh's env-marker layer would otherwise short-circuit detection and
+  # override the harness the fake `ps` is meant to report. A no-op in a clean shell.
+  env -u CLAUDECODE -u PI_CODING_AGENT -u GROK_AGENT \
+    FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$path" "$SESSION_START"
 }
 
 # --- context digest: absent vs empty vs present -----------------------------

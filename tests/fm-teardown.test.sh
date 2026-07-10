@@ -44,6 +44,15 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 PR_CHECK="$ROOT/bin/fm-pr-check.sh"
 TMP_ROOT=$(fm_test_tmproot fm-teardown-tests)
 
+# fm-teardown.sh's content-in-default fallback merges via `git merge-tree
+# --write-tree`, which git only grew in 2.38. On an older git the fallback is
+# inconclusive by design (teardown refuses rather than guess), so the two content
+# ALLOW cases below cannot pass. Skip them there instead of false-failing; a
+# modern-git CI runs them fully.
+git_has_merge_tree_write_tree() {
+  git merge-tree -h 2>&1 | grep -q -- '--write-tree'
+}
+
 # Build a fresh sandbox for one test case. Sets up:
 #   $CASE/state/        - firstmate state dir (with a fresh watcher beacon)
 #   $CASE/fakebin/      - mocks for treehouse, tmux (PATH-prepended by caller)
@@ -573,6 +582,10 @@ test_pr_check_records_remote_head_when_local_lags() {
 
 test_content_in_default_fallback_allows() {
   local case_dir rc
+  if ! git_has_merge_tree_write_tree; then
+    pass "worktree whose content already landed in the default branch is torn down (content fallback) [skipped: git < 2.38 lacks merge-tree --write-tree]"
+    return 0
+  fi
   case_dir=$(make_case content-landed)
   write_meta "$case_dir" no-mistakes ship
   # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
@@ -593,6 +606,10 @@ test_content_in_default_fallback_allows() {
 
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
+  if ! git_has_merge_tree_write_tree; then
+    pass "content fallback refreshes origin default before comparing trees [skipped: git < 2.38 lacks merge-tree --write-tree]"
+    return 0
+  fi
   case_dir=$(make_case content-stale-ref)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"
