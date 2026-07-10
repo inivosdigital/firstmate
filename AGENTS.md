@@ -90,7 +90,7 @@ state/               volatile runtime signals; gitignored
   <id>.herdr-presentation  quarantinable attempt journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Optional disposable single-task presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified X shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
-  <id>.ultracode     present only when the dispatched profile set ultracode=true; role=<ultracode_role>, plus reviewed_by=<reviewer-task-id> once bin/fm-ultracode-guard.sh confirms an independent second pass ran (section 4)
+  <id>.ultracode     present when the dispatched profile set ultracode=true or a risk-floor tripwire hit flagged it; role=<ultracode_role>, plus reviewed_by=<reviewer-task-id> once bin/fm-ultracode-guard.sh confirms an independent second pass ran (section 4)
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   .pr-check-quarantine/  private non-runnable storage for checks neutralized by the non-executing migration
