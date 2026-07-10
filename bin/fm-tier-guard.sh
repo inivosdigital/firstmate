@@ -82,7 +82,11 @@ tier_guard_stat_mtime() {
 
 is_trivial_tier() {
   case "$MODEL" in
-    *haiku*) [ "$EFFORT" = low ] && return 0 ;;
+    *haiku*)
+      if [ "$EFFORT" = low ] || [ "$EFFORT" = default ]; then
+        return 0
+      fi
+      ;;
   esac
   return 1
 }
