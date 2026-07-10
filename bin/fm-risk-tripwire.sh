@@ -138,7 +138,7 @@ brief_task_body() {
 # NO delimiter (e.g. "authsetup.rb") is not matched, because catching it would
 # require substring matching again and reopen exactly those false positives; the
 # brief-text scan and the delimiter tokenization below cover the realistic cases.
-PATH_STRONG_REGEX='^(auth|authn|authz|authoriz(e|ed|es|ing|ation|ations|er|ers)?|authenticat(e|ed|es|ing|ion|ions|or|ors)?|migrat(e|ed|es|ing|ion|ions)|schema|schemas|secret|secrets|credential|credentials|payment|payments|billing|security)$'
+PATH_STRONG_REGEX='^(auth|authn|authz|authoriz(e|ed|es|ing|ation|ations|er|ers)?|authenticat(e|ed|es|ing|ion|ions|or|ors)?|migrat(e|ed|es|ing|ion|ions)|schema|schemas|secret|secrets|credential|credentials|payment|payments|billing|security|password|passwords|token|tokens|permission|permissions|encrypt(s|ed|ing|ion|ions)?|decrypt(s|ed|ing|ion|ions)?)$'
 PATH_WEAK_REGEX='^(session|sessions)$'
 path_is_risky() {
   local path=$1 comp base
