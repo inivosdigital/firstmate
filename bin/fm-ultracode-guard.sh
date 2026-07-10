@@ -45,7 +45,10 @@ fi
 
 CMD=${1:-}
 ID=${2:-}
-[ -n "$CMD" ] && [ -n "$ID" ] || { usage; exit 1; }
+if [ -z "$CMD" ] || [ -z "$ID" ]; then
+  usage
+  exit 1
+fi
 
 MARKER="$STATE/$ID.ultracode"
 
