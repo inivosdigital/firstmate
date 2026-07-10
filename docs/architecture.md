@@ -130,6 +130,13 @@ Secondmate launches are exempt because they resolve the secondmate harness and a
 Unsupported effort values are still recorded in task meta when passed to `fm-spawn.sh`, but the launch template omits any effort flag that the selected harness does not accept.
 That keeps spawn launch compatible across claude, codex, grok, pi, and opencode while preserving the requested profile for later audit.
 
+A crew-dispatch profile can also carry `ultracode: true` with an optional `ultracode_role` (today only `independent-review`): a task matched to that profile must get a genuinely independent second pass on its finished diff, dispatched as its own separate task rather than a sub-task the implementing crewmate spawns, before it can go PR-ready.
+Three mechanical guardrails back this tiering, each a structurally separate check from the natural-language rule match so a misclassified task cannot slip a cheaper tier on one judgment call.
+`bin/fm-risk-tripwire.sh` greps a task's brief text and, once code exists, its changed file paths for migration, auth, schema, and security signals; a hit floors the task to the safety-critical profile (`opus`/`xhigh`, ultracode `independent-review`) regardless of which rule was matched.
+`bin/fm-tier-guard.sh` is a read-only Validate-time check that escalates a trivial (`haiku`/`low`) task in place once its actual diff size or elapsed time outgrows that tier's envelope, plus a general heavy-scale ceiling that escalates any tier once its diff crosses it; it reuses `bin/fm-review-diff.sh --stat` for the authoritative diff size.
+`bin/fm-ultracode-guard.sh` tracks the ultracode requirement through a plain `state/<id>.ultracode` marker (`role=`, then `reviewed_by=`), the same marker convention as `state/.afk`: it flags the requirement right after spawn (also on a risk-tripwire hit), records a distinct separately-dispatched reviewer task as the independent review, and refuses to let an ultracode-flagged task go PR-ready until that review is recorded.
+None of the three modify `fm-spawn.sh` or task meta.
+
 ## Optional secondmates
 
 `data/secondmates.md` records persistent domain supervisors with natural-language scopes, project clone lists, and home paths.
