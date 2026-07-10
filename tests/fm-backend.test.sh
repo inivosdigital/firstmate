@@ -725,7 +725,7 @@ run_spawn_case() {  # <bin-root> <fakebin> <log> <state> <data> <config> <proj> 
 }
 
 test_spawn_conformance_old_vs_new() {
-  local old_bin fb proj wt data id log_old log_new out_old out_new
+  local old_bin fb proj wt data id log_old log_new log_new_normalized out_old out_new
   local state_old state_new config_old config_new
   old_bin=$(build_old_bin spawn-old)
   proj="$TMP_ROOT/spawn-project"; wt="$TMP_ROOT/spawn-wt"; data="$TMP_ROOT/spawn-data"
@@ -750,14 +750,21 @@ test_spawn_conformance_old_vs_new() {
   assert_contains "$out_new" "spawned $id harness=claude kind=ship mode=no-mistakes yolo=off window=firstmate:fm-$id worktree=$wt" \
     "spawn output missing the expected summary line"
 
-  diff -u "$log_old" "$log_new" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
+  # CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 is a deliberate post-BASE_REF addition
+  # to the claude launch template (crewmate/secondmate auto-compaction), not a
+  # refactor regression; strip it before the byte-identical diff so this test
+  # keeps proving the tmux/backend-adapter extraction itself is behavior
+  # preserving without re-tripping on that known, intentional launch-command change.
+  log_new_normalized="$TMP_ROOT/spawn-new-normalized.log"
+  sed 's/CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 //' "$log_new" > "$log_new_normalized"
+  diff -u "$log_old" "$log_new_normalized" > "$TMP_ROOT/spawn-diff.txt" 2>&1 \
     || fail "fm-spawn.sh: tmux command log differs old vs new"$'\n'"$(cat "$TMP_ROOT/spawn-diff.txt")"
 
   # Sanity: the log actually captured the session/window lifecycle so an
   # accidentally-empty log (e.g. a fake tmux path typo) cannot pass silently.
   assert_contains "$(cat "$log_new")" $'\x1f''new-window' "spawn tmux log missing new-window"
   assert_contains "$(cat "$log_new")" $'\x1f''treehouse get' "spawn tmux log missing the treehouse get send"
-  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
+  assert_contains "$(cat "$log_new")" $'\x1f''-l'$'\x1f'"CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 claude --dangerously-skip-permissions \"\$(cat '$data/$id/brief.md')\"" \
     "spawn tmux log missing the literal launch-command send"
 
   rm -rf "/tmp/fm-$id"

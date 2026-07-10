@@ -94,6 +94,12 @@ As defense in depth for any pane that flag cannot reach, including the captain's
 That styled capture is internal to the boolean detector only.
 `fm-peek` and every other human or LLM-facing capture path stays plain `tmux capture-pane` with no escape codes.
 
+**Auto-compaction fact (verified 2026-07-09, Claude Code 2.1.206).**
+`bin/fm-spawn.sh` launches every claude crewmate and secondmate with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000`, scoped the same way as `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` above, so these separately-launched processes auto-compact around 200k tokens the way the primary already does via its own `.claude/settings.local.json` (which they never inherit).
+The var is read once at process startup and is capped at the model's real context window, so a fixed `200000` stays correct regardless of the spawned model's window: `min(200000, window)` is `200000` either way.
+Verified live in a tmux pane: `claude --model sonnet` on this account resolves to a ~967k-token auto-compact window with no override (`/context` reported `Auto-compact window: 967k tokens`, i.e. the 1M-context beta, not the 200k a plain Sonnet window would imply); relaunched with `CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000` set, `/context` reported `39.5k/200k tokens (20%)` and `Auto-compact window: 200k tokens` - the window pinned to the override as expected.
+This is why the primary's own two-var form (`CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000` + `CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=20`) is not copied here: that pair assumes a 1M window, and would silently cap a smaller-window model/account combination to a far more aggressive trigger.
+
 **Primary-session Stop hook (verified 2026-07-04, Claude Code 2.1.201).**
 This is separate from the per-task crewmate turn-end hook above (that one just `touch`es a marker file in a task's own `.claude/settings.local.json`).
 The firstmate PRIMARY's own `.claude/settings.json` (tracked at the repo root) registers a second, structural Stop hook, `bin/fm-turnend-guard.sh` (docs/turnend-guard.md), that can genuinely block a turn from ending: exiting the hook command with status 2 and a reason on stderr reliably forces the model to continue and act on that reason - verified live with `claude -p`, both interactively and headless.

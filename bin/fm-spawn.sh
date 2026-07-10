@@ -82,6 +82,13 @@
 # files below), and record it in meta as compose_project=<name>, so two
 # worktrees of the same project never collide on Compose's default
 # project-naming (fm-brief.sh documents how a crewmate consumes it).
+# claude launches (crewmate, scout, and secondmate) carry
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 so they auto-compact the way the primary
+# interactive session already does via its own .claude/settings.local.json, which a
+# separately-launched claude process never inherits; see the comment on the claude
+# case in launch_template() below for why 200000 alone (not the primary's
+# WINDOW=1000000 + PCT_OVERRIDE=20 pair) is the value that stays correct regardless
+# of the spawned model's real context window.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -310,7 +317,20 @@ launch_template() {
     # does NOT suppress the interactive ghost text (verified empirically), so the env
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    #
+    # CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 gives claude crewmates and secondmates
+    # the same auto-compaction the primary interactive session already has via its
+    # own .claude/settings.local.json, which these separately-launched processes
+    # never inherit. The var is read once at startup and is CAPPED at the model's
+    # actual context window, so a single fixed value stays correct across whatever
+    # crewmate model is requested: min(200000, window) is 200000 whether the model's
+    # window is 200k or (as verified for --model sonnet on this account, which gets
+    # the 1M-context beta) ~1M, landing auto-compaction "around 200k" either way.
+    # Do not copy the primary's two-var form (WINDOW=1000000 + PCT_OVERRIDE=20):
+    # that pair assumes a 1M window and is not safe for a harness/account
+    # combination with a smaller one. See the harness-adapters skill's claude
+    # section for the dated /context verification.
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
