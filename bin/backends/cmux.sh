@@ -398,13 +398,16 @@ fm_backend_cmux_parse_target() {  # <target>
 # (fm_backend_zellij_pane_exists) rather than the design sketch's original
 # read-screen-based suggestion.
 fm_backend_cmux_surface_exists() {  # <workspace_id> <surface_id>
-  local wsid=$1 sfid=$2 raw
-  # Capture the CLI call's own exit status before piping to jq: on an empty
-  # stdin (the CLI call failed and printed nothing) `jq -e` still exits 0, so
-  # piping unconditionally would silently treat a failed call as "not found"
-  # rather than propagating the failure.
-  raw=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
-  printf '%s' "$raw" | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
+  local wsid=$1 sfid=$2 out
+  # Capture the list-panes call and gate on its OWN exit/output before piping to
+  # jq: an absent target makes list-panes fail with no output, and `jq -e` on
+  # empty input exits 0 on jq 1.6 (only 1.7+ reports the no-result exit 4), so
+  # relying on the pipe's trailing jq status alone would false-positive the
+  # surface as present on older jq. A failed or empty list-panes means no surface.
+  out=$(fm_backend_cmux_cli list-panes --workspace "$wsid" --json --id-format uuids 2>/dev/null) || return 1
+  [ -n "$out" ] || return 1
+  printf '%s' "$out" \
+    | jq -e --arg s "$sfid" '[.panes[]? | select(.surface_ids // [] | index($s))] | length > 0' >/dev/null 2>&1
 }
 
 # fm_backend_cmux_target_ready: parse the target and verify it is live via
