@@ -17,8 +17,10 @@
 # Exit codes:
 #   0  no risk signal found
 #   1  a RISK hit fired (one "RISK: <reason>" line per hit is printed)
-#   2  could not check: a malformed invocation, or neither a brief nor a usable
-#      worktree/project exists yet (nothing to check)
+#   2  could not check: a malformed invocation, neither a brief nor a usable
+#      worktree/project exists yet (nothing to check), or the worktree/project
+#      exist but their diff base could not be resolved, so the binding diff
+#      checkpoint could not run (warned to stderr, never a silent clean pass)
 # Distinct codes matter so a caller branching on $? cannot mistake a malformed
 # invocation for a real risk hit. A hit means: floor this task's model/effort to
 # the safety-critical profile (opus/xhigh, ultracode independent-review)
@@ -162,6 +164,7 @@ path_is_risky() {
 
 FOUND=0
 CHECKED=0
+DIFF_UNRESOLVED=0
 
 BRIEF="$DATA/$ID/brief.md"
 if [ -f "$BRIEF" ]; then
@@ -185,6 +188,7 @@ if [ -f "$META" ]; then
   PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
   if [ -n "$WT" ] && [ -n "$PROJ" ] && [ -d "$WT" ] && [ -d "$PROJ" ]; then
     CHECKED=1
+    diff_base_resolved=0
     # The base resolution below duplicates bin/fm-review-diff.sh's origin fetch
     # and origin/<default> verification on purpose: this scan needs the changed
     # PATH LIST, but fm-review-diff.sh only exposes --stat (a diffstat), not a
@@ -199,6 +203,7 @@ if [ -f "$META" ]; then
         git -C "$WT" rev-parse --verify --quiet "refs/remotes/origin/$DEFAULT^{commit}" >/dev/null 2>&1 && BASE="origin/$DEFAULT"
       fi
       if git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
+        diff_base_resolved=1
         diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" -- 2>/dev/null || true)
         risky_paths=
         if [ -n "$diff_paths" ]; then
@@ -216,11 +221,27 @@ if [ -f "$META" ]; then
         fi
       fi
     fi
+    # The worktree/project exist, so the binding diff checkpoint was expected to
+    # run - but the diff base could not be resolved (no default branch, or the
+    # base commit does not verify in the worktree). Do not let that read as a
+    # clean pass: warn loudly, like the sibling bin/fm-review-diff.sh, and mark
+    # the run not-checkable so a caller branching on $? floors the task rather
+    # than trusting a silent 0 - the safe direction for this guardrail.
+    if [ "$diff_base_resolved" -eq 0 ]; then
+      echo "warning: could not resolve a diff base for $ID (project $PROJ, default branch '${DEFAULT:-unresolved}'); the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
+      DIFF_UNRESOLVED=1
+    fi
   fi
 fi
 
 if [ "$CHECKED" -eq 0 ]; then
   echo "error: neither $BRIEF nor a usable worktree/project in $META was found for $ID; nothing to check" >&2
+  exit 2
+fi
+
+# A real risk hit (exit 1) always wins over an unresolvable diff base; only when
+# nothing tripped does an unresolvable base downgrade the run to could-not-check.
+if [ "$FOUND" -eq 0 ] && [ "$DIFF_UNRESOLVED" -eq 1 ]; then
   exit 2
 fi
 
