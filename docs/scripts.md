@@ -32,6 +32,9 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend, deriving and recording a per-worktree docker-compose project name (`compose_project=`; see `docs/configuration.md` "Docker Compose project isolation") for ship/scout spawns |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
+| `fm-tier-guard.sh`       | Mechanically check whether a dispatched task's actual diff size or elapsed time has outgrown the resource envelope its assigned model/effort tier implies (guardrail #1); read-only, never edits meta, the worktree, or the branch |
+| `fm-risk-tripwire.sh`    | Mechanically grep a task's brief text and, once code exists, its changed file paths for migration/auth/schema/security signals - a second, structurally different check from the natural-language crew-dispatch match, so a misclassified risky task cannot slip to a cheap tier (guardrail #2) |
+| `fm-ultracode-guard.sh`  | Mechanically confirm a genuinely independent second pass ran on an ultracode-flagged task's finished diff before it can go PR-ready, tracked via a plain `state/<id>.ultracode` marker file (guardrail #3) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
