@@ -278,7 +278,7 @@ pr_is_merged() {
 # "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
 # so the caller refuses rather than guesses.
 content_in_default() {
-  local name ref default_tree merged_tree
+  local name ref default_tree base merged_tree tmpdir rc
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
     git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
@@ -290,8 +290,22 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  # 3-way merge the default branch (ours) with HEAD (theirs) off their merge
+  # base into a throwaway index: when HEAD introduces nothing the default branch
+  # does not already contain, the merged tree equals the default branch's tree.
+  # read-tree + write-tree is used instead of `git merge-tree --write-tree`
+  # (git >= 2.38 only) so this stays portable to older git; a real merge
+  # conflict leaves unmerged index entries, write-tree fails, and the check
+  # stays inconclusive so the caller refuses rather than guesses.
+  tmpdir=$(mktemp -d 2>/dev/null) || return 1
+  GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" read-tree -im --aggressive \
+    "$base^{tree}" "$ref^{tree}" "HEAD^{tree}" 2>/dev/null \
+    && merged_tree=$(GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" write-tree 2>/dev/null)
+  rc=$?
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ] || return 1
+  [ -n "$merged_tree" ] || return 1
   [ "$merged_tree" = "$default_tree" ]
 }
 
