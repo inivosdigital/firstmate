@@ -167,6 +167,40 @@ test_any_tier_past_heavy_scale_escalates() {
   pass "fm-tier-guard escalates any tier once its diff crosses the general heavy-scale ceiling"
 }
 
+test_unresolvable_pr_head_surfaces_degraded_diff_warning() {
+  # When state records pr= but the PR head cannot be resolved, fm-review-diff.sh
+  # falls back to the possibly-stale local branch and warns (still exit 0). The
+  # guard must NOT swallow that: the size it measured may under-count the real PR
+  # diff, so the degradation has to stay visible instead of reading as a clean,
+  # authoritative within-envelope pass - the same silent-reads-clean class as the
+  # sibling fm-risk-tripwire.sh unresolvable-base guard.
+  local case_dir out err status
+  case_dir=$(make_case degraded-diff)
+  printf 'base\nsmall change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "small local edit"
+  # pr= recorded, but pr_head is a bogus sha and origin has no matching PR ref,
+  # so resolve_pr_head fails and fm-review-diff.sh takes the stale-branch path.
+  write_task_meta "$case_dir" task-x1 "model=claude-haiku-4-5" "effort=low" \
+    "pr=https://github.com/o/r/pull/7" \
+    "pr_head=0000000000000000000000000000000000000000"
+
+  local errfile; errfile="$case_dir/stderr.txt"
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" "$TIER_GUARD" task-x1 2>"$errfile")
+  status=$?
+  set -e
+  err=$(cat "$errfile")
+
+  expect_code 0 "$status" "degraded-diff: a small stale-branch diff still measures within envelope (exit 0)"
+  [ -z "$out" ] || fail "degraded-diff: expected no ESCALATE on stdout, got: $out"
+  assert_contains "$err" "may under-count the real PR diff" "degraded-diff: the degraded measurement must be surfaced, not silently swallowed"
+  case "$err" in
+    *"WATCHER DOWN"*) fail "degraded-diff: must not leak fm-guard.sh's supervision banner from fm-review-diff.sh stderr, got: $err" ;;
+  esac
+  pass "fm-tier-guard surfaces a degraded (PR-head-unavailable) diff measurement instead of swallowing it"
+}
+
 test_missing_meta_errors() {
   local case_dir out status
   case_dir=$(make_case missing-meta)
@@ -203,6 +237,7 @@ test_trivial_tier_exceeds_file_ceiling_escalates
 test_trivial_tier_stale_age_escalates
 test_non_trivial_tier_small_diff_no_ceiling
 test_any_tier_past_heavy_scale_escalates
+test_unresolvable_pr_head_surfaces_degraded_diff_warning
 test_missing_meta_errors
 test_usage_error_exit_code
 
