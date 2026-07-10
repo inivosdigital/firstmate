@@ -609,6 +609,36 @@ test_no_mistakes_origin_remote_allows() {
   pass "no-mistakes worktree with HEAD on origin is torn down (no regression)"
 }
 
+test_teardown_removes_per_task_state_markers() {
+  local case_dir rc
+  case_dir=$(make_case state-markers)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+  # Every per-task marker a teardown is responsible for reaping, including the
+  # ultracode flag written by fm-ultracode-guard.sh.
+  printf '%s\n' 'working: x' > "$case_dir/state/task-x1.status"
+  touch "$case_dir/state/task-x1.turn-ended"
+  printf '%s\n' 'exit 0' > "$case_dir/state/task-x1.check.sh"
+  printf '%s\n' 'ts' > "$case_dir/state/task-x1.pi-ext.ts"
+  printf '%s\n' 'tok' > "$case_dir/state/task-x1.grok-turnend-token"
+  printf '%s\n' 'role=independent-review' > "$case_dir/state/task-x1.ultracode"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "state-markers: teardown should succeed when HEAD is on origin"
+  local marker
+  for marker in status turn-ended check.sh meta pi-ext.ts grok-turnend-token ultracode; do
+    [ ! -e "$case_dir/state/task-x1.$marker" ] \
+      || fail "state-markers: teardown left orphan state/task-x1.$marker"
+  done
+  pass "teardown removes every per-task state marker including .ultracode (no leak)"
+}
+
 test_no_mistakes_truly_unpushed_refuses() {
   local case_dir rc
   case_dir=$(make_case nm-unpushed)
@@ -1248,6 +1278,7 @@ test_teardown_manual_backend_prompts_hand_edit_even_when_tasks_axi_present
 test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
+test_teardown_removes_per_task_state_markers
 test_no_mistakes_truly_unpushed_refuses
 test_local_only_force_overrides_unpushed
 test_squash_merged_branch_deleted_allows
