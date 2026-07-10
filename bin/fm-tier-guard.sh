@@ -87,10 +87,24 @@ is_trivial_tier() {
   return 1
 }
 
-STAT_OUT=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" --stat 2>/dev/null) || {
+STAT_ERR=$(mktemp)
+STAT_OUT=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" --stat 2>"$STAT_ERR") || {
   echo "error: fm-review-diff.sh failed for $ID" >&2
+  rm -f "$STAT_ERR"
   exit 2
 }
+# fm-review-diff.sh still exits 0 but warns when it cannot resolve an open PR's
+# head and falls back to the possibly-stale local branch, so the size measured
+# below may under-count the real PR diff. Blanket-discarding that warning (the
+# 2>/dev/null this replaces) made a degraded read indistinguishable from an
+# authoritative one - the dangerous under-report direction for this guardrail.
+# Detect only that specific marker (not all of fm-review-diff.sh's stderr, which
+# also carries fm-guard.sh's supervision banner) and surface it below.
+DIFF_MAY_LAG_PR=0
+if grep -q 'PR head unavailable' "$STAT_ERR"; then
+  DIFF_MAY_LAG_PR=1
+fi
+rm -f "$STAT_ERR"
 
 FILES=0
 LINES=0
@@ -125,6 +139,10 @@ fi
 if [ "$FILES" -gt "$HEAVY_MIN_FILES" ] || [ "$LINES" -gt "$HEAVY_MIN_LINES" ]; then
   echo "ESCALATE: task $ID's diff ($FILES files / $LINES changed lines) exceeds the heavy-scale ceiling ($HEAVY_MIN_FILES files / $HEAVY_MIN_LINES lines) regardless of its assigned tier - re-check whether it still matches its dispatched rule"
   FOUND=1
+fi
+
+if [ "$DIFF_MAY_LAG_PR" -eq 1 ]; then
+  echo "warning: the diff for $ID was sized against a possibly-stale local branch because the open PR head could not be resolved; the ceilings above may under-count the real PR diff - re-check against the current PR before trusting a within-envelope result" >&2
 fi
 
 exit "$FOUND"
