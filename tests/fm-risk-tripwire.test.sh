@@ -599,6 +599,55 @@ test_adjacent_keywords_both_reported() {
   pass "fm-risk-tripwire reports both words of an adjacent risk pair"
 }
 
+test_unresolvable_diff_base_is_not_a_clean_pass() {
+  # A meta with a real worktree/project but an unresolvable diff base (no default
+  # branch, no origin) must NOT silently read as a clean pass (exit 0). The
+  # binding second checkpoint could not run, so it must warn and report
+  # could-not-check (2), matching the sibling fm-tier-guard.sh/fm-review-diff.sh.
+  local case_dir out status
+  case_dir="$TMP_ROOT/unresolvable-base"
+  mkdir -p "$case_dir/state" "$case_dir/wt"
+  git init -q "$case_dir/project"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 2 "$status" "unresolvable-base: an unresolvable diff base must read as could-not-check (2), not a clean pass (0)"
+  assert_contains "$out" "could not resolve a diff base" "unresolvable-base: should warn that the diff checkpoint did not run"
+  pass "fm-risk-tripwire reports could-not-check when the diff base is unresolvable, not a clean pass"
+}
+
+test_unresolvable_diff_base_still_reports_brief_hit() {
+  # A brief risk hit must still win (exit 1) even when the diff base is
+  # unresolvable - the risk floor beats the could-not-check downgrade.
+  local case_dir out status
+  case_dir="$TMP_ROOT/unresolvable-base-brief-hit"
+  mkdir -p "$case_dir/state" "$case_dir/wt" "$case_dir/data/task-x1"
+  git init -q "$case_dir/project"
+  printf 'Add a data migration for the new billing schema.\n' > "$case_dir/data/task-x1/brief.md"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/wt" \
+    "project=$case_dir/project"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1 2>/dev/null)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "unresolvable-base-brief-hit: a brief risk hit must still win (1) even when the diff base is unresolvable"
+  assert_contains "$out" "RISK: brief for task-x1" "unresolvable-base-brief-hit: should still name the brief hit"
+  pass "fm-risk-tripwire still reports a brief hit (1) when the diff base is unresolvable"
+}
+
 test_multiword_phrase_keyword_trips() {
   local case_dir out status
   case_dir="$TMP_ROOT/phrase-keyword"
@@ -617,6 +666,8 @@ test_multiword_phrase_keyword_trips() {
 test_clean_brief_and_diff_passes
 test_bare_auth_matches_but_authoritative_does_not
 test_adjacent_keywords_both_reported
+test_unresolvable_diff_base_is_not_a_clean_pass
+test_unresolvable_diff_base_still_reports_brief_hit
 test_multiword_phrase_keyword_trips
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
