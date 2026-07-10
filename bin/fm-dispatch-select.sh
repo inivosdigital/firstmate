@@ -115,7 +115,9 @@ first_profile() {
     def clean($p):
       {harness: $p.harness}
       + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
-      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+      + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end)
+      + (if ($p.ultracode? | type) == "boolean" then {ultracode: $p.ultracode} else {} end)
+      + (if ($p.ultracode_role? | type) == "string" then {ultracode_role: $p.ultracode_role} else {} end);
     clean(.[0])
   '
 }
@@ -169,7 +171,9 @@ selection=$(printf '%s\n' "$quota_json" | jq -ec \
   def clean($p):
     {harness: $p.harness}
     + (if ($p.model? | type) == "string" then {model: $p.model} else {} end)
-    + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end);
+    + (if ($p.effort? | type) == "string" then {effort: $p.effort} else {} end)
+    + (if ($p.ultracode? | type) == "boolean" then {ultracode: $p.ultracode} else {} end)
+    + (if ($p.ultracode_role? | type) == "string" then {ultracode_role: $p.ultracode_role} else {} end);
   def provider_for($h): [.providers[]? | select(.provider == $h)][0];
   def general_ids($h):
     if $h == "claude" then ["five_hour", "seven_day"]
