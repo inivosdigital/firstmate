@@ -14,6 +14,8 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
+| `fm-lint.sh`             | Single owner of firstmate's shell-lint definition (file set, config, pinned ShellCheck version) that CI and the no-mistakes gate both run |
+| `fm-install-shellcheck.sh` | Install CI's pinned, verified ShellCheck build into a destination directory        |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, and Herdr-lab briefs                       |
@@ -24,15 +26,21 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-turnend-guard-grok.sh` | Grok Stop-hook adapter for the primary turn-end guard                              |
 | `fm-arm-pretool-check.sh` | Stable PreToolUse transport for the watcher-arm command policy (docs/arm-pretool-check.md) |
 | `fm-arm-command-policy.mjs` | Semantic owner of the watcher-arm PreToolUse policy (docs/arm-pretool-check.md)   |
+| `fm-cd-pretool-check.sh` | Stable PreToolUse transport for the cd-guard command policy (docs/cd-guard.md)        |
+| `fm-cd-command-policy.mjs` | Semantic owner of the cd-guard policy: does a command persistently relocate the primary shell? (docs/cd-guard.md) |
 | `fm-supervision-instructions.sh` | Render the session-start primary-harness supervision block or the one-line repair instruction |
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
+| `fm-tier-guard.sh`       | Mechanically check whether a task's diff size or elapsed time outgrew its assigned model/effort tier (guardrail #1); read-only |
+| `fm-risk-tripwire.sh`    | Mechanically scan a task's brief and changed paths for migration/auth/schema/security signals (guardrail #2) |
+| `fm-ultracode-guard.sh`  | Confirm a genuinely independent second pass ran on an ultracode-flagged task's diff before PR-ready, via a marker file (guardrail #3) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |
+| `backends/herdr-eventwait.py` | Raw AF_UNIX subscriber for herdr's native `pane.agent_status_changed` stream (herdr push-escalation wire transport) |
 | `backends/zellij.sh`     | Experimental zellij session-provider adapter                                         |
 | `backends/orca.sh`       | Experimental Orca backend adapter owning both worktree and terminal                  |
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
@@ -60,6 +68,7 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-wake-drain.sh`       | Atomically drain queued watcher wakes, then assert watcher liveness                  |
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
+| `fm-transition-lib.sh`   | Shared, backend-neutral agent-state transition shape and push-escalation supervision policy |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
