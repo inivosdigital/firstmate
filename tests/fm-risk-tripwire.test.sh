@@ -51,12 +51,15 @@ run_tripwire() {
 
 # Scaffold a real ship brief via bin/fm-brief.sh, then substitute the {TASK}
 # placeholder with the given task text - exercising the actual scaffold
-# boilerplate rather than a hand-written stand-in.
+# boilerplate rather than a hand-written stand-in. Any extra args (e.g.
+# --herdr-lab) are forwarded to fm-brief.sh so tests cover the real injected
+# sections, not a stand-in.
 scaffold_brief() {
   local case_dir=$1 task=$2 brief
+  shift 2
   mkdir -p "$case_dir/state"
   FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-brief.sh" task-x1 someproject >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" task-x1 someproject "$@" >/dev/null 2>&1
   brief="$case_dir/data/task-x1/brief.md"
   sed "s|{TASK}|$task|" "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
 }
@@ -177,6 +180,46 @@ test_scaffolded_brief_risky_task_still_trips() {
   expect_code 1 "$status" "scaffold-risky: a risk-worded task body inside a real scaffold must still trip"
   assert_contains "$out" "RISK: brief for task-x1" "scaffold-risky: should name the brief hit"
   pass "fm-risk-tripwire still scans the task body of a scaffolded brief"
+}
+
+test_herdr_lab_boilerplate_does_not_trip() {
+  # The --herdr-lab contract fm-brief.sh injects between # Task and # Setup is
+  # dense with "session"/"--session"; it is scaffold boilerplate, so a benign
+  # task must not trip on it.
+  local case_dir out status
+  case_dir="$TMP_ROOT/scaffold-herdr-clean"
+  scaffold_brief "$case_dir" "Fix a typo in the CLI help text." --herdr-lab
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "scaffold-herdr-clean: the --herdr-lab contract's own 'session' text must not trip a benign task"
+  [ -z "$out" ] || fail "scaffold-herdr-clean: expected no RISK output from --herdr-lab boilerplate, got: $out"
+  pass "fm-risk-tripwire does not trip on --herdr-lab scaffold boilerplate"
+}
+
+test_herdr_lab_risky_task_still_trips() {
+  # The Herdr block is now a scan boundary, so its "session" text is excluded -
+  # but the real task body between # Task and the Herdr heading must still be
+  # scanned, and the boilerplate's "session" must not leak into the hit list.
+  local case_dir out status
+  case_dir="$TMP_ROOT/scaffold-herdr-risky"
+  scaffold_brief "$case_dir" "Rotate the payment credentials and run the schema migration." --herdr-lab
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "scaffold-herdr-risky: a risk-worded task body must still trip under --herdr-lab"
+  assert_contains "$out" "RISK: brief for task-x1" "scaffold-herdr-risky: should name the brief hit"
+  assert_contains "$out" "payment" "scaffold-herdr-risky: should surface the real task-body term"
+  case "$out" in
+    *session*) fail "scaffold-herdr-risky: the Herdr boilerplate's 'session' must not leak into the hit list, got: $out" ;;
+  esac
+  pass "fm-risk-tripwire scans the task body but excludes the --herdr-lab Herdr block"
 }
 
 test_word_boundary_avoids_substring_false_positive() {
@@ -581,6 +624,8 @@ test_brief_only_mode_before_worktree_exists
 test_nothing_to_check_errors
 test_scaffolded_brief_boilerplate_does_not_trip
 test_scaffolded_brief_risky_task_still_trips
+test_herdr_lab_boilerplate_does_not_trip
+test_herdr_lab_risky_task_still_trips
 test_word_boundary_avoids_substring_false_positive
 test_inflected_keyword_still_trips
 test_supervision_bin_path_does_not_trip
