@@ -38,6 +38,14 @@ COUNT_FILE="$RESP/.count"
   for a in "$@"; do printf '\x1f%s' "$a"; done
   printf '\n'
 } >> "$LOG"
+# `herdr server` is a fire-and-forget launch: server_ensure backgrounds it and
+# discards its output, so its timing relative to the immediately-following status
+# poll is non-deterministic. It must NOT consume a canned-response slot, or a lost
+# race with that poll would steal a status response and desync the whole sequence.
+# It is still logged above, so the "did it start the server" assertion holds.
+if [ "${1:-}" = server ]; then
+  exit 0
+fi
 if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS:-0}" != 1 ]; then
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
@@ -299,14 +307,15 @@ test_container_ensure_starts_server_and_workspace() {
   printf '{"client":{"version":"0.7.1","protocol":14}}\n' > "$resp/1.out"
   # 2: server_ensure's status --json check -> not running
   printf '{"server":{"running":false}}\n' > "$resp/2.out"
-  # 3: `herdr server` backgrounded launch - no meaningful output
-  # 4: server_ensure poll -> now running
-  printf '{"server":{"running":true}}\n' > "$resp/4.out"
-  # 5: workspace list -> empty (no "firstmate" workspace yet)
-  printf '{"result":{"workspaces":[]}}\n' > "$resp/5.out"
-  # 6: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
+  # `herdr server` is backgrounded and consumes no response slot (see the fake),
+  # so the very next scripted response is the server_ensure poll.
+  # 3: server_ensure poll -> now running
+  printf '{"server":{"running":true}}\n' > "$resp/3.out"
+  # 4: workspace list -> empty (no "firstmate" workspace yet)
+  printf '{"result":{"workspaces":[]}}\n' > "$resp/4.out"
+  # 5: workspace create -> w1, seeding default tab w1:t9 (real herdr returns
   # the seeded tab/pane ids in the SAME response - verified empirically).
-  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/6.out"
+  printf '{"result":{"workspace":{"workspace_id":"w1","label":"firstmate"},"tab":{"tab_id":"w1:t9"},"root_pane":{"pane_id":"w1:p9"}}}\n' > "$resp/5.out"
   fb=$(make_herdr_fakebin "$dir")
   out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" FM_HERDR_SCRIPT_STATUS=1 HERDR_SESSION=fmtest \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_container_ensure /tmp' "$ROOT" )
