@@ -83,8 +83,14 @@ PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]
 # next scaffold section heading), never the fixed scaffold boilerplate
 # bin/fm-brief.sh writes into every brief - that boilerplate contains benign
 # words like "authoritative" and "future session" that would otherwise trip the
-# wire on every task. The section boundary is one of the scaffold's own known
-# headings (# Setup/# Rules/# Project memory/# Definition of done), not any
+# wire on every task. The Herdr block bin/fm-brief.sh injects immediately after
+# # Task (either the # Herdr isolation ... hard-safety contract, whose text is
+# dense with "session"/"--session", or the # Herdr lifecycle declaration ...
+# not-enabled stub) is scaffold boilerplate too, so its heading is a boundary as
+# well; without it every --herdr-lab brief would trip on the contract's own
+# "session" wording rather than the real task text. The section boundary is one
+# of the scaffold's own known headings (# Herdr isolation .../# Herdr lifecycle
+# declaration .../# Setup/# Rules/# Project memory/# Definition of done), not any
 # column-0 "# " line: a shell/code comment embedded in the task body (e.g.
 # "# then run the schema migration") must NOT end the scan, or the risk words
 # after it are silently dropped - the dangerous direction for a safety floor.
@@ -100,7 +106,7 @@ brief_task_body() {
     { blank = ($0 ~ /^[[:space:]]*$/) }
     /^```/ { fence = !fence; prevblank = blank; next }
     !fence && /^# Task[[:space:]]*$/ { intask=1; prevblank = blank; next }
-    intask && !fence && prevblank && /^# (Setup|Rules|Project memory|Definition of done)[[:space:]]*$/ { intask=0 }
+    intask && !fence && prevblank && /^# (Herdr isolation.*|Herdr lifecycle declaration.*|Setup|Rules|Project memory|Definition of done)[[:space:]]*$/ { intask=0 }
     intask { print }
     { prevblank = blank }
   ' "$1")
