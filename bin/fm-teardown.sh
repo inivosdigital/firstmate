@@ -235,48 +235,43 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
-# Does HEAD's content already match the given ref? Checks every path HEAD changed
-# since its merge-base with ref: if ref already matches HEAD at each of those paths,
-# HEAD introduces nothing ref does not already contain (e.g. its change landed via
-# squash). This isolates branch-only changes, so unrelated commits ref gained past
-# the merge-base do not count as "added" - equivalent to a 3-way merge's resulting
-# tree matching ref's tree, but built from plain diff/merge-base so it works on git
-# older than 2.38 (which is what `git merge-tree --write-tree` requires). Returns
-# non-zero when inconclusive (ref missing, or a real difference).
-content_matches_ref() {
-  local ref=$1 base changed_file
-  git -C "$WT" rev-parse --quiet --verify "$ref^{commit}" >/dev/null 2>&1 || return 1
-  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
-  local -a changed=()
-  while IFS= read -r -d '' changed_file; do
-    changed+=("$changed_file")
-  done < <(git -C "$WT" diff --name-only -z "$base" HEAD -- 2>/dev/null)
-  [ "${#changed[@]}" -gt 0 ] || return 0
-  git -C "$WT" diff --quiet "$ref" HEAD -- "${changed[@]}" 2>/dev/null
-}
-
-# Is the branch's content already present in the up-to-date default branch? Checks
-# two candidate refs, succeeding if either already contains HEAD's content: the
-# fetched remote-tracking ref refs/remotes/origin/$name (the normal PR-merged case),
-# and the LOCAL refs/heads/$name (a worktree and its project's primary checkout are
-# linked worktrees of the same repository, so this local ref already reflects a
-# firstmate-performed local fast-forward merge, even for a project whose delivery
-# mode is not local-only - e.g. a PR closed unmerged upstream but the branch was
-# landed into local main by hand on the captain's approval). A fetch failure only
-# rules out the remote-tracking path; the local ref is still tried. Returns
-# non-zero only when neither candidate ref exists or matches.
+# Is the branch's content already present in the up-to-date default branch? Fetches
+# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
+# the default branch does not already contain (e.g. its change landed via squash) the
+# merged tree equals the default branch's tree. This isolates branch-only changes, so
+# unrelated commits the default branch gained past the merge-base do not count as
+# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
+# so the caller refuses rather than guesses.
 content_in_default() {
-  local name
+  local name ref default_tree base merged_tree tmpdir rc
   name=$(default_branch) || return 1
   if git -C "$WT" remote get-url origin >/dev/null 2>&1; then
-    if git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1; then
-      content_matches_ref "refs/remotes/origin/$name" && return 0
-    fi
+    git -C "$WT" fetch --quiet origin "+refs/heads/$name:refs/remotes/origin/$name" >/dev/null 2>&1 || return 1
+    ref="refs/remotes/origin/$name"
+  elif git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
+    ref="refs/heads/$name"
+  else
+    return 1
   fi
-  if git -C "$WT" rev-parse --quiet --verify "refs/heads/$name" >/dev/null 2>&1; then
-    content_matches_ref "refs/heads/$name" && return 0
-  fi
-  return 1
+  default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
+  [ -n "$default_tree" ] || return 1
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  # 3-way merge the default branch (ours) with HEAD (theirs) off their merge
+  # base into a throwaway index: when HEAD introduces nothing the default branch
+  # does not already contain, the merged tree equals the default branch's tree.
+  # read-tree + write-tree is used instead of `git merge-tree --write-tree`
+  # (git >= 2.38 only) so this stays portable to older git; a real merge
+  # conflict leaves unmerged index entries, write-tree fails, and the check
+  # stays inconclusive so the caller refuses rather than guesses.
+  tmpdir=$(mktemp -d 2>/dev/null) || return 1
+  GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" read-tree -im --aggressive \
+    "$base^{tree}" "$ref^{tree}" "HEAD^{tree}" 2>/dev/null \
+    && merged_tree=$(GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" write-tree 2>/dev/null)
+  rc=$?
+  rm -rf "$tmpdir"
+  [ "$rc" -eq 0 ] || return 1
+  [ -n "$merged_tree" ] || return 1
+  [ "$merged_tree" = "$default_tree" ]
 }
 
 # Has the worktree's committed work actually LANDED, though its commits are not
