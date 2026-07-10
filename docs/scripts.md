@@ -25,6 +25,9 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-home-seed.sh`        | Transactionally provision a secondmate home and maintain `data/secondmates.md`       |
 | `fm-spawn.sh`            | Spawn crewmates, scouts, `id=repo` batches, and secondmates on the resolved harness and runtime backend |
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
+| `fm-tier-guard.sh`       | Escalate a dispatched task past its model/effort tier when its diff size or age outgrows the envelope |
+| `fm-risk-tripwire.sh`    | Independently floor a task to the safety-critical tier when its brief or diff trips a risk signal |
+| `fm-ultracode-guard.sh`  | Track and enforce an ultracode-flagged task's genuinely independent second-pass review before PR-ready |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |
