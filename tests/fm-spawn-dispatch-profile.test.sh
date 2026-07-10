@@ -118,7 +118,7 @@ test_no_profile_keeps_claude_launch_unchanged() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
+  expected="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 claude --dangerously-skip-permissions \"\$(cat '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch byte-identical"
 }
@@ -221,7 +221,29 @@ test_claude_threads_model_and_effort() {
   launch=$(cat "$LAUNCH_LOG")
   assert_contains "$launch" "claude --dangerously-skip-permissions --model 'sonnet' --effort 'high'" \
     "claude launch did not thread model and effort flags"
+  assert_contains "$launch" "CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000" \
+    "claude launch must carry the auto-compaction window env var regardless of model/effort flags"
   pass "claude receives --model and --effort profile flags"
+}
+
+# Only claude launches carry the auto-compaction env var; codex, opencode, and pi
+# ignore Claude Code env vars harmlessly, but firstmate should not set it for them
+# (grok is intentionally out of scope too - unverified whether its binary honors it).
+test_only_claude_launch_carries_autocompact_window() {
+  local rec id out status launch harness
+  for harness in codex opencode pi grok; do
+    id="profile-autocompact-$harness-z17"
+    rec=$(make_spawn_case "profile-autocompact-$harness" "$harness" "$id")
+    read_case_record "$rec"
+
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+    status=$?
+    expect_code 0 "$status" "$harness spawn without profile flags should succeed"
+    launch=$(cat "$LAUNCH_LOG")
+    assert_not_contains "$launch" "CLAUDE_CODE_AUTO_COMPACT_WINDOW" \
+      "$harness launch must not carry claude's auto-compaction env var"
+  done
+  pass "codex, opencode, pi, and grok launches never carry CLAUDE_CODE_AUTO_COMPACT_WINDOW"
 }
 
 test_codex_threads_model_and_effort() {
@@ -391,6 +413,7 @@ test_active_dispatch_profile_allows_explicit_harness
 test_active_dispatch_profile_allows_positional_harness
 test_active_dispatch_profile_allows_raw_launch_command
 test_claude_threads_model_and_effort
+test_only_claude_launch_carries_autocompact_window
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_grok_threads_model_and_reasoning_effort
