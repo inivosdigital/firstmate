@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (z) no-mistakes + PR closed unmerged, never pushed, merged
+#       into LOCAL default branch by hand                       -> ALLOW  (local-land fix)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -235,6 +237,37 @@ case "\${1:-} \${2:-}" in
   "pr view")
     case " \$* " in
       *"state,headRefOid"*) printf '%s\t%s\n' 'MERGED' '$head' ; exit 0 ;;
+      *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
+}
+
+# Override GitHub lookups to report PR 7 as closed (unmerged) with the current
+# worktree HEAD as its head - simulates a PR deliberately closed without merging
+# (e.g. upstream repo not owned by this user).
+add_gh_pr_closed_for_head() {
+  local case_dir=$1 head=$2
+  cat > "$case_dir/fakebin/gh-axi" <<'SH'
+#!/usr/bin/env bash
+case "${1:-} ${2:-}" in
+  "pr list")
+    printf '%s\n' "count: 1 (showing first 1)" "pull_requests[1]{number,state}:" "  7,closed" ; exit 0 ;;
+  "pr view")
+    printf '%s\n' "pull_request:" "  number: 7" "  state: closed" ; exit 0 ;;
+esac
+exit 0
+SH
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid"*) printf '%s\t%s\n' 'CLOSED' '$head' ; exit 0 ;;
       *"headRefOid"*) printf '%s\n' '$head' ; exit 0 ;;
     esac
     ;;
@@ -634,6 +667,37 @@ test_no_mistakes_truly_unpushed_refuses() {
   expect_code 1 "$rc" "nm-unpushed: teardown should refuse"
   grep -q REFUSED "$case_dir/stderr" || fail "nm-unpushed: no REFUSED line in stderr"
   pass "no-mistakes worktree with genuinely unlanded work is refused (safety preserved)"
+}
+
+# Reproduces the local-land false-negative: a project registered under the normal
+# no-mistakes delivery mode, whose task branch was never pushed to any remote and
+# whose PR was deliberately closed unmerged (e.g. the upstream repo is not owned by
+# this user), but which firstmate itself fast-forward-merged into the LOCAL default
+# branch by hand, on explicit prior captain approval. content_in_default() used to
+# only ever diff against the fetched refs/remotes/origin/$name, so it never saw this
+# local-only landing outside of mode=local-only; it must now also accept containment
+# in the LOCAL refs/heads/$name.
+test_no_mistakes_merged_to_local_main_allows() {
+  local case_dir rc pr_head
+  case_dir=$(make_case nm-local-land)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "shippable work"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_closed_for_head "$case_dir" "$pr_head"
+  # Never pushed to origin or any fork. Instead, firstmate fast-forwards the
+  # project's LOCAL main to the worktree's HEAD, exactly as bin/fm-merge-local.sh
+  # would for an explicitly approved local landing.
+  git -C "$case_dir/project" update-ref refs/heads/main "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "nm-local-land: teardown should succeed when work is merged into local main"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "nm-local-land: teardown printed a REFUSED line"
+  pass "no-mistakes worktree with a closed PR but work merged into local main is torn down (local-land fix)"
 }
 
 test_squash_merged_branch_deleted_allows() {
@@ -1287,6 +1351,7 @@ test_local_only_truly_unpushed_refuses
 test_local_only_merged_to_local_main_allows
 test_no_mistakes_origin_remote_allows
 test_no_mistakes_truly_unpushed_refuses
+test_no_mistakes_merged_to_local_main_allows
 test_local_only_force_overrides_unpushed
 test_herdr_teardown_clears_escalation_marker
 test_squash_merged_branch_deleted_allows
