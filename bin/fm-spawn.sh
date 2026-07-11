@@ -97,12 +97,12 @@
 # worktrees of the same project never collide on Compose's default
 # project-naming (fm-brief.sh documents how a crewmate consumes it).
 # claude launches (crewmate, scout, and secondmate) carry
-# CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 so they auto-compact the way the primary
+# CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 so they auto-compact the way the primary
 # interactive session already does via its own .claude/settings.local.json, which a
 # separately-launched claude process never inherits; see the comment on the claude
-# case in launch_template() below for why 200000 alone (not the primary's
-# WINDOW=1000000 + PCT_OVERRIDE=20 pair) is the value that stays correct regardless
-# of the spawned model's real context window.
+# case in launch_template() below for why 300000 (not the primary's
+# WINDOW=1000000 + PCT_OVERRIDE=20 pair) is safe to hardcode: it is capped at the
+# real context window, so it is a no-op below that window and takes effect above it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -375,19 +375,24 @@ launch_template() {
     # var is the correct control. The dim-aware composer reader in fm-tmux-lib.sh is
     # the defense-in-depth backstop for any pane this flag cannot reach.
     #
-    # CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 gives claude crewmates and secondmates
-    # the same auto-compaction the primary interactive session already has via its
-    # own .claude/settings.local.json, which these separately-launched processes
-    # never inherit. The var is read once at startup and is CAPPED at the model's
-    # actual context window, so a single fixed value stays correct across whatever
-    # crewmate model is requested: min(200000, window) is 200000 whether the model's
-    # window is 200k or (as verified for --model sonnet on this account, which gets
-    # the 1M-context beta) ~1M, landing auto-compaction "around 200k" either way.
+    # CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 gives claude crewmates and secondmates
+    # a higher auto-compaction ceiling than the plain-window default, the same way
+    # the primary interactive session already has via its own
+    # .claude/settings.local.json, which these separately-launched processes never
+    # inherit. The var is read once at startup and is CAPPED at the model's actual
+    # context window, so it can only lower the effective trigger, never raise it past
+    # the real ceiling: min(300000, window) is 300000 once window exceeds it, but a
+    # no-op (stays at window) below that. This is not a universal guarantee for every
+    # possible future model choice - a differently-configured account/model capped at
+    # the plain ~200k window would see no change - but it is true for the window tier
+    # crew actually runs on today: as verified for --model sonnet on this account
+    # (the standard crewmate spawn), the window resolves to the ~1M-context beta,
+    # well above 300000.
     # Do not copy the primary's two-var form (WINDOW=1000000 + PCT_OVERRIDE=20):
     # that pair assumes a 1M window and is not safe for a harness/account
     # combination with a smaller one. See the harness-adapters skill's claude
     # section for the dated /context verification.
-    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000 claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
+    claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(cat __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
         printf '%s' 'codex __MODELFLAG____EFFORTFLAG__--dangerously-bypass-approvals-and-sandbox "$(cat __BRIEF__)"'
