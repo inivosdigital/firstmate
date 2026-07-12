@@ -207,6 +207,18 @@ land_on_origin_main() {
   rm -rf "$tmp"
 }
 
+# content_in_default (bin/fm-teardown.sh) relies on `git merge-tree
+# --write-tree`, added in git 2.38. Probe the REAL capability rather than
+# guessing a version cutoff: older git treats the flag as an unrecognized
+# revision ("unknown rev --write-tree"), which the two tests exercising that
+# fallback below cannot pass under.
+fm_git_supports_merge_tree_write_tree() {
+  case "$(git -C "$ROOT" merge-tree --write-tree HEAD HEAD 2>&1)" in
+    *"unknown rev"*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 # Override GitHub lookups to report PR 7 as merged with the supplied head.
 add_gh_pr_merged_for_head() {
   local case_dir=$1 head=$2
@@ -805,6 +817,10 @@ test_pr_check_records_remote_head_when_local_lags() {
 
 test_content_in_default_fallback_allows() {
   local case_dir rc
+  fm_git_supports_merge_tree_write_tree || {
+    echo "skip: this git lacks 'merge-tree --write-tree' (needs git 2.38+)"
+    return 0
+  }
   case_dir=$(make_case content-landed)
   write_meta "$case_dir" no-mistakes ship
   # No pr= recorded and the default gh-axi mock reports no PR, so the merged-PR path
@@ -825,6 +841,10 @@ test_content_in_default_fallback_allows() {
 
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
+  fm_git_supports_merge_tree_write_tree || {
+    echo "skip: this git lacks 'merge-tree --write-tree' (needs git 2.38+)"
+    return 0
+  }
   case_dir=$(make_case content-stale-ref)
   write_meta "$case_dir" no-mistakes ship
   wt_commit_file "$case_dir" feature.txt hello "add feature"

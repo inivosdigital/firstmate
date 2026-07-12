@@ -124,6 +124,23 @@ build_packed_prunable() {
 
 plant_packed_refs_lock() { : > "$1/.git/packed-refs.lock"; }
 
+# Some git builds treat a failed prune-delete (blocked by a stale
+# packed-refs.lock) as a non-fatal warning and still exit 0 from `fetch
+# --prune`, which makes the packed-refs.lock recovery path this suite exercises
+# unreachable here. Probe the REAL capability with a real, throwaway fixture
+# instead of guessing a version cutoff; the tests that depend on the fetch
+# actually failing skip cleanly when it does not.
+fm_fleet_sync_packed_refs_lock_blocks_fetch() {
+  local probe_home clone rc
+  probe_home=$(mktemp -d "${TMPDIR:-/tmp}/fm-fleet-sync-lock-probe.XXXXXX")
+  clone=$(build_packed_prunable "$probe_home" probe)
+  plant_packed_refs_lock "$clone"
+  git -C "$clone" fetch origin --prune --quiet >/dev/null 2>&1
+  rc=$?
+  rm -rf "$probe_home"
+  [ "$rc" -ne 0 ]
+}
+
 # lsof shims mirror tests/fm-teardown.test.sh: no-holder (provably free), a live
 # holder, and an lsof error. Written into a per-home fakebin/ prepended to PATH.
 lsof_no_holder() {
@@ -474,6 +491,10 @@ test_bootstrap_relays_recovered_and_stuck() {
 
 test_orphaned_stale_packed_refs_lock_recovers() {
   local home fakebin clone out err
+  fm_fleet_sync_packed_refs_lock_blocks_fetch || {
+    echo "skip: this git does not fail fetch --prune on a blocked packed-refs.lock delete (untestable here)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-lockstale"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" lockstale)
@@ -503,6 +524,10 @@ test_orphaned_stale_packed_refs_lock_recovers() {
 
 test_live_packed_refs_lock_is_never_removed() {
   local home fakebin clone out err before
+  fm_fleet_sync_packed_refs_lock_blocks_fetch || {
+    echo "skip: this git does not fail fetch --prune on a blocked packed-refs.lock delete (untestable here)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-locklive"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" locklive)
@@ -529,6 +554,10 @@ test_live_packed_refs_lock_is_never_removed() {
 
 test_live_git_cwd_in_clone_dir_blocks_removal() {
   local home fakebin clone out err before
+  fm_fleet_sync_packed_refs_lock_blocks_fetch || {
+    echo "skip: this git does not fail fetch --prune on a blocked packed-refs.lock delete (untestable here)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-lockcwd"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" lockcwd)
