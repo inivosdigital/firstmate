@@ -84,6 +84,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
   learnings.md       fleet-local operational facts and gotchas; LOCAL, gitignored; dated, evidence-backed, curated - rewrite and prune rather than append forever, the same contract as captain.md; created lazily, absent until this home has a learning to store
+  nas-deployments.md hand-maintained pipe-table mapping a project to its live NAS deployment, one row per deployed project: "| <project> | <nas_repo_path> | <pm2_process(es)> |" (comma-separated when more than one pm2 process serves it); read by bin/fm-nas-deploy-sync.sh (section 7); absent or a project missing a row means that project has no known live deployment, not an error
   projects.md        thin fleet navigation registry; firstmate-private, parsed by fm-project-mode.sh (section 6)
   secondmates.md      secondmate routing table; firstmate-private, maintained by fm-home-seed.sh (section 6)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
@@ -639,6 +640,7 @@ Genuinely unlanded work (no merged PR head containing the local work and content
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
 After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so safe clone states catch up to the merge, clean detached ancestor drift self-heals, and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
 Unsafe drift is reported as `STUCK:` and left untouched.
+Any non-scout, non-secondmate teardown - PR-based or local-only - also best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh` (section 2); a project with no recorded deployment is a silent no-op.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
 Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
