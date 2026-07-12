@@ -50,10 +50,6 @@ Never add an agent name as a commit co-author.
 Each secondmate has a persistent isolated `FM_HOME`, including its own state, backlog, projects, and session lock.
 `bin/fm-send.sh` fails closed unless `FM_HOME` is explicit, so a steer cannot silently resolve against another home.
 
-Tracked files hold shared instructions and tooling; `data/` holds durable private fleet records; `state/` holds volatile runtime records and append-only status events; `config/` holds local operating choices; and `projects/` contains clones that are read-only to firstmate.
-A `state/<id>.status` line is a wake event, not current-state truth; `bin/fm-crew-state.sh` owns current-state reconciliation.
-Treat `data/captain.md` as the canonical portable record of captain preferences and `data/learnings.md` as curated fleet-local knowledge, regardless of harness memory.
-
 ## 3. Session start (run once at every session start)
 
 Run `bin/fm-session-start.sh` exactly once at session start.
@@ -230,6 +226,8 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
+`bin/fm-teardown.sh`'s header owns the full landed-work definition; a known benign case is an external-PR task whose squash merge leaves the branch commits reachable only on the contributor's fork - add the fork as a remote and fetch, then retry, never reach for `--force`.
+After a successful PR-based teardown it also best-effort syncs that project's clone via `bin/fm-fleet-sync.sh`, and any non-scout, non-secondmate teardown best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh`; a project with no recorded deployment is a silent no-op.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.
