@@ -125,6 +125,29 @@ SH
   chmod +x "$fakebin/pm2"
 }
 
+# write_pm2_cluster_stub <fakebin> <restart_log> <proc>: like write_pm2_stub, but
+# `pm2 jlist` always reports TWO instances of <proc> - one online, one stopped -
+# regardless of what was restarted, simulating a clustered pm2 app where one
+# instance in the cluster never comes back after a restart.
+write_pm2_cluster_stub() {
+  local fakebin=$1 log=$2 proc=$3
+  : > "$log"
+  cat > "$fakebin/pm2" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  restart)
+    printf '%s\n' "\$2" >> "$log"
+    exit 0
+    ;;
+  jlist)
+    printf '[{"name":"%s","pm2_env":{"status":"online"}},{"name":"%s","pm2_env":{"status":"stopped"}}]\n' "$proc" "$proc"
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/pm2"
+}
+
 # run_sync <home> [args...]: run the sync script against an isolated home.
 run_sync() {
   local home=$1
@@ -211,6 +234,26 @@ test_absent_project_is_silent_noop() {
   expect_code 0 "$rc" "absent: sync should exit 0 for a project with no recorded deployment"
   assert_contains "$out" "untracked-project: skipped: no recorded NAS deployment" "absent: did not report the expected skip line"
   pass "a project absent from data/nas-deployments.md is a silent no-op"
+}
+
+test_clustered_partial_restart_is_not_masked_online() {
+  local home nas log out
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" cluster-test)
+  advance_origin "$home" cluster-test C1
+  write_map "$home" cluster-test "$nas" cluster-test
+  log="$home/restart.log"
+  write_pm2_cluster_stub "$home/fakebin" "$log" cluster-test
+
+  out=$(run_sync "$home" cluster-test)
+
+  assert_contains "$out" "not online after restart" \
+    "clustered: did not report the lagging cluster instance as a restart problem"
+  assert_contains "$out" "needs attention" "clustered: did not flag the deployment as needing attention"
+  case "$out" in
+    *"verified online"*) fail "clustered: a lagging cluster instance was masked as fully verified online" ;;
+  esac
+  pass "a clustered pm2 app with one lagging instance is reported as a restart problem, not masked as online"
 }
 
 test_missing_map_file_is_silent_noop() {
@@ -330,6 +373,7 @@ test_teardown_invokes_nas_deploy_sync_for_landed_project() {
 test_clean_behind_fast_forwards_and_restarts
 test_dirty_is_skipped_untouched
 test_diverged_is_stuck_untouched
+test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project
