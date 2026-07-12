@@ -61,6 +61,7 @@ If you have changed away from the firstmate home in an interactive shell, invoke
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's PR from its full GitHub URL                  |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require scout reports, retire secondmate homes |
+| `fm-nas-deploy-sync.sh`  | Best-effort, non-fatal fast-forward sync and pm2 restart of a project's live NAS checkout after teardown |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
 | `fm-lock.sh`             | Per-home firstmate session lock                                                      |
 | `fm-x-lib.sh`            | Shared X-mode config, relay, and reply-threading helpers                             |
