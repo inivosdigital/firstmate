@@ -155,6 +155,53 @@ run_sync() {
   FM_HOME="$home" PATH="$home/fakebin:$PATH" "$SYNC" "$@"
 }
 
+# write_git_hung_fetch_stub <fakebin>: any `fetch` call hangs indefinitely
+# (well past FM_NAS_SYNC_TIMEOUT), so only the bounded wrapper's `timeout` kill
+# can make the sync return promptly; every other call delegates to the real git.
+write_git_hung_fetch_stub() {
+  local fakebin=$1 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = fetch ]; then
+    sleep 20
+    exit 0
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# write_git_transient_packed_refs_lock_stub <fakebin> <counter>: fail the FIRST
+# `fetch` with the packed-refs.lock "File exists" signature, then delegate every
+# later call - including the retried fetch - to the real git. Mirrors
+# tests/fm-fleet-sync.test.sh's git_transient_packed_refs_lock, adapted to fake
+# the stderr signature directly since fm-nas-deploy-sync.sh's fetch has no
+# --prune to organically trigger a real packed-refs rewrite.
+write_git_transient_packed_refs_lock_stub() {
+  local fakebin=$1 counter=$2 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+is_fetch=0
+for a in "\$@"; do [ "\$a" = fetch ] && is_fetch=1; done
+if [ "\$is_fetch" = 1 ]; then
+  n=\$(cat "$counter" 2>/dev/null || echo 0); n=\$(( n + 1 ))
+  printf '%s\n' "\$n" > "$counter"
+  if [ "\$n" -eq 1 ]; then
+    echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '.git/packed-refs.lock': File exists." >&2
+    exit 1
+  fi
+fi
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
 # --- tests: standalone script -------------------------------------------------
 
 test_clean_behind_fast_forwards_and_restarts() {
@@ -254,6 +301,51 @@ test_clustered_partial_restart_is_not_masked_online() {
     *"verified online"*) fail "clustered: a lagging cluster instance was masked as fully verified online" ;;
   esac
   pass "a clustered pm2 app with one lagging instance is reported as a restart problem, not masked as online"
+}
+
+test_hung_fetch_is_bounded_by_timeout() {
+  local home nas out rc start elapsed
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP (no timeout/gtimeout binary): hung-fetch timeout bound check"
+    return
+  fi
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" hungfetch-test)
+  advance_origin "$home" hungfetch-test C1
+  write_map "$home" hungfetch-test "$nas" hungfetch-test
+  write_pm2_stub "$home/fakebin" "$home/restart.log"
+  write_git_hung_fetch_stub "$home/fakebin"
+
+  start=$SECONDS
+  set +e
+  out=$(FM_NAS_SYNC_TIMEOUT=1 run_sync "$home" hungfetch-test 2>/dev/null)
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - start ))
+
+  expect_code 0 "$rc" "hung-fetch: sync should still exit 0 when the fetch hangs"
+  [ "$elapsed" -lt 10 ] || fail "hung-fetch: sync took ${elapsed}s - the timeout bound did not stop the hung fetch (stub sleeps 20s)"
+  assert_contains "$out" "hungfetch-test: skipped: fetch failed" "hung-fetch: did not report the bounded fetch as a failure"
+  pass "a hung NAS fetch is killed by FM_NAS_SYNC_TIMEOUT instead of blocking the caller"
+}
+
+test_transient_packed_refs_lock_is_retried() {
+  local home nas out counter err
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" locktrans-test)
+  advance_origin "$home" locktrans-test C1
+  write_map "$home" locktrans-test "$nas" locktrans-test
+  write_pm2_stub "$home/fakebin" "$home/restart.log"
+  counter="$home/git-fetch-count"; : > "$counter"
+  write_git_transient_packed_refs_lock_stub "$home/fakebin" "$counter"
+  err="$home/err-locktrans"
+
+  out=$(FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+    run_sync "$home" locktrans-test 2>"$err")
+
+  assert_contains "$out" "locktrans-test: synced" "transient lock: sync did not complete after the lock self-cleared"
+  assert_grep "cleared on its own" "$err" "transient lock: guard did not report the self-clear"
+  pass "a transient packed-refs.lock signature on the NAS fetch is retried instead of giving up immediately"
 }
 
 test_missing_map_file_is_silent_noop() {
@@ -375,5 +467,7 @@ test_dirty_is_skipped_untouched
 test_diverged_is_stuck_untouched
 test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
+test_hung_fetch_is_bounded_by_timeout
+test_transient_packed_refs_lock_is_retried
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project
