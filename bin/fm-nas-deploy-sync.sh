@@ -161,11 +161,17 @@ if ! merge_output=$(git -C "$NAS_PATH" merge --ff-only "$BASE" 2>&1); then
 fi
 after=$(git -C "$NAS_PATH" rev-parse --short "$DEFAULT")
 
-# process_online <proc>: true when pm2 currently reports <proc> as online.
+# process_online <proc>: true when pm2 currently reports EVERY instance of
+# <proc> as online (a clustered app can register several jlist entries under
+# the same name; one lagging instance must not be masked by the others).
 process_online() {
   local proc=$1 status
   status=$(pm2 jlist 2>/dev/null | jq -r --arg n "$proc" \
-    '[.[] | select(.name == $n) | .pm2_env.status] | .[0] // "missing"' 2>/dev/null) || status="missing"
+    '[.[] | select(.name == $n) | .pm2_env.status] as $s
+     | if ($s | length) == 0 then "missing"
+       elif all($s[]; . == "online") then "online"
+       else "not-online"
+       end' 2>/dev/null) || status="missing"
   [ "$status" = "online" ]
 }
 
