@@ -835,5 +835,14 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
 fi
+# Best-effort, non-blocking: a landed ship task (PR merged, or a local-only merge
+# to local main) may have a live NAS deployment that also needs pulling and
+# restarting - see bin/fm-nas-deploy-sync.sh's header. Scouts and secondmates
+# never land a project change, so they are excluded the same as the fleet-sync
+# call above; unlike that call, local-only IS included here, since a local-only
+# merge is just as much a landed change as a PR merge.
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+  "$FM_ROOT/bin/fm-nas-deploy-sync.sh" "$(basename "$PROJ")" || true
+fi
 echo "teardown $ID complete (window $T, worktree $WT)"
 backlog_refresh_reminder
