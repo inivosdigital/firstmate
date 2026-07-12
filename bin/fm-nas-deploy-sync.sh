@@ -27,6 +27,12 @@
 # an alternate mapping file directly. pm2 is invoked via PATH, so a fakebin shim
 # ahead of it on PATH intercepts restart/list during tests - real tests must never
 # reach the real /mnt/nas/experiments or a real pm2 process.
+#
+# Every filesystem/git touch of $NAS_PATH is wrapped in a bounded timeout
+# (FM_NAS_SYNC_TIMEOUT seconds, default 15): the mount is a NAS, and an
+# unreachable one is a hang risk (a stuck stat/read), not a fast failure, which
+# would otherwise stall fm-teardown.sh's caller and break this script's
+# non-blocking contract.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -34,6 +40,29 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MAP="${FM_NAS_DEPLOYMENTS_OVERRIDE:-$DATA/nas-deployments.md}"
+NAS_SYNC_TIMEOUT="${FM_NAS_SYNC_TIMEOUT:-15}"
+
+HAVE_TIMEOUT=none
+if command -v timeout >/dev/null 2>&1; then
+  HAVE_TIMEOUT=timeout
+elif command -v gtimeout >/dev/null 2>&1; then
+  HAVE_TIMEOUT=gtimeout
+fi
+
+# bounded <args...>: run <args...>, killed after $NAS_SYNC_TIMEOUT seconds when
+# a `timeout`/`gtimeout` binary is available, run directly otherwise.
+bounded() {
+  case "$HAVE_TIMEOUT" in
+    timeout) timeout "$NAS_SYNC_TIMEOUT" "$@" ;;
+    gtimeout) gtimeout "$NAS_SYNC_TIMEOUT" "$@" ;;
+    *) "$@" ;;
+  esac
+}
+
+# git_nas <args...>: git -C "$NAS_PATH" <args...>, bounded.
+git_nas() {
+  bounded git -C "$NAS_PATH" "$@"
+}
 
 usage() {
   echo "usage: fm-nas-deploy-sync.sh <project-name>" >&2
@@ -71,21 +100,21 @@ fi
 NAS_PATH=${row%%|*}
 PROCS=${row#*|}
 
-if [ ! -d "$NAS_PATH" ]; then
+if ! bounded test -d "$NAS_PATH"; then
   echo "$NAME: skipped: NAS path $NAS_PATH not a directory"
   exit 0
 fi
-if ! git -C "$NAS_PATH" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+if ! git_nas rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "$NAME: skipped: $NAS_PATH not a git repo"
   exit 0
 fi
-if ! git -C "$NAS_PATH" remote get-url origin >/dev/null 2>&1; then
+if ! git_nas remote get-url origin >/dev/null 2>&1; then
   echo "$NAME: skipped: no origin remote at $NAS_PATH"
   exit 0
 fi
 
 fetch_output=""
-if ! fetch_output=$(git -C "$NAS_PATH" fetch origin --quiet 2>&1); then
+if ! fetch_output=$(git_nas fetch origin --quiet 2>&1); then
   reason="fetch failed"
   [ -z "$fetch_output" ] || reason="$reason: $(first_line "$fetch_output")"
   echo "$NAME: skipped: $reason"
@@ -94,13 +123,13 @@ fi
 
 default_branch() {
   local ref branch
-  ref=$(git -C "$NAS_PATH" symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
+  ref=$(git_nas symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null || true)
   if [ -n "$ref" ]; then
     echo "${ref#origin/}"
     return 0
   fi
   for branch in main master; do
-    if git -C "$NAS_PATH" show-ref --verify --quiet "refs/heads/$branch"; then
+    if git_nas show-ref --verify --quiet "refs/heads/$branch"; then
       echo "$branch"
       return 0
     fi
@@ -113,14 +142,14 @@ DEFAULT=$(default_branch) || {
   exit 0
 }
 BASE="origin/$DEFAULT"
-if ! git -C "$NAS_PATH" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
+if ! git_nas rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
   echo "$NAME: skipped: $BASE does not exist at $NAS_PATH"
   exit 0
 fi
 
-cur=$(git -C "$NAS_PATH" symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+cur=$(git_nas symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
 dirty=no
-[ -z "$(git -C "$NAS_PATH" status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+[ -z "$(git_nas status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
 
 if [ "$cur" != "$DEFAULT" ]; then
   echo "$NAME: STUCK: NAS checkout at $NAS_PATH is not on $DEFAULT - needs attention"
@@ -132,12 +161,12 @@ if [ "$dirty" = yes ]; then
 fi
 
 local_rev=""
-if ! local_rev=$(git -C "$NAS_PATH" rev-parse --verify --quiet "$DEFAULT"); then
+if ! local_rev=$(git_nas rev-parse --verify --quiet "$DEFAULT"); then
   echo "$NAME: skipped: cannot read local $DEFAULT at $NAS_PATH"
   exit 0
 fi
 remote_rev=""
-if ! remote_rev=$(git -C "$NAS_PATH" rev-parse --verify --quiet "$BASE"); then
+if ! remote_rev=$(git_nas rev-parse --verify --quiet "$BASE"); then
   echo "$NAME: skipped: cannot read $BASE at $NAS_PATH"
   exit 0
 fi
@@ -145,21 +174,21 @@ if [ "$local_rev" = "$remote_rev" ]; then
   echo "$NAME: already current"
   exit 0
 fi
-if ! git -C "$NAS_PATH" merge-base --is-ancestor "$DEFAULT" "$BASE"; then
-  behind=$(git -C "$NAS_PATH" rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
+if ! git_nas merge-base --is-ancestor "$DEFAULT" "$BASE"; then
+  behind=$(git_nas rev-list --count "HEAD..$BASE" 2>/dev/null) || behind="?"
   echo "$NAME: STUCK: NAS checkout at $NAS_PATH diverged from $BASE, $behind commits behind - needs attention"
   exit 0
 fi
 
-before=$(git -C "$NAS_PATH" rev-parse --short "$DEFAULT")
+before=$(git_nas rev-parse --short "$DEFAULT")
 merge_output=""
-if ! merge_output=$(git -C "$NAS_PATH" merge --ff-only "$BASE" 2>&1); then
+if ! merge_output=$(git_nas merge --ff-only "$BASE" 2>&1); then
   reason="fast-forward failed"
   [ -z "$merge_output" ] || reason="$reason: $(first_line "$merge_output")"
   echo "$NAME: skipped: $reason"
   exit 0
 fi
-after=$(git -C "$NAS_PATH" rev-parse --short "$DEFAULT")
+after=$(git_nas rev-parse --short "$DEFAULT")
 
 # process_online <proc>: true when pm2 currently reports EVERY instance of
 # <proc> as online (a clustered app can register several jlist entries under
