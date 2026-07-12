@@ -33,6 +33,15 @@
 # unreachable one is a hang risk (a stuck stat/read), not a fast failure, which
 # would otherwise stall fm-teardown.sh's caller and break this script's
 # non-blocking contract.
+#
+# $NAS_PATH is one single shared live-deployment checkout - unlike a project's
+# projects/<name> dev clone, which is scoped to one firstmate home, two ship
+# tasks for the same project landing moments apart can both reach the SAME
+# NAS checkout from concurrent teardowns. That races the fetch on an orphaned
+# .git/packed-refs.lock exactly like bin/fm-fleet-sync.sh's fetch had to guard
+# against; fetch_with_packed_refs_lock_guard below mirrors that recovery,
+# sharing the staleness proof from bin/fm-lock-lib.sh, bounded by
+# FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES / _RETRY_WAIT_SECS / _AGE_SECS.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,6 +50,19 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MAP="${FM_NAS_DEPLOYMENTS_OVERRIDE:-$DATA/nas-deployments.md}"
 NAS_SYNC_TIMEOUT="${FM_NAS_SYNC_TIMEOUT:-15}"
+# shellcheck source=bin/fm-lock-lib.sh
+. "$SCRIPT_DIR/fm-lock-lib.sh"
+FM_LOCK_LOG_PREFIX=nas-deploy-sync
+
+NAS_SYNC_PACKED_REFS_LOCK_RETRIES=${FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES:-3}
+NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=${FM_NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS:-1}
+NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS=${FM_NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS:-30}
+case "$NAS_SYNC_PACKED_REFS_LOCK_RETRIES" in ''|*[!0-9]*) NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3 ;; esac
+case "$NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS" in ''|*[!0-9]*) NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS=30 ;; esac
+if ! [[ "$NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+  echo "nas-deploy-sync: invalid packed-refs lock retry wait '$NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS'; using 1s" >&2
+  NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=1
+fi
 
 HAVE_TIMEOUT=none
 if command -v timeout >/dev/null 2>&1; then
@@ -79,6 +101,75 @@ first_line() {
   printf '%s\n' "$1" | sed -n '1s/[[:space:]]\{1,\}/ /g;1p'
 }
 
+# True when git stderr shows the packed-refs.lock "File exists" race, mirroring
+# bin/fm-fleet-sync.sh's is_packed_refs_lock_error.
+is_packed_refs_lock_error() {
+  printf '%s\n' "$1" | grep -Eq "Unable to create ['\"].*packed-refs\\.lock['\"]: File exists"
+}
+
+# Absolute path to $NAS_PATH's packed-refs.lock, or empty when it cannot be
+# resolved.
+packed_refs_lock_path() {
+  local lock abs
+  lock=$(git_nas rev-parse --git-path packed-refs.lock 2>/dev/null) || return 1
+  [ -n "$lock" ] || return 1
+  case "$lock" in
+    /*) printf '%s\n' "$lock" ;;
+    *)
+      abs=$(cd "$NAS_PATH" && pwd -P) || return 1
+      printf '%s/%s\n' "$abs" "$lock"
+      ;;
+  esac
+}
+
+# Run `git_nas fetch origin --quiet`, tolerating an orphaned packed-refs.lock
+# left by a second landed-teardown racing this exact NAS checkout. Sets
+# FETCH_OUTPUT and returns the fetch's exit status; mirrors bin/fm-fleet-sync.sh's
+# fetch_with_packed_refs_lock_guard retry-then-provably-stale-clear contract,
+# sharing the staleness proof from bin/fm-lock-lib.sh.
+fetch_with_packed_refs_lock_guard() {
+  local rc attempt=0 lock lock_desc
+  FETCH_OUTPUT=$(git_nas fetch origin --quiet 2>&1); rc=$?
+  [ "$rc" -eq 0 ] && return 0
+  is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
+
+  lock=$(packed_refs_lock_path) || lock=""
+  lock_desc=${lock:-packed-refs.lock}
+  while [ "$attempt" -lt "$NAS_SYNC_PACKED_REFS_LOCK_RETRIES" ]; do
+    attempt=$(( attempt + 1 ))
+    echo "$NAME: fetch blocked by packed-refs lock ($lock_desc) at $NAS_PATH; waiting ${NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${NAS_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
+    sleep "$NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
+    FETCH_OUTPUT=$(git_nas fetch origin --quiet 2>&1); rc=$?
+    if [ "$rc" -eq 0 ]; then
+      echo "$NAME: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
+      return 0
+    fi
+    is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
+  done
+
+  # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
+  lock=$(packed_refs_lock_path) || lock=""
+  if [ -n "$lock" ] && [ -e "$lock" ]; then
+    if fm_lock_is_provably_stale "$lock" "$NAS_PATH" "$NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
+      if ! rm -f "$lock"; then
+        echo "$NAME: failed to remove provably-stale packed-refs lock $lock; leaving it in place" >&2
+        return "$rc"
+      fi
+      echo "$NAME: removed provably-stale packed-refs lock $lock (age >= ${NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
+      FETCH_OUTPUT=$(git_nas fetch origin --quiet 2>&1); rc=$?
+      if [ "$rc" -eq 0 ]; then
+        echo "$NAME: fetch succeeded after stale packed-refs lock cleanup" >&2
+        return 0
+      fi
+      return "$rc"
+    fi
+    echo "$NAME: fetch blocked by packed-refs lock $lock that persisted across ${NAS_SYNC_PACKED_REFS_LOCK_RETRIES} retries and is not provably stale (may belong to a live process); leaving it in place" >&2
+    return "$rc"
+  fi
+  echo "$NAME: fetch packed-refs lock signature persisted across ${NAS_SYNC_PACKED_REFS_LOCK_RETRIES} retries even after the lock file disappeared" >&2
+  return "$rc"
+}
+
 # lookup_row: print "<nas_repo_path>|<pm2_processes>" for $NAME's row in $MAP, or
 # nothing when the file is absent or has no matching row.
 lookup_row() {
@@ -113,10 +204,9 @@ if ! git_nas remote get-url origin >/dev/null 2>&1; then
   exit 0
 fi
 
-fetch_output=""
-if ! fetch_output=$(git_nas fetch origin --quiet 2>&1); then
+if ! fetch_with_packed_refs_lock_guard; then
   reason="fetch failed"
-  [ -z "$fetch_output" ] || reason="$reason: $(first_line "$fetch_output")"
+  [ -z "$FETCH_OUTPUT" ] || reason="$reason: $(first_line "$FETCH_OUTPUT")"
   echo "$NAME: skipped: $reason"
   exit 0
 fi
