@@ -228,6 +228,7 @@ A captain instruction to merge is explicit authority; `yolo` is the only standin
 Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
+Any non-scout, non-secondmate teardown - PR-based or local-only - also best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh` (section 2); a project with no recorded deployment is a silent no-op.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.
