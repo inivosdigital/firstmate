@@ -69,6 +69,15 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Critical service watch (config/critical-services)
+
+`config/critical-services` (local, gitignored) lists systemd unit names, one per non-empty, non-comment line, that firstmate watches for the `failed` state.
+At every session start bootstrap runs `systemctl is-failed` (read-only, no root) on each listed unit and prints `SERVICE_FAILED: <unit> - failed since <timestamp>` for any that are failed, dropping the `failed since` clause when the unit's `StateChangeTimestamp` is unavailable.
+It exists so a silently-failed critical unit, the kind of boot-time oneshot whose failure can otherwise go unnoticed for days, surfaces the next time firstmate starts rather than never.
+An absent or empty file is a no-op, and a host without `systemctl` (no systemd) silently does nothing.
+The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same units.
+See [`examples/critical-services`](examples/critical-services) for a copyable config; report a failed unit to the captain in plain language and never restart it, since a unit that failed may be unsafe to restart without knowing why.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.

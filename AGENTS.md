@@ -80,6 +80,7 @@ config/backlog-backend  backlog backend override; LOCAL, gitignored; absent or "
 config/backend  runtime session-provider backend override for new tasks; LOCAL, gitignored; absent = falls through to runtime auto-detection (the runtime firstmate itself is executing inside), then tmux; tmux is the verified reference backend (docs/tmux-backend.md), while herdr, zellij, orca, and cmux are experimental spawn backends (docs/herdr-backend.md, docs/zellij-backend.md, docs/orca-backend.md, docs/cmux-backend.md) - herdr and cmux can also be selected by runtime auto-detection, zellij and orca never are (always explicit); not inherited into secondmate homes
 config/cmux-socket-password  optional cmux control-socket password; LOCAL, gitignored; read fresh on every cmux CLI call and passed through without ever overriding an operator's own ambient CMUX_SOCKET_PASSWORD when absent (docs/cmux-backend.md "Setup")
 config/x-mode.env    generated X-mode watcher cadence; LOCAL, gitignored; source before arming watcher when present
+config/critical-services  optional systemd unit names to watch for the failed state, one per line, blank lines and full-line "#" comments ignored; LOCAL, gitignored; absent or empty = no-op; each failed unit surfaces as a read-only bootstrap SERVICE_FAILED diagnostic at every session start (section 3); NOT inherited into secondmate homes, whose same-machine bootstrap would only re-check the same units; see docs/examples/critical-services for a copyable sample
 data/                personal fleet records; LOCAL, gitignored as a whole
   backlog.md         task queue, dependencies, history
   captain.md         captain's curated personal preferences and working style; LOCAL, gitignored, and canonical even if harness memory mirrors it
@@ -183,6 +184,7 @@ Otherwise it prints one line per problem or capability fact; handle each:
   This mirrors `/updatefirstmate`'s `nudge-secondmates:` report: it is a gentle steer, never an interruption, and the fast-forward already landed safely.
   A secondmate that was skipped, already current, or whose advance changed no instructions is not listed and must not be disturbed.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts; follow section 14 for watcher cadence restart only when a running watcher needs the transition applied immediately.
+- `SERVICE_FAILED: <unit> - failed since <timestamp>` - a systemd unit named in the optional local `config/critical-services` file is in the failed state; a pure read-only detection (`systemctl is-failed`, no root), so a read-only session still surfaces it. Report it to the captain in plain language; never restart the unit yourself - a unit that failed may be unsafe to restart without knowing why. An absent or empty config file, a host without `systemctl`, or no failed unit all print nothing.
 
 Bootstrap's fleet refresh is bounded by `FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT` seconds, default 20; a timeout is reported as a `FLEET_SYNC` skip and does not block startup.
 
