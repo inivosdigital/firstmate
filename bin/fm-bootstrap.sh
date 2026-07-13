@@ -16,7 +16,8 @@
 #                 "NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>",
 #                 "BOOTSTRAP_INFO: nudged fm-<id> with '<message>'",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: skipped: <reason>|respawn failed: <reason>",
-#                 "FMX: X mode on ..." or "FMX: X mode off ...".
+#                 "FMX: X mode on ..." or "FMX: X mode off ...",
+#                 "SERVICE_FAILED: <unit> - failed since <timestamp>".
 #          When a RUNNING secondmate worktree is fast-forwarded to firstmate's
 #          own current default-branch commit (a purely LOCAL fast-forward, never
 #          an origin fetch) AND its loaded instruction surface (AGENTS.md, bin/,
@@ -57,6 +58,12 @@
 #          X mode is OPTIONAL and inert unless FM_HOME/.env has a non-empty
 #          FMX_PAIRING_TOKEN. When opted in, bootstrap requires curl+jq, writes
 #          the relay poll shim and 30s cadence config, and prints an FMX line.
+#          A SERVICE_FAILED line means a systemd unit named in the optional local
+#          config/critical-services file is in the failed state; it is a pure
+#          read-only detection (systemctl is-failed, no root) so a read-only
+#          session still surfaces it. Absent config file, no systemctl, or no
+#          failed unit all print nothing. The timestamp clause is omitted when
+#          StateChangeTimestamp is unavailable.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
 #          recovered and STUCK clone drift, and prunes gone local branches; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
@@ -729,6 +736,32 @@ crew_dispatch_validate() {
   fi
 }
 
+# Detect critical systemd units in the failed state. Reads one unit name per
+# line from config/critical-services (blank lines and full-line # comments
+# ignored) and prints one SERVICE_FAILED line per failed unit. Pure read-only
+# detection via systemctl is-failed (no root); absent config file, no systemctl,
+# or no failed unit all print nothing.
+critical_services_check() {
+  local file unit ts
+  file="$CONFIG/critical-services"
+  [ -f "$file" ] || return 0
+  command -v systemctl >/dev/null 2>&1 || return 0
+  while IFS= read -r unit || [ -n "$unit" ]; do
+    unit="${unit#"${unit%%[![:space:]]*}"}"
+    unit="${unit%"${unit##*[![:space:]]}"}"
+    [ -n "$unit" ] || continue
+    case "$unit" in '#'*) continue ;; esac
+    if systemctl is-failed --quiet "$unit" >/dev/null 2>&1; then
+      ts=$(systemctl show "$unit" --property=StateChangeTimestamp --value 2>/dev/null || true)
+      if [ -n "$ts" ]; then
+        echo "SERVICE_FAILED: $unit - failed since $ts"
+      else
+        echo "SERVICE_FAILED: $unit - in failed state"
+      fi
+    fi
+  done < "$file"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -799,6 +832,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
   && ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "BOOTSTRAP_INFO: tasks-axi available"
 fi
+critical_services_check
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
