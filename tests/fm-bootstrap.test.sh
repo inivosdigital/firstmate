@@ -786,6 +786,100 @@ ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
 
+# A home whose backlog backend is manual (suppresses TASKS_AXI) with a fully
+# present toolchain and a fake systemctl, so SERVICE_FAILED lines are the only
+# possible bootstrap output. Prints the fakebin path.
+setup_critical_case() {
+  local case_dir=$1 fakebin
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_systemctl "$fakebin"
+  printf '%s\n' "$fakebin"
+}
+
+run_critical_bootstrap() {
+  local home=$1 fakebin=$2 failed=$3 ts=$4
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    FM_FAKE_FAILED_UNITS="$failed" FM_FAKE_SERVICE_TS="$ts" \
+    "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_critical_services_check() {
+  local case_dir home fakebin out ts expect bash_env
+  ts='Wed 2026-07-01 03:14:07 UTC'
+
+  # A failed unit with a StateChangeTimestamp surfaces with the since clause.
+  case_dir="$TMP_ROOT/critical-failed-ts"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  printf '%s\n' 'my-app.service' > "$home/config/critical-services"
+  out=$(run_critical_bootstrap "$home" "$fakebin" 'my-app.service' "$ts")
+  [ "$out" = "SERVICE_FAILED: my-app.service - failed since $ts" ] \
+    || fail "failed unit with timestamp: got: $out"
+
+  # A failed unit with no StateChangeTimestamp drops the since clause.
+  case_dir="$TMP_ROOT/critical-failed-no-ts"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  printf '%s\n' 'my-app.service' > "$home/config/critical-services"
+  out=$(run_critical_bootstrap "$home" "$fakebin" 'my-app.service' '')
+  [ "$out" = "SERVICE_FAILED: my-app.service - in failed state" ] \
+    || fail "failed unit without timestamp: got: $out"
+
+  # A listed unit that is not failed stays silent (also proves is-failed's stdout
+  # is redirected: the fake would otherwise leak 'inactive' into the output).
+  case_dir="$TMP_ROOT/critical-not-failed"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  printf '%s\n' 'my-app.service' > "$home/config/critical-services"
+  out=$(run_critical_bootstrap "$home" "$fakebin" 'other.service' "$ts")
+  [ -z "$out" ] || fail "not-failed unit should be silent, got: $out"
+
+  # Blank lines and full-line '#' comments are ignored, whitespace is trimmed,
+  # and only the listed units are reported, in file order.
+  case_dir="$TMP_ROOT/critical-comments"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  printf '%s\n' '# critical units' '' '  spaced.service  ' 'ok.timer' '#skip.service' 'down.service' \
+    > "$home/config/critical-services"
+  out=$(run_critical_bootstrap "$home" "$fakebin" 'spaced.service down.service' "$ts")
+  expect=$'SERVICE_FAILED: spaced.service - failed since '"$ts"$'\nSERVICE_FAILED: down.service - failed since '"$ts"
+  [ "$out" = "$expect" ] || fail "comment/whitespace handling: got: $out"
+
+  # An absent config file is a no-op even with systemctl present.
+  case_dir="$TMP_ROOT/critical-absent"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  out=$(run_critical_bootstrap "$home" "$fakebin" 'my-app.service' "$ts")
+  [ -z "$out" ] || fail "absent config should be a no-op, got: $out"
+
+  # Without systemctl on PATH (a non-systemd host) the check is a silent no-op
+  # even when the config lists a unit. Override `command -v systemctl` so the
+  # host's real systemctl cannot satisfy the guard.
+  case_dir="$TMP_ROOT/critical-no-systemctl"
+  home="$case_dir/home"
+  fakebin=$(setup_critical_case "$case_dir")
+  rm -f "$fakebin/systemctl"
+  printf '%s\n' 'my-app.service' > "$home/config/critical-services"
+  bash_env="$case_dir/no-systemctl.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = systemctl ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_FAILED_UNITS='my-app.service' FM_FAKE_SERVICE_TS="$ts" \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "no systemctl should be a silent no-op, got: $out"
+
+  pass "bootstrap surfaces failed critical services and stays silent otherwise"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_git_is_required_with_supported_install_instruction
@@ -807,3 +901,4 @@ test_routine_bootstrap_contract_runs_under_system_bash
 test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
+test_critical_services_check
