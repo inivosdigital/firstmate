@@ -1,0 +1,19 @@
+# config/critical-services - systemd units firstmate watches for the failed
+# state (bin/fm-bootstrap.sh's critical_services_check). Copy this into a local,
+# gitignored config/critical-services and replace the placeholders with your own
+# unit names. One systemd unit name per non-empty, non-comment line; blank lines
+# and full-line "#" comments are ignored.
+#
+# At every session start, firstmate runs `systemctl is-failed` (read-only, no
+# root) on each listed unit and surfaces a SERVICE_FAILED line for any that are
+# failed, then reports it to the captain in plain language. It never restarts a
+# unit: a unit that failed may be unsafe to restart without knowing why.
+#
+# An ABSENT or empty config/critical-services is a no-op. On a host without
+# systemd (no systemctl) the check silently does nothing.
+#
+# The names below are illustrative placeholders - list the units whose silent
+# failure would actually matter on this machine (the oneshot that runs a
+# production app at boot, a backup timer, a sync daemon, and so on).
+my-app.service
+nightly-backup.timer
