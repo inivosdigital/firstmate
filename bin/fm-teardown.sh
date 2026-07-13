@@ -274,13 +274,52 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
+# Does this git's `merge-tree` support the `--write-tree` form (git 2.38+)? The
+# older 3-arg `merge-tree <base> <b1> <b2>` treats `--write-tree` as a revision
+# and aborts, so merged_tree_of needs a portable fallback on older hosts.
+merge_tree_has_write_tree() {
+  local help
+  help=$(git -C "$WT" merge-tree -h 2>&1 || true)
+  printf '%s\n' "$help" | grep -q -- '--write-tree'
+}
+
+# Emit the tree OID from a 3-way merge of the default ref with HEAD, using git's
+# automatic merge base. When HEAD introduces nothing the default ref does not
+# already contain, that tree equals the default ref's own tree. Prefers
+# `merge-tree --write-tree` (git 2.38+); on older git it performs the same
+# trivial merge into a throwaway index with read-tree/write-tree, which yields
+# the identical tree when the merge is conflict-free and fails (write-tree
+# refuses unmerged entries) on a real conflict. Non-zero with no output on any
+# conflict or error, so the caller stays conservative and refuses.
+merged_tree_of() {
+  local ref=$1 out base tmpdir
+  if merge_tree_has_write_tree; then
+    out=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
+    printf '%s\n' "$out" | head -1
+    return 0
+  fi
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  [ -n "$base" ] || return 1
+  tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-merge.XXXXXX") || return 1
+  # Point at a fresh, non-existent index path inside the temp dir: git rejects a
+  # pre-created zero-byte index file, and this never touches the worktree index.
+  if GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" read-tree -m --aggressive "$base" "$ref" HEAD 2>/dev/null; then
+    out=$(GIT_INDEX_FILE="$tmpdir/index" git -C "$WT" write-tree 2>/dev/null) || out=""
+  else
+    out=""
+  fi
+  rm -rf "$tmpdir"
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
-# first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
-# the default branch does not already contain (e.g. its change landed via squash) the
-# merged tree equals the default branch's tree. This isolates branch-only changes, so
-# unrelated commits the default branch gained past the merge-base do not count as
-# "added". Returns non-zero when inconclusive (no default ref, or a merge conflict),
-# so the caller refuses rather than guesses.
+# first, then 3-way merges the default branch with HEAD via merged_tree_of: when
+# HEAD introduces nothing the default branch does not already contain (e.g. its
+# change landed via squash) the merged tree equals the default branch's tree. This
+# isolates branch-only changes, so unrelated commits the default branch gained past
+# the merge-base do not count as "added". Returns non-zero when inconclusive (no
+# default ref, or a merge conflict), so the caller refuses rather than guesses.
 content_in_default() {
   local name ref default_tree merged_tree
   name=$(default_branch) || return 1
@@ -294,8 +333,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  merged_tree=$(merged_tree_of "$ref") || return 1
   [ "$merged_tree" = "$default_tree" ]
 }
 

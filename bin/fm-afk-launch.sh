@@ -595,10 +595,20 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Arm the cleanup traps BEFORE creating the lock, not after acquiring it. The
+  # acquire path spends tens of ms computing the pid-identity while the lock dir
+  # already exists; a TERM in that window would otherwise kill the process with
+  # no EXIT trap and orphan the lock. Release safely no-ops on a foreign or
+  # not-yet-owned lock (it removes only a lock whose pid file names us), so
+  # arming before acquire never touches another launcher's lock, and the acquire
+  # loop reclaims any incomplete lock left by the sub-millisecond mkdir->pid gap.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if ! fm_afk_launch_lock_acquire; then
+    trap - EXIT INT TERM
+    return 1
+  fi
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;

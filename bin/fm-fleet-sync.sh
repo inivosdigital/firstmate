@@ -162,7 +162,11 @@ packed_refs_lock_path() {
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
   FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-  [ "$rc" -eq 0 ] && return 0
+  # Older git (e.g. 2.34) exits 0 from `fetch --prune` even when a packed-refs.lock
+  # blocked pruning a deleted ref - the failure surfaces only on stderr. So the lock
+  # signature, not the exit status, decides whether recovery is needed. With no
+  # signature the exit status is the whole story: 0 is success, non-zero an
+  # unrelated failure the caller should see.
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
   lock=$(packed_refs_lock_path) || lock=""
@@ -172,14 +176,18 @@ fetch_with_packed_refs_lock_guard() {
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
     FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-    if [ "$rc" -eq 0 ]; then
-      echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
-      # One stdout summary so a session-start refresh (which discards fleet-sync
-      # stderr and relays only stdout) still surfaces the recovery.
-      echo "$label: recovered: packed-refs lock cleared on its own during retry"
-      return 0
+    if ! is_packed_refs_lock_error "$FETCH_OUTPUT"; then
+      # Lock signature gone: the fetch is no longer blocked by it. Judge by the
+      # signature, not the exit status, since older git exits 0 even while blocked.
+      if [ "$rc" -eq 0 ]; then
+        echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
+        # One stdout summary so a session-start refresh (which discards fleet-sync
+        # stderr and relays only stdout) still surfaces the recovery.
+        echo "$label: recovered: packed-refs lock cleared on its own during retry"
+        return 0
+      fi
+      return "$rc"
     fi
-    is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
   done
 
   # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
@@ -187,27 +195,33 @@ fetch_with_packed_refs_lock_guard() {
   # keeps its cwd there even in the narrow window after it closes packed-refs.lock
   # and before it exits, so lsof on $PROJ still catches a holder the lock-file check
   # alone would miss.
+  # Every give-up path below is reached only with the lock signature still
+  # blocking the prune, so the fetch did NOT fully succeed. Return a definite
+  # non-zero rather than $rc: older git reports 0 even while the lock blocks it,
+  # and $rc here would falsely read as success (the caller would report "synced"
+  # for a clone whose prune silently failed). On modern git $rc was already
+  # non-zero at these points, so this is equivalent there.
   lock=$(packed_refs_lock_path) || lock=""
   if [ -n "$lock" ] && [ -e "$lock" ]; then
     if fm_lock_is_provably_stale "$lock" "$PROJ" "$FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
       if ! rm -f "$lock"; then
         echo "$label: failed to remove provably-stale packed-refs lock $lock; leaving it in place" >&2
-        return "$rc"
+        return 1
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
       FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
-      if [ "$rc" -eq 0 ]; then
+      if [ "$rc" -eq 0 ] && ! is_packed_refs_lock_error "$FETCH_OUTPUT"; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"
         return 0
       fi
-      return "$rc"
+      return 1
     fi
     echo "$label: fetch blocked by packed-refs lock $lock that persisted across ${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES} retries and is not provably stale (may belong to a live process); leaving it in place" >&2
-    return "$rc"
+    return 1
   fi
   echo "$label: fetch packed-refs lock signature persisted across ${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES} retries even after the lock file disappeared" >&2
-  return "$rc"
+  return 1
 }
 
 prune_gone_branches() {
