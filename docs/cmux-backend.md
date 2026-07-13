@@ -219,6 +219,9 @@ The moment a single `send` actually writes to that same surface, `read-screen` b
 This ruled out `read-screen` as the liveness/readiness probe: the very first `send_literal` call on a freshly created task's surface would fail its own pre-flight readiness check before ever getting to write anything, making every task un-spawnable.
 `cmux list-panes --workspace <id> --json --id-format uuids`, checking the target surface id appears in `.panes[].surface_ids`, has no such gap - verified correct and immediate on a completely untouched fresh surface - so `fm_backend_cmux_target_ready` uses that instead, mirroring zellij's own structural `pane_exists` check rather than Orca's read-based liveness pattern.
 
+**jq 1.6 quirk in that same check:** `jq -e` over EMPTY input exits 0 on jq 1.6 (jq 1.7+ exits non-zero), so piping a failed or empty `list-panes` straight into `jq -e` could falsely report the surface exists on an older jq.
+`fm_backend_cmux_surface_exists` guards `list-panes`'s own exit status and non-empty output before piping into `jq`, matching `fm_backend_cmux_capture`'s own capture idiom, so the check is correct on every jq version.
+
 ## Worktree-path discovery: `current_directory` does not track a subshell (zellij-shape, not herdr-shape)
 
 Verified live, step by step, mirroring the exact test that caught this for zellij:

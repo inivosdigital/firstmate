@@ -150,15 +150,21 @@ packed_refs_lock_path() {
 
 # Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
 # packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
-# command's combined output and returns its exit status. On the packed-refs.lock
+# command's combined output. Returns 0 on success (including a recovered lock);
+# whether a failure is lock-related is judged from the packed-refs.lock signature
+# in FETCH_OUTPUT, never the raw fetch exit status - older git (e.g. 2.34) exits 0
+# from `fetch --prune` even while the lock blocked a prune. When no lock signature
+# is present, the raw fetch exit status is returned as-is. On the packed-refs.lock
 # signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
 # transient lock self-clears as the owning process exits), then - only if the lock
 # is provably stale per fm-lock-lib.sh (still present, mtime age past the
 # threshold, no lsof holder of the lock or the clone worktree $PROJ) - remove it
-# and retry once more. A live lock, an unprovable one, or any other failure keeps
-# today's behavior. Every wait, retry, and removal prints to stderr, and a
-# successful recovery also prints one "$label: recovered: ..." summary to stdout so
-# a session-start refresh (which discards fleet-sync stderr) still surfaces it.
+# and retry once more. A live lock, an unprovable one, or any give-up path still
+# blocked by the lock signature returns a definite 1 rather than the raw fetch
+# exit status, so a clone whose prune silently failed is never misreported as
+# synced. Every wait, retry, and removal prints to stderr, and a successful
+# recovery also prints one "$label: recovered: ..." summary to stdout so a
+# session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
   FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
