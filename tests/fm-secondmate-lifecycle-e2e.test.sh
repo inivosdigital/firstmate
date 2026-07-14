@@ -24,7 +24,7 @@
 #   - teardown removes meta and the registry route only after removing the home
 set -u
 
-# shellcheck source=tests/secondmate-helpers.sh
+# shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)
@@ -216,10 +216,13 @@ phase_recovery() {
 }
 
 phase_teardown() {
+  local teardown_out
   : > "$LOG"
-  PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
-    "$ROOT/bin/fm-teardown.sh" design >/dev/null 2>&1 \
+  teardown_out=$(PATH="$FAKEBIN:$PATH" FM_HOME="$HOME_DIR" FM_FAKE_TMUX_LOG="$LOG" FM_FAKE_TMUX_CAPTURE="$PANE" \
+    "$ROOT/bin/fm-teardown.sh" design 2>&1) \
     || fail "teardown failed for the empty secondmate home"
+  printf '%s\n' "$teardown_out" | grep -F 'Backlog:' >/dev/null \
+    && fail "secondmate teardown emitted a main-backlog completion reminder"
   assert_absent "$SUB" "teardown did not remove the retired secondmate home"
   assert_absent "$HOME_DIR/state/design.meta" "teardown did not clear the parent meta"
   assert_no_grep '- design ' "$HOME_DIR/data/secondmates.md" "teardown did not remove the registry route"

@@ -83,8 +83,8 @@
 #     target. Mitigated: send/capture/cwd ops verify session liveness first
 #     (fm_backend_zellij_session_exists, a passive list-sessions query, never
 #     auto-creating), verify the specific pane still appears in list-panes JSON,
-#     and, for metadata-routed fm-<id> operations, verify the pane's tab still
-#     matches the expected caller-facing task label through the home-scoped or
+#     and, for metadata-routed task selector operations, verify the pane's tab
+#     still matches the expected caller-facing task label through the home-scoped or
 #     unambiguous legacy title before use. Kill verifies the session and, when
 #     teardown supplies an expected tab label, verifies a tab id still matches
 #     that label before closing it. Output-SHAPE validation (a bare integer tab
@@ -101,8 +101,9 @@
 #     `close-tab-by-id`, which verified cleanly removes a live tab (pane and
 #     all) in one call - never a separate close-pane first.
 #
-# Requires: zellij (CLI), jq (JSON parsing). Both are gated behind selecting
-# this backend; bin/fm-bootstrap.sh's core tool list is unaffected.
+# Requires: zellij (CLI), jq (JSON parsing). Bootstrap detects these through
+# fm_backend_required_tools only when zellij is the resolved backend; this
+# adapter also gates them again before spawning.
 
 # FM_HOME fallback: every real caller already sets FM_HOME as a global before
 # sourcing fm-backend.sh (which sources this file); this exists only so this
@@ -491,8 +492,9 @@ fm_backend_zellij_capture() {  # <target> <lines> [expected-label]
 # fm_backend_zellij_send_text_submit: type <text> into <target> once (raw,
 # unsubmitted, via send_literal), then submit with a named Enter key, retried
 # (Enter only, never retyped) until the pane visibly changes. Unlike herdr's
-# current structural composer-row verifier, zellij still uses a content-diff
-# strategy because its CLI has no cursor-row/ANSI capture primitive exposed:
+# current native agent-state idle-baseline verifier and composer-state
+# fallback, zellij still uses a content-diff strategy because its CLI has no
+# cursor-row/ANSI capture primitive exposed:
 # capture the pane right after typing (before any Enter) as the TYPED baseline,
 # then after each Enter attempt capture again - unchanged means Enter was
 # swallowed (retry); changed means submitted. This content-diff approach is
@@ -594,8 +596,8 @@ fm_backend_zellij_list_live() {  # <session>
 # posture. Rare path in practice (zellij tasks normally carry meta);
 # best-effort. Not wired into fm_backend_resolve_selector's dispatcher
 # (bin/fm-backend.sh), mirroring herdr: that bare-selector fallback stays
-# tmux-only by design, and zellij/herdr tasks are targeted via fm-<id> meta or
-# an explicit recorded target.
+# tmux-only by design, and zellij/herdr tasks are targeted via task-selector
+# meta or an explicit recorded target.
 fm_backend_zellij_resolve_bare_selector() {  # <name>
   local name=$1 scoped sessions session tabs tab_id count=0 pane_id bare_session='' bare_tab_id=''
   scoped=$(fm_backend_zellij_scoped_title "$name")
