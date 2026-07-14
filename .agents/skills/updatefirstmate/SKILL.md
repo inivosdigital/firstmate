@@ -18,6 +18,9 @@ It never forces, never creates a merge commit, never stashes, and advances a tar
 A tracked-files fast-forward leaves the gitignored operational dirs (data/, state/, config/, projects/, .no-mistakes/) untouched, so a secondmate's in-flight work is never disrupted.
 This touches only the firstmate repo and its own worktrees, never anything under `projects/`.
 
+Post-swap, this pull follows `origin`, which is the captain's fork, so `/updatefirstmate` converges the whole fleet onto that fork and does nothing on the primary checkout, which is itself the source every fork tracks.
+It deliberately never reaches for the read-only `upstream` template: folding template improvements into local `main` is a separate, reviewed reconciliation ship task, the one the `UPSTREAM_DRIFT:` bootstrap diagnostic surfaces, and it never rides in on a self-update.
+
 ## What it does
 
 1. **Run the updater:**

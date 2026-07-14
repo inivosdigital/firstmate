@@ -784,6 +784,8 @@ firstmate is its own repo behind the no-mistakes gate, so improvements to `AGENT
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are a running firstmate instruction surface; public `skills/` is tracked for installers and is not loaded by firstmate.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs only fast-forward self-updates of firstmate and registered secondmate homes, re-reads `AGENTS.md` when needed, nudges updated live secondmates, and never touches anything under `projects/`.
+Post-swap, `origin` is the captain's fork, so `/updatefirstmate` only ever converges the fleet onto that fork and is a no-op on the primary checkout, which is itself the fleet's source of truth.
+It never pulls the read-only `upstream` template; folding upstream-template improvements into local `main` is the separate reviewed reconciliation task the `UPSTREAM_DRIFT:` bootstrap line surfaces (section 3), never a self-update.
 
 ## 13. Agent-only reference skills
 
