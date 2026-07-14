@@ -825,8 +825,98 @@ SH
   pass "bootstrap surfaces failed critical services and stays silent otherwise"
 }
 
+# --- UPSTREAM_DRIFT diagnostic -------------------------------------------------
+# The always-on drift report reads firstmate's OWN repo (FM_ROOT) and needs a real
+# git repo with a `main` branch, an `upstream` remote, and a refs/remotes/upstream/main
+# ref - so these cases build one per scenario instead of the fake toolchain's
+# non-git home. It reads the ref WITHOUT fetching, so a dummy upstream URL is fine.
+make_drift_repo() {  # <repo>
+  local repo=$1
+  git init -q -b main "$repo"
+  git -C "$repo" config user.email t@t.test
+  git -C "$repo" config user.name tester
+}
+
+drift_commit() {  # <repo> <msg> [<iso-date>]
+  local repo=$1 msg=$2 date=${3:-}
+  if [ -n "$date" ]; then
+    GIT_AUTHOR_DATE="$date" GIT_COMMITTER_DATE="$date" \
+      git -C "$repo" commit -q --allow-empty -m "$msg"
+  else
+    git -C "$repo" commit -q --allow-empty -m "$msg"
+  fi
+}
+
+# Run bootstrap in detect-only mode (the drift report runs there and never
+# fetches) against a real git FM_ROOT, returning only the UPSTREAM_DRIFT line.
+run_drift_bootstrap() {  # <repo> <fakebin>
+  local repo=$1 fakebin=$2
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_BOOTSTRAP_DETECT_ONLY=1 \
+    "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^UPSTREAM_DRIFT:' || true
+}
+
+test_upstream_drift_report() {
+  local case_dir repo fakebin out base tip i
+
+  # FYI variant: local main ahead, not behind, recent merge-base -> plain report.
+  case_dir="$TMP_ROOT/drift-fyi"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"; make_drift_repo "$repo"
+  drift_commit "$repo" base
+  base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+  git -C "$repo" update-ref refs/remotes/upstream/main "$base"
+  drift_commit "$repo" a1; drift_commit "$repo" a2; drift_commit "$repo" a3
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(run_drift_bootstrap "$repo" "$fakebin")
+  assert_contains "$out" "UPSTREAM_DRIFT: local main is 3 ahead / 0 behind upstream/main" \
+    "FYI drift line reports ahead/behind counts"
+  assert_not_contains "$out" "needs attention" "FYI variant must not escalate"
+
+  # Escalation via a stale merge-base (older than the 10-day threshold).
+  case_dir="$TMP_ROOT/drift-stale"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"; make_drift_repo "$repo"
+  drift_commit "$repo" base "2020-01-01T00:00:00"
+  base=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+  git -C "$repo" update-ref refs/remotes/upstream/main "$base"
+  drift_commit "$repo" recent
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(run_drift_bootstrap "$repo" "$fakebin")
+  assert_contains "$out" "UPSTREAM_DRIFT: this repo's upstream sync needs attention" \
+    "a stale merge-base escalates the wording"
+  assert_contains "$out" "1 ahead" "stale case still reports the ahead count"
+
+  # Escalation via being more than 30 commits behind upstream/main.
+  case_dir="$TMP_ROOT/drift-behind"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"; make_drift_repo "$repo"
+  drift_commit "$repo" base
+  git -C "$repo" checkout -q -b upstream-sim
+  i=1; while [ "$i" -le 31 ]; do drift_commit "$repo" "u$i"; i=$((i + 1)); done
+  tip=$(git -C "$repo" rev-parse HEAD)
+  git -C "$repo" checkout -q main
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+  git -C "$repo" update-ref refs/remotes/upstream/main "$tip"
+  git -C "$repo" branch -q -D upstream-sim
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(run_drift_bootstrap "$repo" "$fakebin")
+  assert_contains "$out" "needs attention" "being far behind upstream escalates the wording"
+  assert_contains "$out" "31 behind" "far-behind case reports the behind count"
+
+  # No upstream remote -> silent no-op (no ref to count against).
+  case_dir="$TMP_ROOT/drift-none"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"; make_drift_repo "$repo"
+  drift_commit "$repo" base
+  fakebin=$(make_fake_toolchain "$case_dir")
+  out=$(run_drift_bootstrap "$repo" "$fakebin")
+  [ -z "$out" ] || fail "no upstream remote must be silent, got: $out"
+
+  pass "bootstrap reports upstream drift (FYI, stale, and far-behind escalations) and stays silent without an upstream"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_upstream_drift_report
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

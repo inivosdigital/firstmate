@@ -30,6 +30,8 @@ Dependency bots are exempt so their automation keeps working, but regular contri
 
 See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/start-here/quick-start/) for the full first-run walkthrough.
 
+Note: a firstmate maintainer's own working copy uses the inverted remote layout - there `origin` is the maintainer's fork and `upstream` is this parent repo - so if you are ever reading such a copy's git config rather than your own fresh clone, expect `origin` and `upstream` swapped from the step 1 layout above.
+
 ## Repo conventions
 
 - This repo is a template for running a firstmate orchestrator agent.
