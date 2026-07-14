@@ -363,6 +363,8 @@ Firstmate's shared instruction surface reaches running homes only after it lands
 Only `AGENTS.md`, `bin/`, and `.agents/skills/` are loaded by a running firstmate; public `skills/` is an installer-facing surface.
 When the captain invokes `/updatefirstmate` or asks to update firstmate, load the `/updatefirstmate` skill.
 It performs guarded fast-forward updates of firstmate and registered secondmate homes, refreshes instructions, and never touches anything under `projects/`.
+Post-swap, `origin` is the captain's fork, so `/updatefirstmate` only ever converges the fleet onto that fork and is a no-op on the primary checkout, which is itself the fleet's source of truth.
+It never pulls the read-only `upstream` template; folding upstream-template improvements into local `main` is the separate reviewed reconciliation task the `UPSTREAM_DRIFT:` bootstrap line surfaces (section 3), never a self-update.
 
 ## 13. Agent-only reference skills
 
