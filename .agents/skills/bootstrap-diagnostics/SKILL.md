@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, FMX, or SERVICE_FAILED - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -50,3 +50,9 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `SERVICE_FAILED: <unit> - failed since <timestamp>` - a systemd unit named in the optional local `config/critical-services` file is in the failed state; a pure read-only detection (`systemctl is-failed`, no root), so a read-only session still surfaces it.
   Report it to the captain in plain language; never restart the unit yourself - a unit that failed may be unsafe to restart without knowing why.
   An absent or empty config file, a host without `systemctl`, or no failed unit all print nothing.
+- `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)` - the always-on FYI variant: firstmate's OWN repo tracking how far it has drifted from its read-only upstream template (`kunchenguid/firstmate`, the `upstream` remote after the remote swap).
+  It prints every session; record it silently like any capability fact and take no action while the wording stays FYI.
+  It only reports - the network fetch that refreshes the ref runs in the locked fleet-sync sweep, and reconciling upstream is never a bootstrap side effect.
+- `UPSTREAM_DRIFT: this repo's upstream sync needs attention - ...` - the escalated variant (local main more than ~30 commits behind `upstream/main`, or the merge-base older than 10 days).
+  Surface it to the captain in plain outcome language and, on their go-ahead, dispatch a deliberately-reviewed firstmate-repo reconciliation ship task - fetch `upstream`, merge it into local `main`, resolve conflicts, and land local-only (`AGENTS.md` section 1) - the same shape that reconciled the divergence before.
+  Never automate the merge; keeping the gap small also keeps the pipeline's opportunistic upstream PR's diff clean (`AGENTS.md` section 1).

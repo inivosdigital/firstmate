@@ -15,7 +15,9 @@
 #                 "NUDGE_SECONDMATES: fm-<id>...",
 #                 "SECONDMATE_LIVENESS: secondmate <id>: already-live|respawned|skipped: <reason>|respawn failed: <reason>",
 #                 "FMX: X mode on ..." or "FMX: X mode off ...",
-#                 "SERVICE_FAILED: <unit> - failed since <timestamp>".
+#                 "SERVICE_FAILED: <unit> - failed since <timestamp>",
+#                 "UPSTREAM_DRIFT: local main <ahead> ahead / <behind> behind
+#                 upstream/main ... (needs-attention wording when far behind or stale)".
 #          A NUDGE_SECONDMATES line lists the RUNNING secondmate task selectors
 #          (fm-<id>) whose worktree was fast-forwarded to firstmate's own
 #          current default-branch commit (a purely LOCAL fast-forward, never an
@@ -63,8 +65,24 @@
 #          session still surfaces it. Absent config file, no systemctl, or no
 #          failed unit all print nothing. The timestamp clause is omitted when
 #          StateChangeTimestamp is unavailable.
+#          An UPSTREAM_DRIFT line reports, every session, how far firstmate's OWN
+#          local main and its read-only upstream template (upstream/main after the
+#          remote swap; kunchenguid/firstmate) have diverged in both directions,
+#          plus days since their last shared merge-base. It reads whatever
+#          refs/remotes/upstream/main currently holds and NEVER fetches, so it
+#          prints in the read-only/no-lock path too; the network fetch that
+#          refreshes that ref runs only in the locked mutating fleet-sync sweep
+#          below (bounded by FM_UPSTREAM_FETCH_TIMEOUT, default 20s). The wording
+#          escalates from a plain FYI to "this repo's upstream sync needs
+#          attention" once local main is more than 30 commits behind upstream/main
+#          or the merge-base is older than 10 days. It only REPORTS; reconciling
+#          upstream is always a deliberately dispatched, reviewed ship task, never
+#          automated. No-op when there is no upstream remote or no upstream/main
+#          ref yet.
 #          Fleet sync fetches, fast-forwards safe default-branch states, reports
-#          recovered and STUCK clone drift, and prunes gone local branches; it is
+#          recovered and STUCK clone drift, and prunes gone local branches, and it
+#          also refreshes firstmate's own upstream template for the UPSTREAM_DRIFT
+#          report above; it is
 #          bounded by FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT when it is a non-empty
 #          numeric override, while non-numeric values fall back to 20s.
 #          When the override is unset or blank, the timeout is
@@ -155,7 +173,71 @@ fleet_sync_relay_all_output() {
   done < "$tmp"
 }
 
+# Upstream-drift diagnostic for firstmate's OWN repo (both halves defined here).
+# firstmate's upstream template (upstream/main after the remote swap;
+# kunchenguid/firstmate) is read-only to this fleet - it can never be pushed or
+# merged from here - so local main and upstream/main drift apart silently over
+# time, and firstmate-repo ship tasks land local-only instead (AGENTS.md prime
+# directives). The report reads whatever refs/remotes/upstream/main currently
+# holds WITHOUT fetching, so it is safe in the read-only/no-lock detect path; the
+# fetch runs only in the locked fleet-sync sweep. It only REPORTS - reconciling
+# upstream stays a deliberately dispatched, reviewed ship task, never automated.
+UPSTREAM_DRIFT_BEHIND_MAX=30
+UPSTREAM_DRIFT_DAYS_MAX=10
+
+# Count-and-report half: unconditional (detect section), no network. Prints one
+# FYI line every session with how far local main is ahead/behind upstream/main and
+# days since their merge-base, escalating the wording to "needs attention" once
+# local main is more than UPSTREAM_DRIFT_BEHIND_MAX commits behind OR the
+# merge-base is older than UPSTREAM_DRIFT_DAYS_MAX days. No-op without an upstream
+# remote, an upstream/main ref, or a local main.
+upstream_drift_report() {
+  local behind ahead base="" base_ct="" base_date="unknown" now="" days="?" attention=0
+  git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
+  git -C "$FM_ROOT" rev-parse --verify --quiet refs/remotes/upstream/main >/dev/null 2>&1 || return 0
+  git -C "$FM_ROOT" rev-parse --verify --quiet refs/heads/main >/dev/null 2>&1 || return 0
+  behind=$(git -C "$FM_ROOT" rev-list --count main..upstream/main 2>/dev/null) || return 0
+  ahead=$(git -C "$FM_ROOT" rev-list --count upstream/main..main 2>/dev/null) || return 0
+  base=$(git -C "$FM_ROOT" merge-base main upstream/main 2>/dev/null || true)
+  if [ -n "$base" ]; then
+    base_date=$(git -C "$FM_ROOT" log -1 --format=%cd --date=short "$base" 2>/dev/null || echo unknown)
+    base_ct=$(git -C "$FM_ROOT" log -1 --format=%ct "$base" 2>/dev/null || true)
+    now=$(date +%s 2>/dev/null || true)
+    if [ -n "$base_ct" ] && [ -n "$now" ]; then
+      days=$(( (now - base_ct) / 86400 ))
+    fi
+  fi
+  case "$behind" in ''|*[!0-9]*) ;; *) [ "$behind" -gt "$UPSTREAM_DRIFT_BEHIND_MAX" ] && attention=1 ;; esac
+  case "$days" in ''|*[!0-9]*) ;; *) [ "$days" -gt "$UPSTREAM_DRIFT_DAYS_MAX" ] && attention=1 ;; esac
+  if [ "$attention" -eq 1 ]; then
+    echo "UPSTREAM_DRIFT: this repo's upstream sync needs attention - local main is $behind behind / $ahead ahead of upstream/main, last reconciled ${days}d ago ($base_date); dispatch a reviewed reconciliation ship task"
+  else
+    echo "UPSTREAM_DRIFT: local main is $ahead ahead / $behind behind upstream/main, last reconciled ${days}d ago ($base_date)"
+  fi
+}
+
+# Fetch half: MUTATING/network, called only from fleet_sync (the locked sweep), so
+# the detect-only/read-only path never fetches. Best-effort and bounded - offline,
+# a transient failure, or a stalled connection just leaves the last-fetched ref in
+# place, and timeout (when available) caps a stall so session start never hangs.
+# No-op without an upstream remote.
+upstream_drift_fetch() {
+  git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+  else
+    git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+  fi
+}
+
 fleet_sync() {
+  # Refresh firstmate's own read-only upstream template first, independent of the
+  # project-clone sync below (so it runs even with no clones present). This is the
+  # mutating/network half of the UPSTREAM_DRIFT diagnostic; upstream_drift_report
+  # in the detect section never fetches, keeping that report safe in the
+  # read-only detect-only path.
+  upstream_drift_fetch
+
   [ -x "$FM_ROOT/bin/fm-fleet-sync.sh" ] || return 0
   [ -d "$PROJECTS" ] || return 0
 
@@ -665,6 +747,7 @@ if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
 critical_services_check
+upstream_drift_report
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync
   secondmate_liveness_sweep
