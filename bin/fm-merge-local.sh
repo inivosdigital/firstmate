@@ -66,3 +66,20 @@ before=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 git -C "$PROJ" merge --ff-only "$BRANCH" >/dev/null
 after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
+
+# Keep a push-backed default branch synced with the merge that just landed, so
+# the remote never silently drifts behind local main. This is what keeps
+# firstmate's own fork alive after the remote swap that made origin the captain's
+# fork (AGENTS.md prime directives note on the firstmate repo's local-only
+# landing pattern). Best-effort by design: the local fast-forward above is the
+# operation that matters, so a push failure (offline, transient network, or a
+# non-fast-forward rejection) is reported but never fails the merge. A pure
+# local-only project with no origin remote has nowhere to push and is skipped
+# silently - not every local-only project is remote-backed.
+if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+  if git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1; then
+    echo "pushed $DEFAULT to origin in $PROJ"
+  else
+    echo "warning: local $DEFAULT merged, but syncing it to origin failed in $PROJ (best-effort; merge succeeded)" >&2
+  fi
+fi
