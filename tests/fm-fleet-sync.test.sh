@@ -181,6 +181,26 @@ SH
   chmod +x "$1/git"
 }
 
+# git shim: while a planted packed-refs.lock exists, fail fetch with Git's lock
+# signature. Once the guard removes the stale lock, delegate to real git.
+git_packed_refs_lock_until_removed() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+dir=; is_fetch=0
+for a in "$@"; do [ "$a" = fetch ] && is_fetch=1; done
+prev=
+for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
+if [ "$is_fetch" = 1 ] && [ -n "$dir" ] && [ -e "$dir/.git/packed-refs.lock" ]; then
+  lock="$dir/.git/packed-refs.lock"
+  echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '$lock': File exists." >&2
+  exit 1
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
 # run_sync_guarded <home> <fakebin> <outfile> <errfile> [args...]: run fleet-sync
 # with the fakebin on PATH and stdout/stderr captured separately. Per-test knobs
 # (FM_FLEET_SYNC_PACKED_REFS_LOCK_*, GIT_FETCH_COUNTER) are read from the caller's
@@ -479,6 +499,7 @@ test_orphaned_stale_packed_refs_lock_recovers() {
   clone=$(build_packed_prunable "$home" lockstale)
   plant_packed_refs_lock "$clone"
   lsof_no_holder "$fakebin"           # provably no live holder
+  git_packed_refs_lock_until_removed "$fakebin"
   out="$home/out-lockstale"; err="$home/err-lockstale"
 
   set +e
@@ -508,6 +529,7 @@ test_live_packed_refs_lock_is_never_removed() {
   clone=$(build_packed_prunable "$home" locklive)
   plant_packed_refs_lock "$clone"
   lsof_live_holder "$fakebin"         # a live process holds the lock/.git open
+  git_packed_refs_lock_until_removed "$fakebin"
   before=$(head_sha "$clone")
   out="$home/out-locklive"; err="$home/err-locklive"
 
@@ -533,6 +555,7 @@ test_live_git_cwd_in_clone_dir_blocks_removal() {
   fakebin="$home/fb-lockcwd"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" lockcwd)
   plant_packed_refs_lock "$clone"
+  git_packed_refs_lock_until_removed "$fakebin"
   # Nobody holds the lock file, but a live process holds the clone worktree as its
   # cwd - the narrow race where git closed packed-refs.lock but has not yet exited.
   lsof_holds_only_live_dir "$fakebin"

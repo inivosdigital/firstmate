@@ -67,6 +67,8 @@ set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
 
+fm_afk_launch_lock_created_by_us=0
+
 fm_afk_launch_lock_owned() {
   local pid expected actual
   [ -d "$FM_AFK_LAUNCH_LOCK" ] || return 1
@@ -81,16 +83,20 @@ fm_afk_launch_lock_acquire() {
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   for i in $(seq 1 200); do
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+      fm_afk_launch_lock_created_by_us=1
       if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        fm_afk_launch_lock_created_by_us=0
         return 1
       fi
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        fm_afk_launch_lock_created_by_us=0
         return 1
       }
       if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        fm_afk_launch_lock_created_by_us=0
         return 1
       fi
       return 0
@@ -120,6 +126,22 @@ fm_afk_launch_lock_release() {
   pid=$(cat "$FM_AFK_LAUNCH_LOCK/pid" 2>/dev/null || true)
   [ "$pid" = "$$" ] || return 0
   rm -rf "$FM_AFK_LAUNCH_LOCK"
+  fm_afk_launch_lock_created_by_us=0
+}
+
+fm_afk_launch_signal_exit() {
+  local code=$1
+  if [ -n "${child:-}" ]; then
+    kill -TERM "$child" 2>/dev/null || true
+  fi
+  if [ "${fm_afk_launch_lock_created_by_us:-0}" = 1 ]; then
+    rm -rf "$FM_AFK_LAUNCH_LOCK"
+    fm_afk_launch_lock_created_by_us=0
+  else
+    fm_afk_launch_lock_release
+  fi
+  trap - EXIT INT TERM
+  exit "$code"
 }
 
 fm_afk_launch_usage() {
@@ -602,20 +624,29 @@ fm_afk_launch_stop() {
 }
 
 fm_afk_launch_main() {
-  local result
-  fm_afk_launch_lock_acquire || return 1
+  local result child
+  child=
+  trap 'fm_afk_launch_signal_exit 130' INT
+  trap 'fm_afk_launch_signal_exit 143' TERM
+  if ! fm_afk_launch_lock_acquire; then
+    trap - INT TERM
+    return 1
+  fi
   trap fm_afk_launch_lock_release EXIT
-  trap 'exit 130' INT
-  trap 'exit 143' TERM
-  case "${1:-start}" in
-    start) fm_afk_launch_start ;;
-    start-native) fm_afk_launch_start_native ;;
-    stop) fm_afk_launch_stop ;;
-    reconcile) fm_afk_launch_reconcile ;;
-    -h|--help|help) fm_afk_launch_usage ;;
-    *) fm_afk_launch_usage >&2; return 2 ;;
-  esac
+  (
+    case "${1:-start}" in
+      start) fm_afk_launch_start ;;
+      start-native) fm_afk_launch_start_native ;;
+      stop) fm_afk_launch_stop ;;
+      reconcile) fm_afk_launch_reconcile ;;
+      -h|--help|help) fm_afk_launch_usage ;;
+      *) fm_afk_launch_usage >&2; exit 2 ;;
+    esac
+  ) &
+  child=$!
+  wait "$child"
   result=$?
+  child=
   fm_afk_launch_lock_release || result=1
   trap - EXIT INT TERM
   return "$result"
