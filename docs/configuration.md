@@ -102,6 +102,24 @@ That keeps a tmux pane nested inside herdr on the tmux transport, matching the r
 Target detection uses `FM_SUPERVISOR_TARGET`, then `$TMUX_PANE`, then `"${HERDR_SESSION:-default}:${HERDR_PANE_ID}"` under herdr, then the legacy `firstmate:0` tmux fallback with a warning.
 Selecting any other supervisor backend, including `zellij`, `orca`, or `cmux`, refuses at daemon startup instead of trying tmux injection primitives against a non-tmux pane.
 
+## Critical service watch (config/critical-services)
+
+`config/critical-services` (local, gitignored) lists systemd unit names, one per non-empty, non-comment line, that firstmate watches for the `failed` state.
+At every session start bootstrap runs `systemctl is-failed` (read-only, no root) on each listed unit and prints `SERVICE_FAILED: <unit> - failed since <timestamp>` for any that are failed, dropping the `failed since` clause when the unit's `StateChangeTimestamp` is unavailable.
+It exists so a silently-failed critical unit, the kind of boot-time oneshot whose failure can otherwise go unnoticed for days, surfaces the next time firstmate starts rather than never.
+An absent or empty file is a no-op, and a host without `systemctl` (no systemd) silently does nothing.
+The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same units.
+See [`examples/critical-services`](examples/critical-services) for a copyable config; report a failed unit to the captain in plain language and never restart it, since a unit that failed may be unsafe to restart without knowing why.
+
+## Upstream drift watch (upstream remote)
+
+For a firstmate maintainer's own working copy, post remote-swap `origin` is the captain's fork and `upstream` is the read-only parent template (`kunchenguid/firstmate`); see [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the inverted layout.
+At every session start bootstrap prints an always-on FYI line, `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)`, computed unconditionally from whatever `refs/remotes/upstream/main` currently holds, without ever fetching in that detect-only path.
+The network fetch that refreshes `upstream/main` runs only in the locked fleet-sync sweep, bounded by `FM_UPSTREAM_FETCH_TIMEOUT` (default 20s); a stalled or offline fetch there just leaves the last-fetched ref in place.
+The wording escalates to `UPSTREAM_DRIFT: this repo's upstream sync needs attention - ...` once local `main` is more than 30 commits behind `upstream/main`, or their merge-base is older than 10 days.
+Either way the line only reports - reconciling upstream (fetch, merge into local `main`, resolve conflicts, land local-only) stays a deliberately dispatched, reviewed ship task, never automated.
+It is a no-op without an `upstream` remote, an `upstream/main` ref, or a local `main` branch.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
@@ -400,6 +418,7 @@ FM_LOCK_STALE_AFTER=2   # seconds before dead-pid lock records can be reclaimed;
 FM_GUARD_GRACE=300      # seconds before guard warnings, arm health checks, and the primary turn-end guard treat a watcher beacon as stale
 FM_ARM_CONFIRM_TIMEOUT=10   # seconds fm-watch-arm waits to confirm a fresh watcher before reporting FAILED
 FM_ARM_ATTACH_POLL=0.5  # seconds between checks while fm-watch-arm is attached to an existing healthy watcher cycle
+FM_TURNEND_ARM_WAIT=    # seconds the turn-end guard polls fm_watcher_healthy before blocking, giving a backgrounded re-arm time to register its lock; unset defaults to FM_ARM_CONFIRM_TIMEOUT (docs/turnend-guard.md "Shared Predicate")
 FM_OPENCODE_ARM_READY_TIMEOUT_MS=12000   # milliseconds the OpenCode primary watcher plugin waits for an arm attempt to report started, healthy, wake, or failure
 FM_PI_ARM_READY_TIMEOUT_MS=12000   # milliseconds the Pi watcher extension waits for a successor arm to report started or attached
 FM_WATCH_ARM_RETIRE_TIMEOUT_MS=1000   # milliseconds Pi/OpenCode wait for an unready successor arm to exit before abandoning retries
@@ -423,6 +442,7 @@ FM_TIER_HEAVY_MIN_FILES=8          # fm-tier-guard.sh: changed-file count that e
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's best-effort `git fetch upstream` behind the UPSTREAM_DRIFT diagnostic; a stall just leaves the last-fetched ref in place
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller
 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-nas-deploy-sync.sh hits the orphaned .git/packed-refs.lock signature on the shared NAS checkout (two landed teardowns for the same project can race it)
