@@ -880,6 +880,84 @@ SH
   pass "bootstrap surfaces failed critical services and stays silent otherwise"
 }
 
+# A home whose backlog backend is manual (suppresses TASKS_AXI) with a fully
+# present toolchain, so AUTODEPLOY_FAILED lines are the only possible bootstrap
+# output. Prints the fakebin path.
+setup_autodeploy_case() {
+  local case_dir=$1 fakebin
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  printf '%s\n' "$fakebin"
+}
+
+run_autodeploy_bootstrap() {
+  local home=$1 fakebin=$2
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_autodeploy_logs_check() {
+  local case_dir home fakebin out log
+
+  # A log whose last line reports failure surfaces with its label and content.
+  case_dir="$TMP_ROOT/autodeploy-failed"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  mkdir -p "$case_dir/logs/beamanalyzer-autodeploy"
+  log="$case_dir/logs/beamanalyzer-autodeploy/status.log"
+  printf '2026-07-15T10:00:00+00:00 ok nas=unchanged prod=unchanged deployed=no\n' > "$log"
+  printf '2026-07-15T10:05:00+00:00 ALERT nas=unchanged prod=unsafe deployed=no\n' >> "$log"
+  printf '%s\n' "$log" > "$home/config/autodeploy-logs"
+  out=$(run_autodeploy_bootstrap "$home" "$fakebin")
+  [ "$out" = "AUTODEPLOY_FAILED: beamanalyzer-autodeploy - 2026-07-15T10:05:00+00:00 ALERT nas=unchanged prod=unsafe deployed=no" ] \
+    || fail "failed log surfaces AUTODEPLOY_FAILED: got: $out"
+
+  # A healthy last line stays silent.
+  case_dir="$TMP_ROOT/autodeploy-healthy"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  mkdir -p "$case_dir/logs/deploy"
+  log="$case_dir/logs/deploy/status.log"
+  printf '2026-07-15T11:00:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' > "$log"
+  printf '2026-07-15T11:05:00+00:00 ok nas=unchanged prod=unchanged deployed=no\n' >> "$log"
+  printf '%s\n' "$log" > "$home/config/autodeploy-logs"
+  out=$(run_autodeploy_bootstrap "$home" "$fakebin")
+  [ -z "$out" ] || fail "healthy last line should be silent, got: $out"
+
+  # A missing or unreadable log path (a NAS mount hiccup) is skipped silently.
+  case_dir="$TMP_ROOT/autodeploy-missing"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  printf '%s\n' "$case_dir/logs/does-not-exist/status.log" > "$home/config/autodeploy-logs"
+  out=$(run_autodeploy_bootstrap "$home" "$fakebin")
+  [ -z "$out" ] || fail "missing log should be silently skipped, got: $out"
+
+  # Blank lines and full-line '#' comments are ignored, whitespace is trimmed,
+  # and only the listed logs are reported, in file order.
+  case_dir="$TMP_ROOT/autodeploy-comments"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  mkdir -p "$case_dir/logs/app-a" "$case_dir/logs/app-b"
+  printf '%s\n' 'STUCK: a has diverged - needs attention' > "$case_dir/logs/app-a/status.log"
+  printf '%s\n' 'deploy: build: FAILED: npm ERR code ELIFECYCLE' > "$case_dir/logs/app-b/status.log"
+  printf '%s\n' '# watched autodeploy logs' '' "  $case_dir/logs/app-a/status.log  " '#skip.log' \
+    "$case_dir/logs/app-b/status.log" > "$home/config/autodeploy-logs"
+  out=$(run_autodeploy_bootstrap "$home" "$fakebin")
+  expect=$'AUTODEPLOY_FAILED: app-a - STUCK: a has diverged - needs attention\nAUTODEPLOY_FAILED: app-b - deploy: build: FAILED: npm ERR code ELIFECYCLE'
+  [ "$out" = "$expect" ] || fail "comment/whitespace handling: got: $out"
+
+  # An absent config file is a no-op.
+  case_dir="$TMP_ROOT/autodeploy-absent"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  out=$(run_autodeploy_bootstrap "$home" "$fakebin")
+  [ -z "$out" ] || fail "absent config should be a no-op, got: $out"
+
+  pass "bootstrap surfaces failed autodeploy logs and stays silent otherwise"
+}
+
 # --- UPSTREAM_DRIFT diagnostic -------------------------------------------------
 # The always-on drift report reads firstmate's OWN repo (FM_ROOT) and needs a real
 # git repo with a `main` branch, an `upstream` remote, and a refs/remotes/upstream/main
@@ -1152,3 +1230,4 @@ test_bootstrap_info_is_no_load_and_actionable_lines_trigger
 test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_critical_services_check
+test_autodeploy_logs_check

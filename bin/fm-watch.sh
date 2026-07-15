@@ -77,6 +77,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-check-lib.sh
 . "$SCRIPT_DIR/fm-check-lib.sh"
+# shellcheck source=bin/fm-autodeploy-lib.sh
+. "$SCRIPT_DIR/fm-autodeploy-lib.sh"
 
 WATCH_LOCK="$STATE/.watch.lock"
 WATCH_PATH="$SCRIPT_DIR/fm-watch.sh"
@@ -569,12 +571,15 @@ mark_all_captain_relevant_surfaced() {
 # autodeploy jobs that write firstmate's fleet-sync STUCK:/FAILED:/ALERT line
 # convention (bin/fm-fleet-sync.sh) to a durable status log, so a deploy failure
 # between sessions surfaces on the periodic sweep instead of waiting for the next
-# session start. Each non-empty, non-"#" line of config/autodeploy-logs names one
-# such status log. The LAST line of each log is the authoritative per-run health:
-# a healthy run ends in an "ok ..." rollup, a failed one in an "ALERT ..." rollup
-# or a STUCK:/FAILED: alert line, so a later successful run self-clears the alarm.
-# Absent config, an unreadable log (a NAS hiccup), or a healthy last line are all
-# silent - the check is cheap and fail-quiet so it can run on every heartbeat.
+# session start. bin/fm-bootstrap.sh's autodeploy_logs_check is the session-start
+# counterpart for whenever no watcher is armed to run this sweep; both share the
+# failure predicate in bin/fm-autodeploy-lib.sh. Each non-empty, non-"#" line of
+# config/autodeploy-logs names one such status log. The LAST line of each log is
+# the authoritative per-run health: a healthy run ends in an "ok ..." rollup, a
+# failed one in an "ALERT ..." rollup or a STUCK:/FAILED: alert line, so a later
+# successful run self-clears the alarm. Absent config, an unreadable log (a NAS
+# hiccup), or a healthy last line are all silent - the check is cheap and
+# fail-quiet so it can run on every heartbeat.
 _autodeploy_marker_path() {  # <log-path> -> per-log surfaced-marker path
   printf '%s/.autodeploy-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
 }
@@ -604,7 +609,7 @@ autodeploy_scan() {
     [ -r "$log" ] || continue                       # missing/unreadable: fail quiet, keep prior state
     last=$(tail -n 1 "$log" 2>/dev/null) || continue
     [ -n "$last" ] || continue
-    if printf '%s' "$last" | grep -Eq 'STUCK:|FAILED:|needs attention|(^|[[:space:]])ALERT([[:space:]]|$)'; then
+    if fm_autodeploy_line_failed "$last"; then
       stripped=$(_autodeploy_strip_ts "$last")
       marker=$(cat "$mfile" 2>/dev/null || true)
       [ "$stripped" = "$marker" ] && continue       # this exact failure already surfaced
