@@ -148,6 +148,26 @@ SH
   chmod +x "$fakebin/pm2"
 }
 
+write_pm2_hung_restart_stub() {
+  local fakebin=$1 log=$2
+  : > "$log"
+  cat > "$fakebin/pm2" <<SH
+#!/usr/bin/env bash
+case "\${1:-}" in
+  restart)
+    sleep 3
+    printf '%s\n' "\$2" >> "$log"
+    exit 0
+    ;;
+  jlist)
+    printf '[]\n'
+    ;;
+  *) exit 0 ;;
+esac
+SH
+  chmod +x "$fakebin/pm2"
+}
+
 # run_sync <home> [args...]: run the sync script against an isolated home.
 run_sync() {
   local home=$1
@@ -171,6 +191,21 @@ run_sync_no_timeout() {
   shift
   toolbin=$(make_no_timeout_toolbin "$home")
   FM_HOME="$home" PATH="$home/fakebin:$toolbin" "$SYNC" "$@"
+}
+
+run_sync_without_tool() {
+  local home=$1 tool=$2 bash_env
+  shift 2
+  bash_env="$home/no-$tool.bash"
+  cat > "$bash_env" <<SH
+command() {
+  if [ "\${1:-}" = -v ] && [ "\${2:-}" = "$tool" ]; then
+    return 1
+  fi
+  builtin command "\$@"
+}
+SH
+  FM_HOME="$home" PATH="$home/fakebin:$PATH" BASH_ENV="$bash_env" "$SYNC" "$@"
 }
 
 # write_git_hung_fetch_stub <fakebin>: any `fetch` call hangs indefinitely
@@ -397,6 +432,72 @@ test_no_timeout_binary_skips_before_touching_nas() {
   pass "fm-nas-deploy-sync skips before NAS access when no timeout binary is available"
 }
 
+test_missing_pm2_skips_before_merge() {
+  local home nas log out before after
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" missingpm2-test)
+  advance_origin "$home" missingpm2-test C1
+  before=$(head_sha "$nas")
+  write_map "$home" missingpm2-test "$nas" missingpm2-test
+  log="$home/restart.log"
+  write_pm2_stub "$home/fakebin" "$log"
+
+  out=$(run_sync_without_tool "$home" pm2 missingpm2-test)
+
+  after=$(head_sha "$nas")
+  [ "$before" = "$after" ] || fail "missing-pm2: NAS checkout fast-forwarded before pm2 availability was proven"
+  [ ! -s "$log" ] || fail "missing-pm2: pm2 restart ran after missing pm2 prerequisite"
+  assert_contains "$out" "missingpm2-test: skipped: pm2 is unavailable" "missing-pm2: did not report the missing pm2 prerequisite"
+  pass "fm-nas-deploy-sync skips before merge when pm2 is unavailable"
+}
+
+test_missing_jq_skips_before_merge() {
+  local home nas log out before after
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" missingjq-test)
+  advance_origin "$home" missingjq-test C1
+  before=$(head_sha "$nas")
+  write_map "$home" missingjq-test "$nas" missingjq-test
+  log="$home/restart.log"
+  write_pm2_stub "$home/fakebin" "$log"
+
+  out=$(run_sync_without_tool "$home" jq missingjq-test)
+
+  after=$(head_sha "$nas")
+  [ "$before" = "$after" ] || fail "missing-jq: NAS checkout fast-forwarded before jq availability was proven"
+  [ ! -s "$log" ] || fail "missing-jq: pm2 restart ran after missing jq prerequisite"
+  assert_contains "$out" "missingjq-test: skipped: jq is unavailable" "missing-jq: did not report the missing jq prerequisite"
+  pass "fm-nas-deploy-sync skips before merge when jq is unavailable"
+}
+
+test_hung_pm2_restart_is_bounded_by_timeout() {
+  local home nas log out rc start elapsed
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP (no timeout/gtimeout binary): hung-pm2 timeout bound check"
+    return
+  fi
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" hungpm2-test)
+  advance_origin "$home" hungpm2-test C1
+  write_map "$home" hungpm2-test "$nas" hungpm2-test
+  log="$home/restart.log"
+  rm -f "$home/fakebin/git"
+  write_pm2_hung_restart_stub "$home/fakebin" "$log"
+
+  start=$SECONDS
+  set +e
+  out=$(FM_NAS_SYNC_TIMEOUT=1 run_sync "$home" hungpm2-test 2>/dev/null)
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - start ))
+
+  expect_code 0 "$rc" "hung-pm2: sync should still exit 0 when pm2 restart hangs"
+  [ "$elapsed" -lt 3 ] || fail "hung-pm2: sync took ${elapsed}s - the timeout bound did not stop the hung pm2 restart"
+  assert_contains "$out" "hungpm2-test: synced" "hung-pm2: checkout should still fast-forward before bounded restart failure is reported"
+  assert_contains "$out" "restart failed" "hung-pm2: did not report the bounded restart failure"
+  pass "a hung pm2 restart is killed by FM_NAS_SYNC_TIMEOUT instead of blocking the caller"
+}
+
 test_transient_packed_refs_lock_is_retried() {
   local home nas out counter err
   home=$(new_home)
@@ -602,6 +703,9 @@ test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
 test_no_timeout_binary_skips_before_touching_nas
+test_missing_pm2_skips_before_merge
+test_missing_jq_skips_before_merge
+test_hung_pm2_restart_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
 test_status_failure_is_stuck_untouched
 test_missing_map_file_is_silent_noop

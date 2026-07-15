@@ -912,6 +912,49 @@ SH
   pass "bootstrap bounds upstream drift fetch with gtimeout when GNU timeout is absent"
 }
 
+test_upstream_drift_fetch_skips_when_no_timeout_tool_exists() {
+  local case_dir repo fakebin real_git log bash_env out
+  case_dir="$TMP_ROOT/drift-fetch-no-timeout"
+  repo="$case_dir/repo"
+  mkdir -p "$case_dir"
+  make_drift_repo "$repo"
+  drift_commit "$repo" base
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+  mkdir -p "$repo/config"
+  printf '%s\n' manual > "$repo/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  real_git=$(command -v git)
+  log="$case_dir/fetch.log"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ]; then
+  repo=\$2
+  shift 2
+fi
+if [ "\${1:-}" = fetch ]; then
+  printf '%s\n' raw-fetch >> '$log'
+  exit 42
+fi
+exec '$real_git' ${repo:+-C "\$repo"} "\$@"
+SH
+  chmod +x "$fakebin/git"
+  bash_env="$case_dir/no-timeout-tools.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && { [ "${2:-}" = timeout ] || [ "${2:-}" = gtimeout ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_UPSTREAM_FETCH_TIMEOUT=7 "$ROOT/bin/fm-bootstrap.sh")
+  [ ! -e "$log" ] || fail "upstream drift fetch ran without timeout/gtimeout: $(cat "$log")"
+  assert_not_contains "$out" "MISSING:" "no-timeout fetch case should use the complete fake toolchain"
+  pass "bootstrap skips upstream drift fetch instead of running it unbounded when no timeout tool exists"
+}
+
 test_upstream_drift_report() {
   local case_dir repo fakebin out base tip i
 
@@ -973,6 +1016,7 @@ test_upstream_drift_report() {
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_upstream_drift_fetch_uses_gtimeout_when_timeout_absent
+test_upstream_drift_fetch_skips_when_no_timeout_tool_exists
 test_upstream_drift_report
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

@@ -85,6 +85,10 @@ git_nas() {
   bounded git -C "$NAS_PATH" "$@"
 }
 
+pm2_bounded() {
+  bounded pm2 "$@"
+}
+
 usage() {
   echo "usage: fm-nas-deploy-sync.sh <project-name>" >&2
 }
@@ -194,6 +198,14 @@ if [ "$HAVE_TIMEOUT" = none ]; then
   echo "$NAME: skipped: no timeout/gtimeout binary available for bounded NAS access"
   exit 0
 fi
+if ! command -v pm2 >/dev/null 2>&1; then
+  echo "$NAME: skipped: pm2 is unavailable"
+  exit 0
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "$NAME: skipped: jq is unavailable"
+  exit 0
+fi
 
 if ! bounded test -d "$NAS_PATH"; then
   echo "$NAME: skipped: NAS path $NAS_PATH not a directory"
@@ -295,7 +307,7 @@ after=$(git_nas rev-parse --short "$DEFAULT")
 # the same name; one lagging instance must not be masked by the others).
 process_online() {
   local proc=$1 status
-  status=$(pm2 jlist 2>/dev/null | jq -r --arg n "$proc" \
+  status=$(pm2_bounded jlist 2>/dev/null | jq -r --arg n "$proc" \
     '[.[] | select(.name == $n) | .pm2_env.status] as $s
      | if ($s | length) == 0 then "missing"
        elif all($s[]; . == "online") then "online"
@@ -310,7 +322,7 @@ for proc in "${procs[@]}"; do
   proc="${proc#"${proc%%[![:space:]]*}"}"
   proc="${proc%"${proc##*[![:space:]]}"}"
   [ -n "$proc" ] || continue
-  if ! pm2 restart "$proc" >/dev/null 2>&1; then
+  if ! pm2_bounded restart "$proc" >/dev/null 2>&1; then
     restart_problems="$restart_problems $proc(restart failed)"
     continue
   fi

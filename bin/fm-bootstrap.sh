@@ -219,8 +219,9 @@ upstream_drift_report() {
 # Fetch half: MUTATING/network, called only from fleet_sync (the locked sweep), so
 # the detect-only/read-only path never fetches. Best-effort and bounded - offline,
 # a transient failure, or a stalled connection just leaves the last-fetched ref in
-# place, and timeout/gtimeout (when available) caps a stall so session start
-# never hangs.
+# place. A timeout/gtimeout binary is required for the refresh; without one,
+# bootstrap leaves the last-fetched ref in place rather than running an
+# unbounded network fetch.
 # No-op without an upstream remote.
 upstream_drift_fetch() {
   local timeout_bin=""
@@ -230,11 +231,8 @@ upstream_drift_fetch() {
   elif command -v gtimeout >/dev/null 2>&1; then
     timeout_bin=gtimeout
   fi
-  if [ -n "$timeout_bin" ]; then
-    "$timeout_bin" "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
-  else
-    git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
-  fi
+  [ -n "$timeout_bin" ] || return 0
+  "$timeout_bin" "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
 }
 
 fleet_sync() {
