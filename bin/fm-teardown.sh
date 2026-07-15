@@ -121,6 +121,37 @@ KIND=$(grep '^kind=' "$META" | cut -d= -f2- || true)
 [ -n "$KIND" ] || KIND=ship
 MODE=$(grep '^mode=' "$META" | cut -d= -f2- || true)
 [ -n "$MODE" ] || MODE=no-mistakes
+NAS_DEPLOY_SYNC_ELIGIBLE=0
+
+task_tmp_is_safe() {
+  local path=$1 base prefix suffix
+  [ -n "$path" ] || return 1
+  case "$path" in
+    /tmp/*) base=${path#/tmp/} ;;
+    *) return 1 ;;
+  esac
+  case "$base" in
+    */*|'') return 1 ;;
+  esac
+  prefix="fm-$ID."
+  case "$base" in
+    "$prefix"*) suffix=${base#"$prefix"} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$suffix" ] || return 1
+  case "$suffix" in
+    *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-]*) return 1 ;;
+  esac
+}
+
+remove_task_tmp() {
+  [ -n "$TASK_TMP" ] || return 0
+  if ! task_tmp_is_safe "$TASK_TMP"; then
+    echo "teardown: skipped unsafe tasktmp path $TASK_TMP" >&2
+    return 0
+  fi
+  rm -rf -- "$TASK_TMP"
+}
 
 default_branch() {
   local ref branch
@@ -331,6 +362,16 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+mark_nas_deploy_sync_eligible() {
+  NAS_DEPLOY_SYNC_ELIGIBLE=0
+  [ "$FORCE" != "--force" ] || return 0
+  case "$KIND" in
+    scout|secondmate) return 0 ;;
+  esac
+  content_in_default && NAS_DEPLOY_SYNC_ELIGIBLE=1
+  return 0
 }
 
 backlog_refresh_reminder() {
@@ -642,6 +683,7 @@ validate_worktree_teardown_safety() {
       return 1
     fi
   fi
+  mark_nas_deploy_sync_eligible
 }
 
 require_orca_worktree_path_match() {
@@ -1069,9 +1111,9 @@ if [ "$KIND" = secondmate ]; then
 fi
 remove_grok_turnend_auth "$STATE" "$ID"
 fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
-# Remove the per-task temp root (/tmp/fm-<id>/, incl. its gotmp/) recorded by spawn.
+# Remove the per-task temp root (/tmp/fm-<id>.<random>/, incl. its gotmp/) recorded by spawn.
 # Read before the state-file rm below; empty (pre-fix tasks without tasktmp=) is a no-op.
-[ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
+remove_task_tmp
 rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.check.sh" "$STATE/$ID.meta" "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" "$STATE/$ID.ultracode"
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
   "$FM_ROOT/bin/fm-fleet-sync.sh" "$PROJ" || true
@@ -1082,7 +1124,7 @@ fi
 # never land a project change, so they are excluded the same as the fleet-sync
 # call above; unlike that call, local-only IS included here, since a local-only
 # merge is just as much a landed change as a PR merge.
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$NAS_DEPLOY_SYNC_ELIGIBLE" = 1 ]; then
   "$FM_ROOT/bin/fm-nas-deploy-sync.sh" "$(basename "$PROJ")" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"

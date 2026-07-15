@@ -948,12 +948,11 @@ if [ "$KIND" != secondmate ]; then
   exclude_path '.treehouse-compose-project'
 fi
 
-# Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
-# create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
-# Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
-# later, and teardown cleans one deterministic path. GOTMPDIR (not TMPDIR) is the
-# targeted knob: TMPDIR is too broad (affects every program's temp, not just Go's).
-TASK_TMP="/tmp/fm-$ID"
+# Per-task temp root: /tmp/fm-<id>.<random>/ with Go's build temp nested at gotmp/.
+# Go won't create GOTMPDIR, so mkdir before it is used; fm-teardown removes the
+# whole root. GOTMPDIR (not TMPDIR) is the targeted knob: TMPDIR is too broad
+# (affects every program's temp, not just Go's).
+TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXX") || { echo "error: failed to create task temp root" >&2; exit 1; }
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the

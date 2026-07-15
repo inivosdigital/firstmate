@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for per-task GOTMPDIR support (fm-gotmp).
 #
-# fm-spawn gives each task a temp root /tmp/fm-<id>/ with Go's build temp nested at
+# fm-spawn gives each task a temp root /tmp/fm-<id>.<random>/ with Go's build temp nested at
 # gotmp/, exports GOTMPDIR into the crewmate pane, and records tasktmp= in the task's
 # meta. fm-teardown reads tasktmp= and removes the whole root on cleanup.
 #
@@ -109,6 +109,9 @@ test_spawn_contract_and_mkdir_pattern() {
   # shellcheck disable=SC2016  # single quotes are deliberate: these are literal source strings
   grep -F 'mkdir -p "$TASK_TMP/gotmp"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: mkdir of gotmp under TASK_TMP"
+  # shellcheck disable=SC2016
+  grep -F 'TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXX")' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: unique mktemp task root"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
@@ -118,10 +121,10 @@ test_spawn_contract_and_mkdir_pattern() {
   # a meta line whose value the teardown grep (tasktmp=, cut -d= -f2-) reads back whole.
   local id=spawn-sim-z1
   local sim_root="$TMP_ROOT/$id-root"
-  local task_tmp="$sim_root/tmp/fm-$id"
+  local task_tmp
   mkdir -p "$sim_root/state"
-  # Replicate spawn's exact mkdir + meta-write lines.
-  TASK_TMP="$task_tmp"
+  TASK_TMP=$(mktemp -d "/tmp/fm-$id.XXXXXX") || fail "mktemp failed"
+  task_tmp=$TASK_TMP
   mkdir -p "$TASK_TMP/gotmp"
   {
     echo "tasktmp=$TASK_TMP"
@@ -132,6 +135,10 @@ test_spawn_contract_and_mkdir_pattern() {
   read_back=$(grep '^tasktmp=' "$sim_root/state/$id.meta" | cut -d= -f2-)
   [ "$read_back" = "$task_tmp" ] \
     || fail "tasktmp value not round-tripped by teardown's grep|cut (got '$read_back')"
+  case "$task_tmp" in
+    /tmp/fm-$id.*) ;;
+    *) fail "tasktmp did not include a unique /tmp/fm-<id> prefix ($task_tmp)" ;;
+  esac
   pass "fm-spawn creates gotmp dir and records tasktmp in meta"
 }
 
@@ -139,7 +146,8 @@ test_spawn_contract_and_mkdir_pattern() {
 
 test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
-  local task_tmp="$TMP_ROOT/fm-$id"
+  local task_tmp
+  task_tmp=$(mktemp -d "/tmp/fm-$id.XXXXXX") || fail "mktemp failed"
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
@@ -204,7 +212,7 @@ META
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
-  local task_tmp="$TMP_ROOT/never-created-fm-$id"
+  local task_tmp="/tmp/fm-$id.missing"
   # Intentionally do NOT create $task_tmp.
   [ ! -e "$task_tmp" ] || fail "precondition: task_tmp should not exist yet"
   local fake
@@ -215,7 +223,21 @@ test_teardown_skips_gracefully_when_dir_missing() {
   pass "fm-teardown skips gracefully when tasktmp= points to a nonexistent dir"
 }
 
+test_teardown_skips_unsafe_tasktmp_path() {
+  local id=td-unsafe-z5
+  local task_tmp="$TMP_ROOT/must-not-delete"
+  mkdir -p "$task_tmp"
+  printf 'keep\n' > "$task_tmp/sentinel"
+  local fake
+  fake=$(make_fake_root "$id" "$task_tmp")
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || fail "teardown exited non-zero when tasktmp was unsafe"
+  [ -e "$task_tmp/sentinel" ] || fail "teardown removed an unsafe tasktmp path"
+  pass "fm-teardown skips unsafe tasktmp paths from mutable meta"
+}
+
 test_spawn_contract_and_mkdir_pattern
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing
+test_teardown_skips_unsafe_tasktmp_path

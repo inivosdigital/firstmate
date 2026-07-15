@@ -419,7 +419,9 @@ SH
     "kind=ship" \
     "mode=no-mistakes"
 
-  git -C "$case_dir/wt" commit -q --allow-empty -m "shippable work"
+  printf '%s\n' 'project change' > "$case_dir/wt/project-change.txt"
+  git -C "$case_dir/wt" add -- project-change.txt
+  git -C "$case_dir/wt" commit -q -m "shippable work"
   git -C "$case_dir/wt" push -q origin fm/task-x1
   git -C "$case_dir/project" fetch -q origin
 
@@ -433,17 +435,20 @@ SH
 
 run_teardown() {
   local case_dir=$1
+  shift
   FM_ROOT_OVERRIDE="$ROOT" \
   FM_STATE_OVERRIDE="$case_dir/state" \
   FM_CONFIG_OVERRIDE="$case_dir/config" \
   FM_NAS_DEPLOYMENTS_OVERRIDE="$case_dir/data/nas-deployments.md" \
   PATH="$case_dir/fakebin:$PATH" \
-    "$TEARDOWN" task-x1
+    "$TEARDOWN" task-x1 "$@"
 }
 
 test_teardown_invokes_nas_deploy_sync_for_landed_project() {
   local case_dir rc origin_head nas_head
   case_dir=$(make_teardown_case invokes)
+  git -C "$case_dir/wt" push -q origin HEAD:main
+  git -C "$case_dir/project" fetch -q origin
 
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
@@ -462,6 +467,45 @@ test_teardown_invokes_nas_deploy_sync_for_landed_project() {
   pass "a landed ship-task teardown invokes fm-nas-deploy-sync.sh, which syncs and restarts the live NAS deployment"
 }
 
+test_teardown_skips_nas_deploy_sync_for_remote_only_landing() {
+  local case_dir rc before after
+  case_dir=$(make_teardown_case remote-only)
+  before=$(head_sha "$case_dir/nas-project-nas")
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "teardown-remote-only: teardown should still succeed for remote-reachable work"
+  after=$(head_sha "$case_dir/nas-project-nas")
+  [ "$before" = "$after" ] \
+    || fail "teardown-remote-only: NAS checkout changed for work only proven pushed to a task branch"
+  [ ! -s "$case_dir/restart.log" ] \
+    || fail "teardown-remote-only: restarted NAS deployment for work not on the default branch"
+  pass "a remote-only landed teardown skips the NAS deployment sync"
+}
+
+test_teardown_skips_nas_deploy_sync_for_force_discard() {
+  local case_dir rc before after
+  case_dir=$(make_teardown_case force-skip)
+  before=$(head_sha "$case_dir/nas-project-nas")
+  git -C "$case_dir/wt" commit -q --allow-empty -m "discarded local work"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "teardown-force-skip: forced teardown should succeed"
+  after=$(head_sha "$case_dir/nas-project-nas")
+  [ "$before" = "$after" ] \
+    || fail "teardown-force-skip: NAS checkout changed during forced discard teardown"
+  [ ! -s "$case_dir/restart.log" ] \
+    || fail "teardown-force-skip: restarted NAS deployment during forced discard teardown"
+  pass "a forced teardown skips the NAS deployment sync"
+}
+
 test_clean_behind_fast_forwards_and_restarts
 test_dirty_is_skipped_untouched
 test_diverged_is_stuck_untouched
@@ -471,3 +515,5 @@ test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project
+test_teardown_skips_nas_deploy_sync_for_remote_only_landing
+test_teardown_skips_nas_deploy_sync_for_force_discard
