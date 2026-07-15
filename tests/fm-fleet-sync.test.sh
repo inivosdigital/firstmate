@@ -124,6 +124,27 @@ build_packed_prunable() {
 
 plant_packed_refs_lock() { : > "$1/.git/packed-refs.lock"; }
 
+# fetch_with_packed_refs_lock_guard only engages when the blocked prune makes
+# `git fetch --prune` itself exit non-zero; git started propagating a failed
+# prune into fetch's exit code in 2.37, while older git prints the
+# packed-refs.lock error but exits 0, so the guard (correctly) never fires and
+# the real-lock tests below cannot pass. Probe the REAL behavior rather than
+# guessing a version cutoff, once, with a throwaway fixture.
+fm_git_fetch_prune_failure_is_fatal() {
+  if [ -z "${FM_FETCH_PRUNE_FATAL:-}" ]; then
+    local home clone
+    home=$(new_home)
+    clone=$(build_packed_prunable "$home" prune-probe)
+    plant_packed_refs_lock "$clone"
+    if git -C "$clone" fetch origin --prune --quiet 2>/dev/null; then
+      FM_FETCH_PRUNE_FATAL=no
+    else
+      FM_FETCH_PRUNE_FATAL=yes
+    fi
+  fi
+  [ "$FM_FETCH_PRUNE_FATAL" = yes ]
+}
+
 # lsof shims mirror tests/fm-teardown.test.sh: no-holder (provably free), a live
 # holder, and an lsof error. Written into a per-home fakebin/ prepended to PATH.
 lsof_no_holder() {
@@ -474,6 +495,10 @@ test_bootstrap_relays_recovered_and_stuck() {
 
 test_orphaned_stale_packed_refs_lock_recovers() {
   local home fakebin clone out err
+  fm_git_fetch_prune_failure_is_fatal || {
+    echo "skip: this git does not fail 'fetch --prune' on a blocked prune (needs git 2.37+)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-lockstale"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" lockstale)
@@ -503,6 +528,10 @@ test_orphaned_stale_packed_refs_lock_recovers() {
 
 test_live_packed_refs_lock_is_never_removed() {
   local home fakebin clone out err before
+  fm_git_fetch_prune_failure_is_fatal || {
+    echo "skip: this git does not fail 'fetch --prune' on a blocked prune (needs git 2.37+)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-locklive"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" locklive)
@@ -529,6 +558,10 @@ test_live_packed_refs_lock_is_never_removed() {
 
 test_live_git_cwd_in_clone_dir_blocks_removal() {
   local home fakebin clone out err before
+  fm_git_fetch_prune_failure_is_fatal || {
+    echo "skip: this git does not fail 'fetch --prune' on a blocked prune (needs git 2.37+)"
+    return 0
+  }
   home=$(new_home)
   fakebin="$home/fb-lockcwd"; rm -rf "$fakebin"; mkdir -p "$fakebin"
   clone=$(build_packed_prunable "$home" lockcwd)

@@ -603,10 +603,18 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Traps go in BEFORE the lock is taken: a TERM/INT landing inside
+  # fm_afk_launch_lock_acquire (after mkdir, during the pid-identity write)
+  # would otherwise kill the launcher with the just-created lock left behind.
+  # fm_afk_launch_lock_release is pid-guarded, so running it without the lock
+  # (or while another process owns it) is a safe no-op.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  if ! fm_afk_launch_lock_acquire; then
+    trap - EXIT INT TERM
+    return 1
+  fi
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
