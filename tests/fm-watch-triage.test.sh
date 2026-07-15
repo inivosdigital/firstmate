@@ -1352,6 +1352,33 @@ test_autodeploy_unreadable_log_is_silent() {
   pass "a missing or unreadable configured log is skipped silently, not alarmed"
 }
 
+test_autodeploy_timed_out_log_is_silent() {
+  local dir state config fakebin log rc elapsed real_tail
+  dir=$(make_case autodeploy-timeout); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config" "$state/hung-deploy"
+  log="$state/hung-deploy/status.log"
+  printf '%s\n' "$log" > "$config/autodeploy-logs"
+  printf 'ALERT should time out\n' > "$log"
+  real_tail=$(command -v tail)
+  cat > "$fakebin/tail" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_FAKE_TAIL_SLEEP:-}" = 1 ]; then
+  perl -e 'sleep 20'
+  exit 0
+fi
+exec '$real_tail' "\$@"
+SH
+  chmod +x "$fakebin/tail"
+
+  SECONDS=0
+  rc=$(PATH="$fakebin:$PATH" FM_FAKE_TAIL_SLEEP=1 FM_AUTODEPLOY_LOG_READ_TIMEOUT=1 run_autodeploy_scan "$state" "$config")
+  elapsed=$SECONDS
+  [ "$rc" = "rc=1" ] || fail "a timed-out log read was not skipped silently (got $rc)"
+  [ "$elapsed" -lt 5 ] || fail "timed-out log read blocked watcher scan for ${elapsed}s"
+  [ ! -s "$state/.wake-queue" ] || fail "a timed-out log read enqueued a wake"
+  pass "a timed-out configured log read is skipped silently, not alarmed"
+}
+
 test_autodeploy_comments_blanks_and_whitespace() {
   local dir state config log rc
   dir=$(make_case autodeploy-comments); state="$dir/state"; config="$dir/config"
@@ -1428,5 +1455,6 @@ test_autodeploy_healthy_is_silent_and_rearms
 test_autodeploy_persistent_failure_dedupes
 test_autodeploy_recurrence_after_clear_resurfaces
 test_autodeploy_unreadable_log_is_silent
+test_autodeploy_timed_out_log_is_silent
 test_autodeploy_comments_blanks_and_whitespace
 test_autodeploy_failure_surfaced_on_heartbeat

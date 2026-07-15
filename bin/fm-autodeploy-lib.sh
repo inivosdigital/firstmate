@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared autodeploy-log failure-detection predicate. Usage: . bin/fm-autodeploy-lib.sh
+# Shared autodeploy-log helpers. Usage: . bin/fm-autodeploy-lib.sh
 #
 # fm_autodeploy_line_failed tests a status log's last line against firstmate's
 # fleet-sync line convention (bin/fm-fleet-sync.sh): a healthy run ends in an
@@ -12,4 +12,17 @@
 # True (0) when <line> reports an autodeploy failure.
 fm_autodeploy_line_failed() {
   printf '%s' "$1" | grep -Eq 'STUCK:|FAILED:|needs attention|(^|[[:space:]])ALERT([[:space:]]|$)'
+}
+
+fm_autodeploy_read_last_line() {
+  local log=$1 timeout_secs=${FM_AUTODEPLOY_LOG_READ_TIMEOUT:-5}
+  if command -v timeout >/dev/null 2>&1; then
+    timeout "$timeout_secs" tail -n 1 "$log" 2>/dev/null
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$timeout_secs" tail -n 1 "$log" 2>/dev/null
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'my $t = shift; my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, 0.2; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$timeout_secs" tail -n 1 "$log" 2>/dev/null
+  else
+    return 1
+  fi
 }

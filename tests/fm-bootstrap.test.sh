@@ -899,7 +899,7 @@ run_autodeploy_bootstrap() {
 }
 
 test_autodeploy_logs_check() {
-  local case_dir home fakebin out log
+  local case_dir home fakebin out log elapsed real_tail
 
   # A log whose last line reports failure surfaces with its label and content.
   case_dir="$TMP_ROOT/autodeploy-failed"
@@ -933,6 +933,29 @@ test_autodeploy_logs_check() {
   printf '%s\n' "$case_dir/logs/does-not-exist/status.log" > "$home/config/autodeploy-logs"
   out=$(run_autodeploy_bootstrap "$home" "$fakebin")
   [ -z "$out" ] || fail "missing log should be silently skipped, got: $out"
+
+  case_dir="$TMP_ROOT/autodeploy-timeout"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  real_tail=$(command -v tail)
+  cat > "$fakebin/tail" <<SH
+#!/usr/bin/env bash
+if [ "\${FM_FAKE_TAIL_SLEEP:-}" = 1 ]; then
+  perl -e 'sleep 20'
+  exit 0
+fi
+exec '$real_tail' "\$@"
+SH
+  chmod +x "$fakebin/tail"
+  mkdir -p "$case_dir/logs/hung-deploy"
+  log="$case_dir/logs/hung-deploy/status.log"
+  printf 'ALERT should time out\n' > "$log"
+  printf '%s\n' "$log" > "$home/config/autodeploy-logs"
+  SECONDS=0
+  out=$(FM_FAKE_TAIL_SLEEP=1 FM_AUTODEPLOY_LOG_READ_TIMEOUT=1 run_autodeploy_bootstrap "$home" "$fakebin")
+  elapsed=$SECONDS
+  [ -z "$out" ] || fail "timed-out log read should be silently skipped, got: $out"
+  [ "$elapsed" -lt 5 ] || fail "timed-out log read blocked bootstrap for ${elapsed}s"
 
   # Blank lines and full-line '#' comments are ignored, whitespace is trimmed,
   # and only the listed logs are reported, in file order.
