@@ -77,7 +77,12 @@ pass() {
 #
 # Directory names embed the owning PID (<prefix>.<pid>.XXXXXX) so a later
 # invocation's startup sweep (fm_test_sweep_stale_tmproots) can tell a leftover
-# from a still-running test apart without relying on age alone.
+# from a still-running test apart without relying on age alone. The manifest
+# itself is mktemp-created at source time: a predictable name under a shared
+# TMPDIR could be pre-seeded by another local user with arbitrary paths for the
+# trap's `rm -rf` to chew through, so the name gets a random suffix, and it
+# embeds the owning PID so the startup sweep can reclaim a SIGKILL'd run's
+# manifest (and the roots it lists) once that PID is gone.
 #
 # None of this saves a directory from a SIGKILL (e.g. the OOM killer): no trap,
 # EXIT or otherwise, ever runs for that signal, so a killed run's temp root is
@@ -85,7 +90,7 @@ pass() {
 # for that case - it runs at the start of the next invocation.
 
 FM_TEST_CLEANUP_DIRS=()
-FM_TEST_CLEANUP_MANIFEST="${TMPDIR:-/tmp}/.fm-test-cleanup.$$"
+FM_TEST_CLEANUP_MANIFEST=$(mktemp "${TMPDIR:-/tmp}/.fm-test-cleanup.$$.XXXXXX")
 
 fm_test_cleanup() {
   local d
@@ -113,12 +118,17 @@ fm_test_tmproot() {
 # alive - the actual safety net for a SIGKILL-terminated prior run, which no
 # EXIT trap (see above) can ever run for. A directory whose PID is still alive
 # is left untouched, so a genuinely concurrent run of the same test on this host
-# is never swept. Call it once at the top of a test file, before that file's own
+# is never swept. It also reclaims dead-owner cleanup manifests: each
+# .fm-test-cleanup.<pid>.XXXXXX file whose PID is gone has its listed roots
+# removed (covering roots registered by suites that never call this sweep) and
+# is then deleted. A manifest not owned by the current user, or reached through
+# a symlink, is left alone so a planted file can never direct the `rm -rf`.
+# Call it once at the top of a test file, before that file's own
 # fm_test_tmproot call, for any prefix known to create large fixtures (e.g. a
 # full repo clone) worth reclaiming promptly rather than waiting on the next
 # `rm -rf` of an already-registered root.
 fm_test_sweep_stale_tmproots() {
-  local prefix=$1 dir base pid
+  local prefix=$1 dir base pid manifest line
   for dir in "${TMPDIR:-/tmp}/${prefix}".*; do
     [ -d "$dir" ] || continue
     base=$(basename "$dir")
@@ -129,6 +139,22 @@ fm_test_sweep_stale_tmproots() {
     esac
     kill -0 "$pid" 2>/dev/null && continue # owner still alive: a genuine concurrent run
     rm -rf -- "$dir"
+  done
+  for manifest in "${TMPDIR:-/tmp}"/.fm-test-cleanup.*; do
+    [ -f "$manifest" ] || continue
+    [ -L "$manifest" ] && continue
+    [ -O "$manifest" ] || continue
+    base=$(basename "$manifest")
+    pid=${base#.fm-test-cleanup.}
+    pid=${pid%%.*}
+    case "$pid" in
+      ''|*[!0-9]*) continue ;;
+    esac
+    kill -0 "$pid" 2>/dev/null && continue
+    while IFS= read -r line; do
+      [ -n "$line" ] && rm -rf -- "$line"
+    done < "$manifest"
+    rm -f -- "$manifest"
   done
 }
 
