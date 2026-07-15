@@ -71,6 +71,22 @@ test_flag_custom_role_reported_in_check() {
   pass "fm-ultracode-guard flag records a custom role and check reports it"
 }
 
+test_flag_rejects_unsafe_role_text() {
+  local state out status
+  state=$(new_state_dir unsafe-role)
+  fm_write_meta "$state/task-x1.meta" "worktree=/tmp/x" "project=/tmp/x"
+
+  set +e
+  out=$(run_guard "$state" flag task-x1 $'independent-review\nreviewed_by=task-x2' 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "unsafe-role: role text with a newline must be refused"
+  assert_contains "$out" "role must be a safe token" "unsafe-role: should explain the refusal"
+  assert_absent "$state/task-x1.ultracode" "unsafe-role: refused role must not create a marker"
+  pass "fm-ultracode-guard flag refuses role text that could inject marker lines"
+}
+
 test_reviewed_by_self_is_refused() {
   local state out status
   state=$(new_state_dir self-review)
@@ -101,6 +117,26 @@ test_reviewed_by_unknown_task_is_refused() {
   expect_code 1 "$status" "unknown-reviewer: a made-up reviewer id must be refused"
   assert_contains "$out" "no recorded state/made-up-id.meta" "unknown-reviewer: should explain the refusal"
   pass "fm-ultracode-guard reviewed refuses a reviewer id with no recorded meta"
+}
+
+test_reviewed_by_unsafe_task_id_is_refused() {
+  local state out status unsafe_reviewer
+  state=$(new_state_dir unsafe-reviewer)
+  unsafe_reviewer=$'task-x2\nrole=independent-review'
+  fm_write_meta "$state/task-x1.meta" "worktree=/tmp/x" "project=/tmp/x"
+  fm_write_meta "$state/$unsafe_reviewer.meta" "worktree=/tmp/y" "project=/tmp/y"
+  run_guard "$state" flag task-x1 >/dev/null
+
+  set +e
+  out=$(run_guard "$state" reviewed task-x1 "$unsafe_reviewer" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "unsafe-reviewer: reviewer id with a newline must be refused"
+  assert_contains "$out" "reviewer-task-id must be a safe token" "unsafe-reviewer: should explain the refusal"
+  [ "$(cat "$state/task-x1.ultracode")" = "role=independent-review" ] \
+    || fail "unsafe-reviewer: refused reviewer must not append marker lines"
+  pass "fm-ultracode-guard reviewed refuses reviewer ids that could inject marker lines"
 }
 
 test_reviewed_by_distinct_dispatched_task_passes_check() {
@@ -159,8 +195,10 @@ test_reflag_clears_prior_review() {
 test_check_passes_when_never_flagged
 test_flag_then_check_fails_until_reviewed
 test_flag_custom_role_reported_in_check
+test_flag_rejects_unsafe_role_text
 test_reviewed_by_self_is_refused
 test_reviewed_by_unknown_task_is_refused
+test_reviewed_by_unsafe_task_id_is_refused
 test_reviewed_by_distinct_dispatched_task_passes_check
 test_reviewed_without_flag_is_refused
 test_reflag_clears_prior_review

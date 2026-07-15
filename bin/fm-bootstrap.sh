@@ -219,12 +219,19 @@ upstream_drift_report() {
 # Fetch half: MUTATING/network, called only from fleet_sync (the locked sweep), so
 # the detect-only/read-only path never fetches. Best-effort and bounded - offline,
 # a transient failure, or a stalled connection just leaves the last-fetched ref in
-# place, and timeout (when available) caps a stall so session start never hangs.
+# place, and timeout/gtimeout (when available) caps a stall so session start
+# never hangs.
 # No-op without an upstream remote.
 upstream_drift_fetch() {
+  local timeout_bin=""
   git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+    timeout_bin=timeout
+  elif command -v gtimeout >/dev/null 2>&1; then
+    timeout_bin=gtimeout
+  fi
+  if [ -n "$timeout_bin" ]; then
+    "$timeout_bin" "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
   else
     git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
   fi
@@ -590,6 +597,7 @@ crew_dispatch_validate() {
   fi
   err=$(jq -r '
     def verified($h): ["claude","codex","opencode","pi","grok"] | index($h);
+    def safe_token: test("^[A-Za-z0-9._-]+$");
     def effort_ok($h; $e):
       if $e == null then true
       elif ($e | type) != "string" then false
@@ -630,6 +638,7 @@ crew_dispatch_validate() {
     elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
     elif (all_profiles | map(select(has("ultracode") and (.ultracode | type) != "boolean")) | length) > 0 then "ultracode must be boolean"
     elif (all_profiles | map(select(has("ultracode_role") and (.ultracode_role | type) != "string")) | length) > 0 then "ultracode_role must be a string"
+    elif (all_profiles | map(select(has("ultracode_role") and (.ultracode_role | type) == "string" and ((.ultracode_role | safe_token) | not))) | length) > 0 then "ultracode_role must be a safe token"
     else
       ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
         | map(select(. != null))

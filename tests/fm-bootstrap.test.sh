@@ -730,6 +730,7 @@ unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"cla
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
 non-boolean ultracode is flagged^{"rules":[{"when":"safety work","use":{"harness":"claude","ultracode":"true"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be boolean
 non-string ultracode role is flagged^{"rules":[{"when":"safety work","use":{"harness":"claude","ultracode":true,"ultracode_role":true}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a string
+unsafe ultracode role is flagged^{"rules":[{"when":"safety work","use":{"harness":"claude","ultracode":true,"ultracode_role":"independent-review\nreviewed_by=task-x2"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a safe token
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
@@ -859,6 +860,58 @@ run_drift_bootstrap() {  # <repo> <fakebin>
     "$ROOT/bin/fm-bootstrap.sh" 2>/dev/null | grep '^UPSTREAM_DRIFT:' || true
 }
 
+test_upstream_drift_fetch_uses_gtimeout_when_timeout_absent() {
+  local case_dir repo fakebin real_git log bash_env out
+  case_dir="$TMP_ROOT/drift-fetch-gtimeout"
+  repo="$case_dir/repo"
+  mkdir -p "$case_dir"
+  make_drift_repo "$repo"
+  drift_commit "$repo" base
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+  mkdir -p "$repo/config"
+  printf '%s\n' manual > "$repo/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  real_git=$(command -v git)
+  log="$case_dir/fetch.log"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ]; then
+  repo=\$2
+  shift 2
+fi
+if [ "\${1:-}" = fetch ]; then
+  printf '%s\n' raw-fetch >> '$log'
+  exit 42
+fi
+exec '$real_git' ${repo:+-C "\$repo"} "\$@"
+SH
+  chmod +x "$fakebin/git"
+  cat > "$fakebin/gtimeout" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "gtimeout \$*" >> '$log'
+exit 0
+SH
+  chmod +x "$fakebin/gtimeout"
+  bash_env="$case_dir/no-timeout.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = timeout ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_UPSTREAM_FETCH_TIMEOUT=7 "$ROOT/bin/fm-bootstrap.sh")
+  assert_contains "$(cat "$log" 2>/dev/null || true)" "gtimeout 7 git -C $repo fetch --quiet upstream" \
+    "upstream drift fetch should use gtimeout when timeout is absent"
+  assert_not_contains "$(cat "$log" 2>/dev/null || true)" "raw-fetch" \
+    "upstream drift fetch should not fall back to an unbounded raw git fetch when gtimeout exists"
+  assert_not_contains "$out" "MISSING:" "gtimeout fetch case should use the complete fake toolchain"
+  pass "bootstrap bounds upstream drift fetch with gtimeout when GNU timeout is absent"
+}
+
 test_upstream_drift_report() {
   local case_dir repo fakebin out base tip i
 
@@ -919,6 +972,7 @@ test_upstream_drift_report() {
 
 test_bootstrap_reporting
 test_no_mistakes_min_version
+test_upstream_drift_fetch_uses_gtimeout_when_timeout_absent
 test_upstream_drift_report
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected

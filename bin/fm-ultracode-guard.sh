@@ -38,6 +38,13 @@ usage() {
   echo "       fm-ultracode-guard.sh check <task-id>" >&2
 }
 
+safe_token() {
+  case "$1" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
 if [ "${1:-}" = "-h" ] || [ "${1:-}" = "--help" ]; then
   usage
   exit 0
@@ -55,11 +62,12 @@ MARKER="$STATE/$ID.ultracode"
 cmd_flag() {
   local role=${3:-independent-review}
   [ $# -le 3 ] || { usage; exit 1; }
+  safe_token "$role" || { echo "error: role must be a safe token" >&2; exit 1; }
   mkdir -p "$STATE"
   # Overwrites any existing marker: re-flagging (e.g. after an escalation)
   # deliberately clears a prior reviewed_by=, since that review was against an
   # earlier version of the diff and the requirement starts over.
-  echo "role=$role" > "$MARKER"
+  printf 'role=%s\n' "$role" > "$MARKER"
   echo "flagged $ID ultracode role=$role"
 }
 
@@ -67,6 +75,7 @@ cmd_reviewed() {
   local reviewer=${3:-}
   [ $# -eq 3 ] || { usage; exit 1; }
   [ -n "$reviewer" ] || { echo "error: reviewed requires a reviewer-task-id" >&2; exit 1; }
+  safe_token "$reviewer" || { echo "error: reviewer-task-id must be a safe token" >&2; exit 1; }
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
     echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot independently review itself" >&2
@@ -76,7 +85,7 @@ cmd_reviewed() {
     echo "error: $reviewer has no recorded state/$reviewer.meta - it must be a genuinely, separately dispatched task, not a made-up id or a sub-task $ID spawned itself" >&2
     exit 1
   fi
-  grep -qx "reviewed_by=$reviewer" "$MARKER" 2>/dev/null || echo "reviewed_by=$reviewer" >> "$MARKER"
+  grep -Fqx "reviewed_by=$reviewer" "$MARKER" 2>/dev/null || printf 'reviewed_by=%s\n' "$reviewer" >> "$MARKER"
   echo "recorded $reviewer as the independent review of $ID"
 }
 
