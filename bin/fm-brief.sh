@@ -239,6 +239,7 @@ fi
 
 if [ "$LIGHT_VERIFY" -eq 1 ]; then
 VERIFY_TRIVIAL_PATH=$(shell_quote "$FM_ROOT/.agents/skills/verify-trivial/SKILL.md")
+# shellcheck disable=SC2016  # single quotes are deliberate: this is literal brief text whose backtick-wrapped names must reach the reading agent verbatim, not expand at scaffold time; only the '"$VAR"' break-outs interpolate.
 VERIFY_TIER_SECTION=$(printf '%s\n' \
 '# Verification tier: Light' \
 'This brief was scaffolded with `--light-verify`: read '"$VERIFY_TRIVIAL_PATH"' for the acceptance-criteria cap, the escalate-not-fail cap-out, and the mandatory side-effect confidence gate that apply to this task instead of the default full verification workflow.' \
