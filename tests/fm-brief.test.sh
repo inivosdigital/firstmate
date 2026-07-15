@@ -264,6 +264,72 @@ test_herdr_lab_contract_applies_to_scouts_but_not_secondmates() {
   pass "fm-brief.sh: Herdr lab contract covers scouts and rejects secondmate misuse"
 }
 
+test_light_verify_points_to_verify_trivial() {
+  local home id brief
+  home="$TMP_ROOT/light-verify-home"
+  mkdir -p "$home/data"
+  id="brief-light-verify-e1"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout --light-verify >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_present "$brief" "Light-verify scout brief was not scaffolded"
+  assert_grep "# Verification tier: Light" "$brief" \
+    "Light-verify brief missing its Verification tier heading"
+  assert_grep "$ROOT/.agents/skills/verify-trivial/SKILL.md" "$brief" \
+    "Light-verify brief missing the absolute verify-trivial pointer"
+  assert_grep "verify-rigorously" "$brief" \
+    "Light-verify brief lost its verify-rigorously cross-reference"
+  pass "fm-brief.sh: --light-verify points the brief at verify-trivial"
+}
+
+test_light_verify_absent_by_default() {
+  local home id brief
+  home="$TMP_ROOT/no-light-verify-home"
+  mkdir -p "$home/data"
+  id="brief-no-light-verify-e2"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  assert_no_grep "# Verification tier: Light" "$brief" \
+    "brief scaffolded without --light-verify should not mention the Light verification tier"
+  assert_no_grep "skips the document step" "$brief" \
+    "brief scaffolded without --light-verify should not carry the skip-document note"
+  pass "fm-brief.sh: omitting --light-verify leaves no Light-tier trace"
+}
+
+test_light_verify_skips_document_for_nomistakes_mode_only() {
+  local home brief
+  home="$TMP_ROOT/light-verify-dod-home"
+  mkdir -p "$home/data"
+  cat > "$home/data/projects.md" <<'EOF'
+- direct-proj [direct-PR] - fixture for direct-PR mode (added 2026-07-01)
+EOF
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-light-nomistakes-e3 no-registry-proj --light-verify >/dev/null 2>&1
+  brief="$home/data/brief-light-nomistakes-e3/brief.md"
+  assert_grep "skips the document step" "$brief" \
+    "no-mistakes-mode Light-verify brief missing the skip-document note"
+
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" brief-light-directpr-e4 direct-proj --light-verify >/dev/null 2>&1
+  brief="$home/data/brief-light-directpr-e4/brief.md"
+  assert_grep "# Verification tier: Light" "$brief" \
+    "direct-PR Light-verify brief should still get the Task-section pointer"
+  assert_no_grep "skips the document step" "$brief" \
+    "direct-PR mode never runs no-mistakes, so it should not carry the skip-document note"
+
+  pass "fm-brief.sh: --light-verify's skip-document note is scoped to no-mistakes-mode ship tasks"
+}
+
+test_light_verify_rejected_for_secondmate() {
+  local home status=0
+  home="$TMP_ROOT/light-verify-secondmate-home"
+  mkdir -p "$home/data"
+  FM_HOME="$home" FM_SECONDMATE_CHARTER=x \
+    "$ROOT/bin/fm-brief.sh" sm-light-verify-e5 --secondmate --no-projects --light-verify >/dev/null 2>&1 || status=$?
+  expect_code 1 "$status" "secondmate --light-verify must be rejected"
+  assert_absent "$home/data/sm-light-verify-e5/brief.md" \
+    "rejected secondmate --light-verify still wrote a brief"
+  pass "fm-brief.sh: --light-verify is rejected for secondmate charters"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/pause-verb-home"
@@ -350,6 +416,10 @@ test_herdr_lab_contract_quotes_foreign_firstmate_path
 test_herdr_lab_omission_is_loud_for_ship_and_scout
 test_herdr_lab_contract_applies_to_scouts_but_not_secondmates
 test_secondmate_no_projects_charter
+test_light_verify_points_to_verify_trivial
+test_light_verify_absent_by_default
+test_light_verify_skips_document_for_nomistakes_mode_only
+test_light_verify_rejected_for_secondmate
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold
