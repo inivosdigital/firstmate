@@ -75,9 +75,17 @@ echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
 # operation that matters, so a push failure (offline, transient network, or a
 # non-fast-forward rejection) is reported but never fails the merge. A pure
 # local-only project with no origin remote has nowhere to push and is skipped
-# silently - not every local-only project is remote-backed.
+# silently - not every local-only project is remote-backed. The push is
+# non-interactive (GIT_TERMINAL_PROMPT=0) and bounded by timeout when available,
+# so a credential prompt or stalled connection never hangs the merge command.
 if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  if git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1; then
+  pushed=0
+  if command -v timeout >/dev/null 2>&1; then
+    GIT_TERMINAL_PROMPT=0 timeout "${FM_LOCAL_PUSH_TIMEOUT:-20}" git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1 && pushed=1
+  else
+    GIT_TERMINAL_PROMPT=0 git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1 && pushed=1
+  fi
+  if [ "$pushed" = 1 ]; then
     echo "pushed $DEFAULT to origin in $PROJ"
   else
     echo "warning: local $DEFAULT merged, but syncing it to origin failed in $PROJ (best-effort; merge succeeded)" >&2
