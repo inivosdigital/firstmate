@@ -179,9 +179,39 @@ fm_composer_idle_matches() {
   esac
 }
 
+# No-break space characters a TUI uses to pad its composer so the terminal will
+# not collapse or wrap the padding. Captured live (task fm-composer-nbsp): claude
+# draws its cleared prompt as the glyph "❯" followed by U+00A0, not an ASCII
+# space. glibc's UTF-8 [:space:] does NOT classify these as whitespace, so without
+# normalizing them an otherwise-empty composer keeps a phantom no-break space and
+# misreads as `pending` - the false "Enter swallowed" fm-send's submit loop
+# reported against a genuinely-submitted steer. Built as literal UTF-8 bytes so
+# the substitution stays bash-3.2 safe and locale-independent, the same convention
+# as the border strip in fm-tmux-lib.sh.
+FM_COMPOSER_NBSP=$(printf '\302\240')       # U+00A0 NO-BREAK SPACE (claude padding)
+FM_COMPOSER_NNBSP=$(printf '\342\200\257')  # U+202F NARROW NO-BREAK SPACE (sibling)
+
+# fm_composer_normalize_ws: map the no-break spaces above to an ASCII space and
+# trim surrounding ASCII whitespace, writing the result into the caller's named
+# variable. A no-break space between real words becomes an ordinary separator, so
+# genuine typed text is preserved (and still classifies pending); a composer empty
+# but for no-break padding trims to empty. Idempotent for ASCII-only content.
+fm_composer_normalize_ws() {  # <string> <out-var-name>
+  local s=$1
+  s=${s//"$FM_COMPOSER_NBSP"/ }
+  s=${s//"$FM_COMPOSER_NNBSP"/ }
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf -v "$2" '%s' "$s"
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # A composer padded with a no-break space (claude's cleared prompt) is empty
+  # but ASCII whitespace trimming cannot see it; normalize before classifying.
+  fm_composer_normalize_ws "$content" content
+  fm_composer_normalize_ws "$plain_content" plain_content
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›') printf 'empty'; return 0 ;;
