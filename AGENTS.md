@@ -514,6 +514,9 @@ A report escalates the task to at least Sonnet/high in place, without losing its
 A crewmate's own report - it cannot find root cause, a "confirmed" fix touches a shared path, or it raised a tradeoff buried in seemingly mechanical work - is a second, non-mechanical trigger with the same effect.
 Either way, escalate the model/effort in place and never silently de-escalate for the rest of that task's life.
 
+A trivial-tier task also runs the Light verification tier: scaffold its brief with `bin/fm-brief.sh --light-verify` (section 11) so it cites `verify-trivial` instead of the default full verification workflow, and for a no-mistakes-mode task, skip the document step when triggering its validation (`no-mistakes axi run --skip=document`) since that tier's mandatory side-effect confidence gate already covers what the step would check.
+A tier-guard or self-reported escalation above lifts the task off the Light verification tier for the rest of its life, exactly like the model/effort escalation it rides alongside.
+
 **Ultracode confirmation.**
 Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`; it refuses until a genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - has reviewed the finished diff and its findings were addressed, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`.
 
@@ -760,6 +763,7 @@ For scout tasks add `--scout`: the scaffold swaps the definition of done for the
 Scout briefs do not include the project-memory step, because their deliverable is a report rather than a committed project change.
 For a crewmate task that will drive Herdr lifecycle behavior, add `--herdr-lab`: the scaffold embeds the hard Herdr-isolation contract backed by `bin/fm-herdr-lab.sh` (a never-`default` lab session, a trailing `--session` on every Herdr call, guarded teardown, and a before/after fleet-state tripwire), and the flag is rejected for `--secondmate` briefs.
 The flag must be explicit because the scaffold cannot read the `{TASK}` text it fills in later, so every ship or scout brief scaffolded without it carries a loud not-enabled gate telling the crewmate to stop and regenerate with `--herdr-lab` if the task turns out to touch Herdr lifecycle.
+For a task dispatched at the trivial (Haiku/low) tier, add `--light-verify`: the scaffold points the brief at `verify-trivial` (loaded per section 13's trigger) instead of the default full verification workflow, and the flag is likewise rejected for `--secondmate` briefs.
 For secondmates use `bin/fm-brief.sh <id> --secondmate {<project>...|--no-projects}`.
 The scaffold writes a charter brief instead of a task brief.
 Set `FM_SECONDMATE_CHARTER='<charter>'` to fill the charter text and `FM_SECONDMATE_SCOPE='<scope>'` when the routing scope differs.
@@ -793,6 +797,7 @@ These skills are not captain-invocable; they are conditional operating reference
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `verify-trivial` - load before authoring or filling in a Light-tier brief's Task section (a brief scaffolded with `bin/fm-brief.sh --light-verify`, section 11) and before advancing such a task to PR-ready.
 
 ## 14. X mode
 

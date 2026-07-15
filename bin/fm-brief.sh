@@ -6,7 +6,7 @@
 # description, acceptance criteria, and context, and may adjust other sections
 # when the task genuinely deviates (e.g. working an existing external PR instead
 # of shipping a new one).
-# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab]
+# Usage: fm-brief.sh <task-id> <repo-name> [--scout] [--herdr-lab] [--light-verify]
 #        fm-brief.sh <task-id> --secondmate {<project>...|--no-projects}
 #   --scout writes the scout contract instead: the deliverable is a report at
 #   data/<task-id>/report.md (no branch, no push, no PR) and the worktree is scratch.
@@ -26,6 +26,13 @@
 #   The flag must be explicit because {TASK} is filled after scaffolding and the
 #   caller-supplied repo string cannot reliably identify this repo. Briefs made
 #   without it carry a loud declaration so an omitted contract cannot be silent.
+#   --light-verify marks a ship or scout brief for the Light verification tier
+#   (see AGENTS.md section 7 and the verify-trivial skill): firstmate decides to
+#   pass this when the task is dispatched at the trivial (haiku/low) tier. It
+#   points the crewmate at verify-trivial instead of the default full
+#   verification workflow and, for a no-mistakes-mode ship task, notes that
+#   firstmate's validation trigger will skip the document step. Rejected for
+#   --secondmate briefs, which are never tier-dispatched.
 # For ship tasks, the definition of done is shaped by the project's delivery mode
 # (data/projects.md via fm-project-mode.sh; see AGENTS.md project management
 # and task lifecycle):
@@ -76,6 +83,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 KIND=ship
 HERDR_LAB=0
 NO_PROJECTS=0
+LIGHT_VERIFY=0
 POS=()
 for a in "$@"; do
   case "$a" in
@@ -83,6 +91,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate ;;
     --herdr-lab) HERDR_LAB=1 ;;
     --no-projects) NO_PROJECTS=1 ;;
+    --light-verify) LIGHT_VERIFY=1 ;;
     *) POS+=("$a") ;;
   esac
 done
@@ -90,6 +99,11 @@ ID=${POS[0]}
 
 if [ "$KIND" = secondmate ] && [ "$HERDR_LAB" -eq 1 ]; then
   echo "error: --herdr-lab applies only to crewmate ship or scout briefs" >&2
+  exit 1
+fi
+
+if [ "$KIND" = secondmate ] && [ "$LIGHT_VERIFY" -eq 1 ]; then
+  echo "error: --light-verify applies only to crewmate ship or scout briefs" >&2
   exit 1
 fi
 
@@ -221,6 +235,19 @@ EOF
 )
 fi
 
+if [ "$LIGHT_VERIFY" -eq 1 ]; then
+VERIFY_TRIVIAL_PATH=$(shell_quote "$FM_ROOT/.agents/skills/verify-trivial/SKILL.md")
+VERIFY_TIER_SECTION=$(printf '%s\n' \
+'# Verification tier: Light' \
+'This brief was scaffolded with `--light-verify`: read '"$VERIFY_TRIVIAL_PATH"' for the acceptance-criteria cap, the escalate-not-fail cap-out, and the mandatory side-effect confidence gate that apply to this task instead of the default full verification workflow.' \
+'That file itself points to `verify-rigorously` (load it normally) for the AC bar, verification shapes, pass/fail matrix, and "what wasn'\''t verified" footer this tier still applies in full.')
+VERIFY_TIER_BLOCK=$'\n'"$VERIFY_TIER_SECTION"$'\n'
+LIGHT_VERIFY_DOD_NOTE=$'\n'"This task runs the Light verification tier (see the Verification tier section above): when firstmate sends the validation trigger for this task, it skips the document step, since the side-effect confidence gate already covers what that step would check at this scale."
+else
+VERIFY_TIER_BLOCK=""
+LIGHT_VERIFY_DOD_NOTE=""
+fi
+
 if [ "$KIND" = scout ]; then
 cat > "$BRIEF" <<EOF
 You are a crewmate: an autonomous worker agent managed by firstmate. Work on your own; do not wait for a human.
@@ -229,7 +256,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
-
+$VERIFY_TIER_BLOCK
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 This is a SCOUT task: the deliverable is a written report, not a PR.
@@ -326,6 +353,7 @@ Two firstmate-specific rules layer on top of that guidance:
 - Avoid \`--yes\`: the captain, not you, owns the ask-user decisions it would silently auto-resolve.
 
 After /no-mistakes reports CI green (the CI-ready return point - do not wait for it to keep monitoring in the background until merge), append \`done: PR {url} checks green\` and stop. You are finished.
+$LIGHT_VERIFY_DOD_NOTE
 EOF
 )
     ;;
@@ -338,7 +366,7 @@ You are a crewmate: an autonomous worker agent managed by firstmate. Work on you
 {TASK}
 
 $HERDR_SECTION
-
+$VERIFY_TIER_BLOCK
 # Setup
 You are in a disposable git worktree of $REPO, at a detached HEAD on a clean default branch.
 
