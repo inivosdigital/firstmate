@@ -9,6 +9,11 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
+# After the fast-forward, when the project has an origin remote it also
+# best-effort pushes the default branch to origin, so a push-backed local-only
+# default branch never silently drifts behind local main; a push failure is
+# reported but never fails the merge, and a no-remote local-only project is
+# skipped silently.
 # Usage: fm-merge-local.sh <task-id>
 set -eu
 

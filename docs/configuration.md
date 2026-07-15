@@ -233,7 +233,7 @@ If a selected profile carries an effort value the chosen harness does not accept
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files produce a `CREW_DISPATCH: active config/crew-dispatch.json` block that lists each rule and prints `default:` when present.
-Malformed JSON, an unverified harness, a malformed array profile, an unknown `select`, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an unverified harness, a malformed array profile, an unknown `select`, an effort value unsupported by that harness, a non-boolean `ultracode`, or an empty/non-string `ultracode_role` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...` (a wrong-typed `ultracode`/`ultracode_role` is otherwise silently dropped by `bin/fm-dispatch-select.sh`); missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 If no dispatch rule fits, firstmate uses the dispatch profile `default` when present, then falls back to `config/crew-harness`.
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
@@ -412,6 +412,7 @@ FM_TIER_HEAVY_MIN_FILES=8          # fm-tier-guard.sh: changed-file count that e
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's best-effort fetch of firstmate's own read-only upstream/main, refreshing the UPSTREAM_DRIFT bootstrap diagnostic
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller
 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-nas-deploy-sync.sh hits the orphaned .git/packed-refs.lock signature on the shared NAS checkout (two landed teardowns for the same project can race it)
