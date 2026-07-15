@@ -1334,7 +1334,14 @@ test_local_only_force_overrides_unpushed() {
 
   expect_code 0 "$rc" "force-override: --force should bypass the unpushed-work check"
   ! grep -q REFUSED "$case_dir/stderr" || fail "force-override: REFUSED printed despite --force"
-  pass "local-only worktree with unpushed work is torn down under --force (escape hatch)"
+  # A forced teardown carries no landed-work guarantee (--force is the explicit
+  # discard path), so it must not call the NAS deploy sync hook at all. The real
+  # fm-nas-deploy-sync.sh runs unmocked in these tests (FM_ROOT_OVERRIDE=$ROOT)
+  # and always prints this exact line when it runs against the test's empty
+  # FM_NAS_DEPLOYMENTS_OVERRIDE map, so its absence proves the call was skipped.
+  assert_no_grep 'skipped: no recorded NAS deployment' "$case_dir/stdout" \
+    "force-override: forced teardown should skip the NAS deploy sync hook entirely"
+  pass "local-only worktree with unpushed work is torn down under --force and skips the NAS deploy sync hook"
 }
 
 test_herdr_teardown_clears_escalation_marker() {

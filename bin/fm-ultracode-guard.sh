@@ -55,6 +55,15 @@ MARKER="$STATE/$ID.ultracode"
 cmd_flag() {
   local role=${3:-independent-review}
   [ $# -le 3 ] || { usage; exit 1; }
+  # The marker is a line-based file (see cmd_reviewed/cmd_check), so a role
+  # containing a newline or other control character could inject a forged
+  # reviewed_by= line and bypass the independent-review requirement entirely.
+  case "$role" in
+    *[!A-Za-z0-9_-]*|'')
+      echo "error: role '$role' must be non-empty and contain only letters, digits, '-', or '_'" >&2
+      exit 1
+      ;;
+  esac
   mkdir -p "$STATE"
   # Overwrites any existing marker: re-flagging (e.g. after an escalation)
   # deliberately clears a prior reviewed_by=, since that review was against an
