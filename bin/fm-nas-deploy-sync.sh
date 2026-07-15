@@ -28,11 +28,11 @@
 # ahead of it on PATH intercepts restart/list during tests - real tests must never
 # reach the real /mnt/nas/experiments or a real pm2 process.
 #
-# Every filesystem/git touch of $NAS_PATH is wrapped in a bounded timeout
-# (FM_NAS_SYNC_TIMEOUT seconds, default 15): the mount is a NAS, and an
-# unreachable one is a hang risk (a stuck stat/read), not a fast failure, which
-# would otherwise stall fm-teardown.sh's caller and break this script's
-# non-blocking contract.
+# Every filesystem/git touch of $NAS_PATH requires a timeout/gtimeout binary and
+# is wrapped in a bounded timeout (FM_NAS_SYNC_TIMEOUT seconds, default 15): the
+# mount is a NAS, and an unreachable one is a hang risk (a stuck stat/read), not
+# a fast failure, which would otherwise stall fm-teardown.sh's caller and break
+# this script's non-blocking contract.
 #
 # $NAS_PATH is one single shared live-deployment checkout - unlike a project's
 # projects/<name> dev clone, which is scoped to one firstmate home, two ship
@@ -71,13 +71,12 @@ elif command -v gtimeout >/dev/null 2>&1; then
   HAVE_TIMEOUT=gtimeout
 fi
 
-# bounded <args...>: run <args...>, killed after $NAS_SYNC_TIMEOUT seconds when
-# a `timeout`/`gtimeout` binary is available, run directly otherwise.
+# bounded <args...>: run <args...>, killed after $NAS_SYNC_TIMEOUT seconds.
 bounded() {
   case "$HAVE_TIMEOUT" in
     timeout) timeout "$NAS_SYNC_TIMEOUT" "$@" ;;
     gtimeout) gtimeout "$NAS_SYNC_TIMEOUT" "$@" ;;
-    *) "$@" ;;
+    *) return 124 ;;
   esac
 }
 
@@ -190,6 +189,11 @@ if [ -z "$row" ]; then
 fi
 NAS_PATH=${row%%|*}
 PROCS=${row#*|}
+
+if [ "$HAVE_TIMEOUT" = none ]; then
+  echo "$NAME: skipped: no timeout/gtimeout binary available for bounded NAS access"
+  exit 0
+fi
 
 if ! bounded test -d "$NAS_PATH"; then
   echo "$NAME: skipped: NAS path $NAS_PATH not a directory"

@@ -246,20 +246,27 @@ if [ -f "$META" ]; then
       fi
       if git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
         diff_base_resolved=1
-        diff_paths=$(git -C "$WT" diff --name-only "$BASE...$compare_ref" -- 2>/dev/null || true)
-        risky_paths=
-        if [ -n "$diff_paths" ]; then
-          while IFS= read -r path; do
-            [ -n "$path" ] || continue
-            lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
-            if path_is_risky "$lower_path"; then
-              risky_paths="${risky_paths}${risky_paths:+, }$path"
-            fi
-          done <<< "$diff_paths"
-        fi
-        if [ -n "$risky_paths" ]; then
-          echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
-          FOUND=1
+        diff_paths=
+        diff_rc=0
+        diff_paths=$(git -C "$WT" diff --name-only "$BASE...$compare_ref" -- 2>/dev/null) || diff_rc=$?
+        if [ "$diff_rc" -ne 0 ]; then
+          echo "warning: could not read changed paths for $ID (project $PROJ, base '$BASE', compare '$compare_ref'); the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
+          DIFF_UNRESOLVED=1
+        else
+          risky_paths=
+          if [ -n "$diff_paths" ]; then
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+              if path_is_risky "$lower_path"; then
+                risky_paths="${risky_paths}${risky_paths:+, }$path"
+              fi
+            done <<< "$diff_paths"
+          fi
+          if [ -n "$risky_paths" ]; then
+            echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
+            FOUND=1
+          fi
         fi
       fi
     fi
@@ -273,10 +280,13 @@ if [ -f "$META" ]; then
       echo "warning: could not resolve a diff base for $ID (project $PROJ, default branch '${DEFAULT:-unresolved}'); the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
       DIFF_UNRESOLVED=1
     fi
+  else
+    echo "warning: unusable worktree/project for $ID (worktree '${WT:-unresolved}', project '${PROJ:-unresolved}'); the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
+    DIFF_UNRESOLVED=1
   fi
 fi
 
-if [ "$CHECKED" -eq 0 ]; then
+if [ "$CHECKED" -eq 0 ] && [ "$DIFF_UNRESOLVED" -eq 0 ]; then
   echo "error: neither $BRIEF nor a usable worktree/project in $META was found for $ID; nothing to check" >&2
   exit 2
 fi

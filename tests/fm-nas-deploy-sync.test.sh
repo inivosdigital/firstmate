@@ -155,6 +155,24 @@ run_sync() {
   FM_HOME="$home" PATH="$home/fakebin:$PATH" "$SYNC" "$@"
 }
 
+make_no_timeout_toolbin() {
+  local dir=$1 tb="$1/notimeoutbin" tool real
+  mkdir -p "$tb"
+  for tool in bash git awk sed grep jq sleep rm dirname; do
+    real=$(command -v "$tool" || true)
+    [ -n "$real" ] || fail "missing tool for no-timeout path: $tool"
+    ln -s "$real" "$tb/$tool"
+  done
+  printf '%s\n' "$tb"
+}
+
+run_sync_no_timeout() {
+  local home=$1 toolbin
+  shift
+  toolbin=$(make_no_timeout_toolbin "$home")
+  FM_HOME="$home" PATH="$home/fakebin:$toolbin" "$SYNC" "$@"
+}
+
 # write_git_hung_fetch_stub <fakebin>: any `fetch` call hangs indefinitely
 # (well past FM_NAS_SYNC_TIMEOUT), so only the bounded wrapper's `timeout` kill
 # can make the sync return promptly; every other call delegates to the real git.
@@ -215,6 +233,16 @@ for a in "\$@"; do
   fi
 done
 exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+write_git_forbidden_stub() {
+  local fakebin=$1 log=$2
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$log"
+exit 99
 SH
   chmod +x "$fakebin/git"
 }
@@ -344,6 +372,29 @@ test_hung_fetch_is_bounded_by_timeout() {
   [ "$elapsed" -lt 10 ] || fail "hung-fetch: sync took ${elapsed}s - the timeout bound did not stop the hung fetch (stub sleeps 20s)"
   assert_contains "$out" "hungfetch-test: skipped: fetch failed" "hung-fetch: did not report the bounded fetch as a failure"
   pass "a hung NAS fetch is killed by FM_NAS_SYNC_TIMEOUT instead of blocking the caller"
+}
+
+test_no_timeout_binary_skips_before_touching_nas() {
+  local home nas log out rc git_log
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" notimeout-test)
+  advance_origin "$home" notimeout-test C1
+  write_map "$home" notimeout-test "$nas" notimeout-test
+  log="$home/restart.log"
+  git_log="$home/git.log"
+  write_pm2_stub "$home/fakebin" "$log"
+  write_git_forbidden_stub "$home/fakebin" "$git_log"
+
+  set +e
+  out=$(run_sync_no_timeout "$home" notimeout-test 2>/dev/null)
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "no-timeout: sync should still exit 0 when no timeout tool is available"
+  assert_contains "$out" "notimeout-test: skipped: no timeout/gtimeout binary available" "no-timeout: did not report the bounded-access skip"
+  [ ! -s "$git_log" ] || fail "no-timeout: touched the NAS checkout through git despite lacking a timeout tool"
+  [ ! -s "$log" ] || fail "no-timeout: pm2 restart was invoked despite lacking a timeout tool"
+  pass "fm-nas-deploy-sync skips before NAS access when no timeout binary is available"
 }
 
 test_transient_packed_refs_lock_is_retried() {
@@ -550,6 +601,7 @@ test_diverged_is_stuck_untouched
 test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
+test_no_timeout_binary_skips_before_touching_nas
 test_transient_packed_refs_lock_is_retried
 test_status_failure_is_stuck_untouched
 test_missing_map_file_is_silent_noop

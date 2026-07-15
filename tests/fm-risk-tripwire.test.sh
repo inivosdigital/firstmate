@@ -648,6 +648,57 @@ test_unresolvable_diff_base_still_reports_brief_hit() {
   pass "fm-risk-tripwire still reports a brief hit (1) when the diff base is unresolvable"
 }
 
+test_unusable_meta_with_clean_brief_is_not_a_clean_pass() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/unusable-meta-clean-brief"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  printf 'Add a --json flag to the status command.\n' > "$case_dir/data/task-x1/brief.md"
+
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" \
+    "worktree=$case_dir/missing-wt" \
+    "project=$case_dir/missing-project"
+
+  set +e
+  out=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" FM_DATA_OVERRIDE="$case_dir/data" "$TRIPWIRE" task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 2 "$status" "unusable-meta-clean-brief: unusable meta must read as could-not-check (2), not a clean pass (0)"
+  assert_contains "$out" "unusable worktree/project" "unusable-meta-clean-brief: should warn that the diff checkpoint did not run"
+  pass "fm-risk-tripwire reports could-not-check when meta paths are unusable despite a clean brief"
+}
+
+test_diff_name_scan_failure_is_not_a_clean_pass() {
+  local case_dir fakebin realgit out status
+  case_dir=$(make_case diff-failure)
+  fakebin="$case_dir/fakebin"
+  mkdir -p "$fakebin"
+  realgit=$(command -v git)
+  printf 'Fix a typo in the help text.\n' > "$case_dir/data/task-x1/brief.md"
+  write_task_meta "$case_dir"
+
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = diff ] && [ "\${4:-}" = --name-only ]; then
+  echo "fatal: simulated diff failure" >&2
+  exit 128
+fi
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+
+  set +e
+  out=$(PATH="$fakebin:$PATH" run_tripwire "$case_dir" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 2 "$status" "diff-failure: a failed name-only diff must read as could-not-check (2), not a clean pass (0)"
+  assert_contains "$out" "could not read changed paths" "diff-failure: should warn that the diff checkpoint failed"
+  pass "fm-risk-tripwire reports could-not-check when the diff path scan fails"
+}
+
 test_multiword_phrase_keyword_trips() {
   local case_dir out status
   case_dir="$TMP_ROOT/phrase-keyword"
@@ -694,6 +745,8 @@ test_bare_auth_matches_but_authoritative_does_not
 test_adjacent_keywords_both_reported
 test_unresolvable_diff_base_is_not_a_clean_pass
 test_unresolvable_diff_base_still_reports_brief_hit
+test_unusable_meta_with_clean_brief_is_not_a_clean_pass
+test_diff_name_scan_failure_is_not_a_clean_pass
 test_multiword_phrase_keyword_trips
 test_diff_uses_recorded_pr_head_when_present
 test_brief_keyword_trips_wire
