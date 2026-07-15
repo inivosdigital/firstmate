@@ -21,6 +21,15 @@ fm_git_identity fmtest fmtest@example.invalid
 
 REQUIRED_REASON='resume supervision with bin/fm-watch-arm.sh as its own Claude Code background task'
 
+# The hook now polls fm_watcher_healthy for up to FM_TURNEND_ARM_WAIT (default
+# FM_ARM_CONFIRM_TIMEOUT, 10s in production) before blocking, so it can let a
+# genuine watcher re-arm land instead of blocking on the handoff gap. Most
+# tests below assert an eventual outcome (block or allow), not that timing, so
+# run_hook defaults every call to this short override to keep the suite fast;
+# test_hook_runs_fast and the new mid-poll test set their own values to
+# exercise the timing directly.
+FAST_ARM_WAIT=1
+
 # --- PREDICATE: bin/fm-supervision-lib.sh -----------------------------------
 
 test_predicate_healthy_no_inflight() {
@@ -168,7 +177,9 @@ make_secondmate_linked_home_dir() {
 run_hook() {
   local dir=$1 stop_active=$2 home
   home=$(cd "$dir" && pwd)
-  printf '{"stop_hook_active":%s}' "$stop_active" | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1
+  printf '{"stop_hook_active":%s}' "$stop_active" \
+    | CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_ARM_WAIT="${FM_TURNEND_ARM_WAIT:-$FAST_ARM_WAIT}" \
+      bash "$dir/bin/fm-turnend-guard.sh" 2>&1
 }
 
 nonexistent_pid() {
@@ -287,7 +298,7 @@ test_hook_blocks_from_fm_home_state() {
   home="$TMP_ROOT/hook-fm-home-op"
   mkdir -p "$home/state"
   : > "$home/state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_TURNEND_ARM_WAIT="$FAST_ARM_WAIT" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must inspect the active FM_HOME state dir"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: blocks from active FM_HOME state, not only repo-root state"
@@ -325,7 +336,7 @@ test_hook_uses_state_override() {
   state="$TMP_ROOT/hook-state-override-active"
   mkdir -p "$home/state" "$state"
   : > "$state/task1.meta"
-  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  out=$(printf '{"stop_hook_active":false}' | CLAUDECODE=1 FM_HOME="$home" FM_STATE_OVERRIDE="$state" FM_TURNEND_ARM_WAIT="$FAST_ARM_WAIT" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
   expect_code 2 "$status" "hook must let FM_STATE_OVERRIDE win over FM_HOME/state"
   assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
   pass "fm-turnend-guard: uses FM_STATE_OVERRIDE ahead of FM_HOME/state"
@@ -532,15 +543,59 @@ test_hook_silent_without_stdin() {
   pass "fm-turnend-guard: silent no-op on empty stdin"
 }
 
+# Tradeoff, stated plainly (docs/turnend-guard.md "Shared Predicate"): closing
+# the re-arm race means the genuinely-blind path (no watcher, no arm ever
+# registers) no longer blocks near-instantly - it polls for FM_TURNEND_ARM_WAIT
+# first, so a legitimate in-flight re-arm gets the same window to land. This
+# test pins that bound instead of asserting a near-instant return, and uses an
+# explicit short wait rather than the 10s production default so the suite
+# stays fast.
 test_hook_runs_fast() {
-  local dir start elapsed_s
+  local dir start elapsed_s poll_wait=2
   dir=$(make_primary_dir "$TMP_ROOT/hook-timing")
   : > "$dir/state/task1.meta"
   start=$SECONDS
-  run_hook "$dir" false >/dev/null
+  FM_TURNEND_ARM_WAIT=$poll_wait run_hook "$dir" false >/dev/null
   elapsed_s=$((SECONDS - start))
-  [ "$elapsed_s" -lt 3 ] || fail "hook took ${elapsed_s}s, expected well under a second (generous 3s CI margin)"
-  pass "fm-turnend-guard: runs well under the generous timing margin (${elapsed_s}s)"
+  [ "$elapsed_s" -ge 1 ] || fail "hook returned in ${elapsed_s}s; expected it to poll rather than block near-instantly"
+  [ "$elapsed_s" -lt $((poll_wait + 3)) ] || fail "hook took ${elapsed_s}s, expected the ${poll_wait}s poll window plus a generous 3s CI margin"
+  pass "fm-turnend-guard: genuinely-blind path blocks within the bounded re-arm poll window (${elapsed_s}s, wait=${poll_wait}s)"
+}
+
+# The actual fix under test: a re-arming watcher that registers its live lock
+# partway through the poll window must be let through, not blocked - this is
+# what distinguishes the bounded poll from a bare timeout. Simulates
+# bin/fm-watch-arm.sh's lock-registration gap (docs/scout-turnend-guard-race
+# report: ~0.25-0.3s measured) by writing a live, identity-matched lock shortly
+# after the hook starts polling.
+test_hook_allows_watcher_that_registers_mid_poll() {
+  local dir pid identity out status start elapsed_s poll_wait=5 writer_pid
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-race")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live watcher holder"
+  }
+  (
+    sleep 0.5
+    record_watcher_lock "$dir" "$pid" "$identity"
+    touch "$dir/state/.last-watcher-beat"
+  ) &
+  writer_pid=$!
+  start=$SECONDS
+  out=$(FM_TURNEND_ARM_WAIT=$poll_wait run_hook "$dir" false); status=$?
+  elapsed_s=$((SECONDS - start))
+  wait "$writer_pid" 2>/dev/null || true
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must allow the stop once a re-arming watcher's lock registers mid-poll"
+  [ -z "$out" ] || fail "hook produced output after the watcher became healthy mid-poll: $out"
+  [ "$elapsed_s" -lt "$poll_wait" ] || fail "hook waited the full ${elapsed_s}s deadline instead of returning as soon as the lock registered"
+  pass "fm-turnend-guard: allows the stop once a re-arming watcher's lock registers mid-poll (${elapsed_s}s, wait=${poll_wait}s)"
 }
 
 test_grok_adapter_forces_one_resume_when_unhealthy() {
@@ -562,7 +617,7 @@ test_grok_adapter_forces_one_resume_when_unhealthy() {
 } >> "$log"
 EOF
   chmod +x "$fakebin/grok"
-  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
+  out=$(printf '{"sessionId":"session-test","hookEventName":"stop"}' | PATH="$fakebin:$PATH" GROK_WORKSPACE_ROOT="$dir" FM_TURNEND_ARM_WAIT="$FAST_ARM_WAIT" bash "$dir/bin/fm-turnend-guard-grok.sh" 2>&1); status=$?
   expect_code 0 "$status" "grok adapter must fail open after queuing a forced resume"
   [ -z "$out" ] || fail "grok adapter printed output: $out"
   assert_contains "$(cat "$log")" 'active=1' "grok adapter must mark its forced resume as loop-guarded"
@@ -912,6 +967,7 @@ test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
+test_hook_allows_watcher_that_registers_mid_poll
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir
