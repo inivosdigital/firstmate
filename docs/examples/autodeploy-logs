@@ -1,0 +1,24 @@
+# config/autodeploy-logs - poll-based autodeploy status logs firstmate watches
+# for failure on its periodic sweep (bin/fm-watch.sh's autodeploy_scan). Copy
+# this into a local, gitignored config/autodeploy-logs and replace the
+# placeholder with your own status-log path(s). One absolute log path per
+# non-empty, non-comment line; blank lines and full-line "#" comments are
+# ignored.
+#
+# Each listed log is expected to follow firstmate's fleet-sync line convention
+# (bin/fm-fleet-sync.sh): a durable, timestamped, append-only status log whose
+# LAST line reports the most recent run's health - a healthy run ends in an
+# "ok ..." rollup, a failed one in an "ALERT ..." rollup or a STUCK:/FAILED:
+# alert line. On its periodic sweep firstmate reads only that last line; when it
+# reports a failure not already surfaced, firstmate wakes and relays the line to
+# the captain, then stays quiet about that same failure until it changes or a
+# later successful run clears it. It never touches the deploy: reading the log is
+# the whole job.
+#
+# An ABSENT or empty config/autodeploy-logs is a no-op. A missing or temporarily
+# unreadable log (e.g. a NAS mount hiccup) is silently skipped rather than
+# alarmed, so a transient outage does not spuriously wake the captain.
+#
+# The path below is an illustrative placeholder - list the status log(s) whose
+# silent deploy failure would actually matter for this fleet.
+/home/you/.local/state/my-app-autodeploy/status.log
