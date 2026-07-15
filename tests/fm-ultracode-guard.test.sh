@@ -156,6 +156,58 @@ test_reflag_clears_prior_review() {
   pass "fm-ultracode-guard re-flagging starts the review requirement over"
 }
 
+test_flag_rejects_newline_injection_in_role() {
+  local state out status payload
+  state=$(new_state_dir newline-injection)
+  fm_write_meta "$state/task-x1.meta" "worktree=/tmp/x" "project=/tmp/x"
+  payload=$'independent-review\nreviewed_by=evil-task'
+
+  set +e
+  out=$(run_guard "$state" flag task-x1 "$payload" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "newline-injection: flag must refuse a role containing a newline"
+  assert_contains "$out" "must be non-empty and contain only letters, digits, '-', or '_'" \
+    "newline-injection: should explain the refusal"
+  assert_absent "$state/task-x1.ultracode" \
+    "newline-injection: no marker file should be written for a rejected role"
+  pass "fm-ultracode-guard flag refuses a role containing a newline (marker-injection defense)"
+}
+
+test_flag_rejects_role_with_disallowed_characters() {
+  local state out status
+  state=$(new_state_dir bad-chars)
+  fm_write_meta "$state/task-x1.meta" "worktree=/tmp/x" "project=/tmp/x"
+
+  set +e
+  out=$(run_guard "$state" flag task-x1 "bad role" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "bad-chars: flag must refuse a role containing a space"
+  assert_contains "$out" "must be non-empty and contain only letters, digits, '-', or '_'" \
+    "bad-chars: should explain the refusal"
+  assert_absent "$state/task-x1.ultracode" \
+    "bad-chars: no marker file should be written for a rejected role"
+  pass "fm-ultracode-guard flag refuses a role containing a disallowed character"
+}
+
+test_flag_accepts_role_with_digits_and_underscore() {
+  local state out
+  state=$(new_state_dir digits-underscore)
+  fm_write_meta "$state/task-x1.meta" "worktree=/tmp/x" "project=/tmp/x"
+
+  run_guard "$state" flag task-x1 safety_check-2 >/dev/null
+
+  set +e
+  out=$(run_guard "$state" check task-x1 2>&1)
+  set -e
+
+  assert_contains "$out" "role=safety_check-2" "digits-underscore: check should report the accepted role"
+  pass "fm-ultracode-guard flag accepts a role containing digits and underscores"
+}
+
 test_check_passes_when_never_flagged
 test_flag_then_check_fails_until_reviewed
 test_flag_custom_role_reported_in_check
@@ -164,5 +216,8 @@ test_reviewed_by_unknown_task_is_refused
 test_reviewed_by_distinct_dispatched_task_passes_check
 test_reviewed_without_flag_is_refused
 test_reflag_clears_prior_review
+test_flag_rejects_newline_injection_in_role
+test_flag_rejects_role_with_disallowed_characters
+test_flag_accepts_role_with_digits_and_underscore
 
 echo "# all fm-ultracode-guard tests passed"

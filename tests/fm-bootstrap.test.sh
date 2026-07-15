@@ -915,9 +915,169 @@ test_upstream_drift_report() {
   pass "bootstrap reports upstream drift (FYI, stale, and far-behind escalations) and stays silent without an upstream"
 }
 
+# --- upstream fetch bound (bin/fm-bootstrap.sh's upstream_drift_fetch) --------
+# The MUTATING half of the UPSTREAM_DRIFT diagnostic (git fetch upstream, run
+# only from the locked fleet_sync sweep) must never hang session start when the
+# network stalls, regardless of which bounding tool is available: `timeout` when
+# present, `gtimeout` as its Homebrew-coreutils-name fallback, and a pure
+# background-then-kill fallback when neither binary exists at all. Each case
+# points a fake `git fetch` at a long real sleep and proves the whole bootstrap
+# invocation still returns well within FM_UPSTREAM_FETCH_TIMEOUT.
+
+# Fake git: any `git -C <dir> fetch ...` sleeps for a long time (never legitimately
+# reached within the test's small FM_UPSTREAM_FETCH_TIMEOUT); every other git
+# subcommand passes straight through to the real git, since upstream_drift_report,
+# the tangle check, and crew-dispatch validation all still run in the same
+# bootstrap invocation. Args: fakebin
+add_hanging_upstream_fetch_git() {
+  local fakebin=$1 real_git
+  real_git=$(command -v git) || fail "git is required to build the fake upstream-fetch git wrapper"
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = -C ] && [ "\${3:-}" = fetch ]; then
+  exec sleep 300
+fi
+exec '$real_git' "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# A userspace gtimeout stand-in (this host has no Homebrew coreutils), so the
+# gtimeout-fallback case can prove the fallback branch is actually reached and
+# actually bounds the hung fetch, rather than just asserting on elapsed time.
+add_fake_gtimeout() {
+  local fakebin=$1
+  cat > "$fakebin/gtimeout" <<'SH'
+#!/usr/bin/env bash
+secs=$1; shift
+"$@" &
+pid=$!
+( sleep "$secs"; kill "$pid" 2>/dev/null ) &
+watcher=$!
+wait "$pid" 2>/dev/null
+rc=$?
+kill "$watcher" 2>/dev/null
+exit "$rc"
+SH
+  chmod +x "$fakebin/gtimeout"
+}
+
+# A drift repo with an upstream remote (a dummy URL; the fetch itself is faked)
+# and no refs/remotes/upstream/main yet, so upstream_drift_report stays silent
+# and only the fetch-bound behavior is under test. Args: repo
+make_fetch_bound_repo() {
+  local repo=$1
+  make_drift_repo "$repo"
+  drift_commit "$repo" base
+  git -C "$repo" remote add upstream https://example.invalid/upstream.git
+}
+
+# Run bootstrap (NOT detect-only, so fleet_sync/upstream_drift_fetch actually
+# run) against a fetch-bound repo and echo real wall-clock elapsed seconds.
+# Args: repo fakebin fetch_timeout [bash_env]
+run_fetch_bound_bootstrap() {
+  local repo=$1 fakebin=$2 fetch_timeout=$3 bash_env=${4:-} start elapsed rc
+  # Wall-clock via `date +%s`, not $SECONDS: run_bootstrap_timeout_case above
+  # reassigns $SECONDS inside a subshell for its own fake-time trick, and
+  # ShellCheck's whole-file data-flow analysis for that special variable then
+  # flags any later $SECONDS read here too (SC2030/SC2031), even though the two
+  # functions never interact. `date +%s` sidesteps the false positive entirely.
+  start=$(date +%s)
+  set +e
+  if [ -n "$bash_env" ]; then
+    BASH_ENV="$bash_env" PATH="$fakebin:$BASE_PATH" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+      FM_UPSTREAM_FETCH_TIMEOUT="$fetch_timeout" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  else
+    PATH="$fakebin:$BASE_PATH" FM_HOME="$repo" FM_ROOT_OVERRIDE="$repo" \
+      FM_UPSTREAM_FETCH_TIMEOUT="$fetch_timeout" FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+      "$ROOT/bin/fm-bootstrap.sh" >/dev/null 2>&1
+  fi
+  rc=$?
+  set -e
+  elapsed=$(( $(date +%s) - start ))
+  [ "$rc" -eq 0 ] || fail "fetch-bound bootstrap should still exit 0 (best-effort fetch), got rc=$rc"
+  printf '%s\n' "$elapsed"
+}
+
+test_upstream_fetch_bounded_by_real_timeout() {
+  local case_dir repo fakebin elapsed
+  case_dir="$TMP_ROOT/fetch-timeout"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"
+  make_fetch_bound_repo "$repo"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_hanging_upstream_fetch_git "$fakebin"
+
+  elapsed=$(run_fetch_bound_bootstrap "$repo" "$fakebin" 1)
+
+  [ "$elapsed" -le 10 ] || fail "timeout-bounded fetch should return quickly, took ${elapsed}s (fake fetch sleeps 300s)"
+  pass "bootstrap bounds the upstream fetch with 'timeout' when available (bound 1s, elapsed ${elapsed}s, fake fetch hangs 300s)"
+}
+
+test_upstream_fetch_bounded_by_gtimeout_fallback() {
+  local case_dir repo fakebin bash_env elapsed
+  case_dir="$TMP_ROOT/fetch-gtimeout"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"
+  make_fetch_bound_repo "$repo"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_hanging_upstream_fetch_git "$fakebin"
+  add_fake_gtimeout "$fakebin"
+
+  bash_env="$case_dir/no-timeout.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = timeout ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+timeout() {
+  return 127
+}
+SH
+
+  elapsed=$(run_fetch_bound_bootstrap "$repo" "$fakebin" 1 "$bash_env")
+
+  [ "$elapsed" -le 10 ] || fail "gtimeout-bounded fetch should return quickly, took ${elapsed}s (fake fetch sleeps 300s)"
+  pass "bootstrap falls back to 'gtimeout' when 'timeout' is unavailable (bound 1s, elapsed ${elapsed}s, fake fetch hangs 300s)"
+}
+
+test_upstream_fetch_bounded_by_background_kill_fallback() {
+  local case_dir repo fakebin bash_env elapsed
+  case_dir="$TMP_ROOT/fetch-bg-kill"; repo="$case_dir/repo"
+  mkdir -p "$case_dir"
+  make_fetch_bound_repo "$repo"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_hanging_upstream_fetch_git "$fakebin"
+
+  bash_env="$case_dir/no-timeout-no-gtimeout.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && { [ "${2:-}" = timeout ] || [ "${2:-}" = gtimeout ]; }; then
+    return 1
+  fi
+  builtin command "$@"
+}
+timeout() {
+  return 127
+}
+gtimeout() {
+  return 127
+}
+SH
+
+  elapsed=$(run_fetch_bound_bootstrap "$repo" "$fakebin" 1 "$bash_env")
+
+  [ "$elapsed" -le 10 ] || fail "background-kill-bounded fetch should return quickly, took ${elapsed}s (fake fetch sleeps 300s)"
+  pass "bootstrap falls back to a background-then-kill bound when neither 'timeout' nor 'gtimeout' exists (bound 1s, elapsed ${elapsed}s, fake fetch hangs 300s)"
+}
+
 test_bootstrap_reporting
 test_no_mistakes_min_version
 test_upstream_drift_report
+test_upstream_fetch_bounded_by_real_timeout
+test_upstream_fetch_bounded_by_gtimeout_fallback
+test_upstream_fetch_bounded_by_background_kill_fallback
 test_git_is_required_with_supported_install_instruction
 test_orca_backend_gates_orca_tool_only_when_selected
 test_session_provider_backends_do_not_require_tmux

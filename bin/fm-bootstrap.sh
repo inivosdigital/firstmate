@@ -219,15 +219,34 @@ upstream_drift_report() {
 # Fetch half: MUTATING/network, called only from fleet_sync (the locked sweep), so
 # the detect-only/read-only path never fetches. Best-effort and bounded - offline,
 # a transient failure, or a stalled connection just leaves the last-fetched ref in
-# place, and timeout (when available) caps a stall so session start never hangs.
-# No-op without an upstream remote.
+# place, and a bound always caps a stall so session start never hangs: `timeout`
+# when available, `gtimeout` on a platform that only has the Homebrew coreutils
+# name for it (mirrors bin/fm-nas-deploy-sync.sh's HAVE_TIMEOUT fallback), and a
+# background-then-kill fallback (mirrors fleet_sync's own pattern below) when
+# neither binary is installed at all. No-op without an upstream remote.
 upstream_drift_fetch() {
   git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
+  local seconds="${FM_UPSTREAM_FETCH_TIMEOUT:-20}" pid start
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${FM_UPSTREAM_FETCH_TIMEOUT:-20}" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
-  else
-    git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+    timeout "$seconds" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+    return 0
   fi
+  if command -v gtimeout >/dev/null 2>&1; then
+    gtimeout "$seconds" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
+    return 0
+  fi
+  git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null &
+  pid=$!
+  start=$SECONDS
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$((SECONDS - start))" -ge "$seconds" ]; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+      return 0
+    fi
+    sleep 1
+  done
+  wait "$pid" 2>/dev/null || true
 }
 
 fleet_sync() {

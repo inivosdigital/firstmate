@@ -9,7 +9,21 @@
 # auto-approves), and only as a clean fast-forward - it refuses a diverged branch
 # and tells you to have the crewmate rebase. See AGENTS.md prime directives,
 # project management, and task lifecycle.
-# Usage: fm-merge-local.sh <task-id>
+#
+# After the fast-forward, the project's origin is pushed only when the project
+# IS firstmate's own repo (PROJ resolves to the same real path as FM_ROOT) - that
+# is the deliberate fork-sync case (AGENTS.md prime directives; section 12's
+# self-update model), where origin is the captain's own fork and keeping its
+# default branch in sync is intended. A local-only PROJECT's contract is "no
+# remote, no PR" (AGENTS.md section 6); auto-pushing an arbitrary local-only
+# project's origin would silently break that promise, so every other project
+# needs the explicit --push-origin flag to opt in.
+#
+# Usage: fm-merge-local.sh <task-id> [--push-origin]
+#   --push-origin  push the fast-forwarded default branch to origin even when
+#                  PROJ is not firstmate's own repo. Only pass this on the
+#                  captain's explicit request for that project; firstmate's own
+#                  repo pushes automatically without it.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,7 +31,12 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
-ID=${1:?usage: fm-merge-local.sh <task-id>}
+ID=${1:?usage: fm-merge-local.sh <task-id> [--push-origin]}
+PUSH_ORIGIN_OPT=${2:-}
+case "$PUSH_ORIGIN_OPT" in
+  ''|--push-origin) ;;
+  *) echo "error: unknown argument '$PUSH_ORIGIN_OPT'; usage: fm-merge-local.sh <task-id> [--push-origin]" >&2; exit 1 ;;
+esac
 META="$STATE/$ID.meta"
 [ -f "$META" ] || { echo "error: no meta for task $ID at $META" >&2; exit 1; }
 
@@ -68,18 +87,25 @@ after=$(git -C "$PROJ" rev-parse --short "$DEFAULT")
 echo "merged $BRANCH into local $DEFAULT ($before -> $after) in $PROJ"
 
 # Keep a push-backed default branch synced with the merge that just landed, so
-# the remote never silently drifts behind local main. This is what keeps
-# firstmate's own fork alive after the remote swap that made origin the captain's
-# fork (AGENTS.md prime directives note on the firstmate repo's local-only
-# landing pattern). Best-effort by design: the local fast-forward above is the
-# operation that matters, so a push failure (offline, transient network, or a
-# non-fast-forward rejection) is reported but never fails the merge. A pure
-# local-only project with no origin remote has nowhere to push and is skipped
-# silently - not every local-only project is remote-backed.
-if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
-  if git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1; then
-    echo "pushed $DEFAULT to origin in $PROJ"
-  else
-    echo "warning: local $DEFAULT merged, but syncing it to origin failed in $PROJ (best-effort; merge succeeded)" >&2
+# the remote never silently drifts behind local main - but ONLY when PROJ is
+# firstmate's own repo (the deliberate fork-sync case; see header) or the caller
+# passed --push-origin explicitly. Best-effort by design when it does push: the
+# local fast-forward above is the operation that matters, so a push failure
+# (offline, transient network, or a non-fast-forward rejection) is reported but
+# never fails the merge. A pure local-only project with no origin remote has
+# nowhere to push and is skipped silently - not every local-only project is
+# remote-backed.
+proj_abs=$(cd "$PROJ" && pwd -P)
+fm_root_abs=$(cd "$FM_ROOT" && pwd -P)
+is_firstmate_repo=0
+[ "$proj_abs" = "$fm_root_abs" ] && is_firstmate_repo=1
+
+if [ "$is_firstmate_repo" -eq 1 ] || [ "$PUSH_ORIGIN_OPT" = "--push-origin" ]; then
+  if git -C "$PROJ" remote get-url origin >/dev/null 2>&1; then
+    if git -C "$PROJ" push origin "$DEFAULT" >/dev/null 2>&1; then
+      echo "pushed $DEFAULT to origin in $PROJ"
+    else
+      echo "warning: local $DEFAULT merged, but syncing it to origin failed in $PROJ (best-effort; merge succeeded)" >&2
+    fi
   fi
 fi
