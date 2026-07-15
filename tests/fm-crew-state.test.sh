@@ -1040,6 +1040,45 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+# Regression for the 2026-07-09 89-minute watcher stall: a `no-mistakes axi
+# status` call that ignores its initial signal (blocked deep in a slow/queued
+# daemon RPC under concurrent validation load) must still be gone by
+# NM_TIMEOUT+NM_KILL_AFTER, never merely asked to stop. Unlike
+# test_no_timeout_uses_perl_bound above (which forces the perl fallback by
+# hiding timeout/gtimeout from PATH), this deliberately runs with the REAL
+# system PATH so the PRIMARY `timeout` path - what production actually uses on
+# this box - is what gets exercised. A plain `timeout N cmd` with no
+# -k/--kill-after is only advisory: without nm_run's -k fix this test hangs
+# indefinitely instead of completing.
+test_uncooperative_no_mistakes_is_force_killed() {
+  reset_fakes
+  local d out start elapsed calls_file calls
+  d=$(new_case uncooperative)
+  make_repo_on_branch "$d/wt" fm/feat-uncooperative
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/no-mistakes.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
+while :; do sleep 1; done
+SH
+  chmod +x "$d/fakebin/no-mistakes"
+  fm_write_meta "$d/state/feat-uncooperative.meta" "window=fm:fm-feat-uncooperative" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_BUSY=1
+  start=$SECONDS
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 "$CREW_STATE" feat-uncooperative)
+  elapsed=$((SECONDS - start))
+  assert_contains "$out" "state: working" "SIGTERM-ignoring no-mistakes falls back to pane"
+  assert_contains "$out" "source: pane" "SIGTERM-ignoring no-mistakes -> pane source"
+  [ "$elapsed" -lt 6 ] || fail "timeout -k did not force-kill an uncooperative no-mistakes call (elapsed ${elapsed}s)"
+  calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
+  [ "$calls" -ge 1 ] || fail "the uncooperative no-mistakes call never ran"
+  pass "an uncooperative no-mistakes call is force-killed via timeout -k rather than left to hang"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1172,6 +1211,7 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_uncooperative_no_mistakes_is_force_killed
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
