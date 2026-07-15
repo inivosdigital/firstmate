@@ -30,7 +30,9 @@ If no task is in flight, it exits silently.
 If work is in flight, it requires `fm_watcher_healthy <state-dir> <watch-path> [grace-seconds] [home]` from `bin/fm-wake-lib.sh`.
 That is the same identity-matched live lock and fresh beacon check used by `bin/fm-watch-arm.sh`.
 A stale beacon blocks even if a watcher pid is still live.
-A fresh leftover beacon blocks if the watcher lock is missing, dead, or identity-mismatched.
+A fresh leftover beacon does not block on the first unhealthy check: a legitimate re-arm (`bin/fm-watch-arm.sh`, backgrounded) needs a brief moment to fork the new watcher and register its lock after the old one released it, so the guard polls `fm_watcher_healthy` on a short interval and only blocks once a bounded deadline passes still unhealthy, exiting 0 the instant a live lock registers.
+That deadline defaults to the same budget `bin/fm-watch-arm.sh` gives a freshly forked watcher to confirm (`FM_ARM_CONFIRM_TIMEOUT`, 10 seconds) and is independently overridable via `FM_TURNEND_ARM_WAIT`.
+A watcher lock that is genuinely missing, dead, or identity-mismatched for the whole window still blocks; it just takes up to that deadline to say so instead of blocking on the first check.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.

@@ -44,6 +44,13 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 GRACE=${FM_GUARD_GRACE:-300}
 WATCH="$SCRIPT_DIR/fm-watch.sh"
+# A legitimate watcher re-arm (bin/fm-watch-arm.sh, backgrounded) needs a brief
+# moment to fork the watcher and register its lock after the old watcher
+# released it; fm_watcher_healthy demands a live lock with zero grace, so
+# without this the hook would block on that normal handoff gap, not just a
+# genuine supervision lapse (docs/turnend-guard.md "Shared Predicate"). Default
+# to the arm's own confirm budget so the two stay in lockstep.
+ARM_WAIT=${FM_TURNEND_ARM_WAIT:-${FM_ARM_CONFIRM_TIMEOUT:-10}}
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -83,7 +90,18 @@ fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0
 
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
-fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+
+# Bounded poll, not an immediate block: give an in-flight re-arm the same
+# handful-of-seconds tolerance bin/fm-guard.sh already grants via beacon grace,
+# expressed correctly for this predicate's live-lock check. A watcher that is
+# truly gone (or never was) still blocks - it just takes up to $ARM_WAIT to say
+# so, mirroring the poll bin/fm-watch-arm.sh:180 runs on itself.
+arm_deadline=$(( $(date +%s) + ARM_WAIT ))
+while :; do
+  fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+  [ "$(date +%s)" -ge "$arm_deadline" ] && break
+  sleep 0.2
+done
 
 afk=0
 [ -e "$STATE/.afk" ] && afk=1
