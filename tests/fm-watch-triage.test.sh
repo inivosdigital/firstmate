@@ -64,10 +64,34 @@ wait_numeric_file() {
   return 1
 }
 
+wait_path_exists() {
+  local file=$1 limit=${2:-30} i=0
+  while [ "$i" -lt "$limit" ]; do
+    [ -e "$file" ] && return 0
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Portable mtime in epoch seconds. Platform-detected, never the `stat -f || stat -c`
 # fallback (which writes a partial filesystem dump on Linux; see fm-watch.sh).
 file_mtime() {
   if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
+wait_mtime_after() {
+  local file=$1 before=$2 limit=${3:-80} i=0 m
+  while [ "$i" -lt "$limit" ]; do
+    m=$(file_mtime "$file" || true)
+    case "$m" in
+      ''|*[!0-9]*) ;;
+      *) [ "$m" -gt "$before" ] && return 0 ;;
+    esac
+    sleep 0.1
+    i=$((i + 1))
+  done
+  return 1
 }
 
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
@@ -350,6 +374,108 @@ test_working_note_not_working_surfaced() {
   grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "surfaced working: note was not queued"
   [ -s "$state/.seen-task_status" ] || fail "surfaced working: note did not advance its .seen-* suppressor"
   pass "a no-verb working: note whose crew is idle with no running pipeline is surfaced"
+}
+
+# Regression for the 2026-07-09 89-minute watcher stall: crew_absorb_class's
+# read (which stands in for a real crew whose `no-mistakes axi status` call is
+# stuck behind a busy shared daemon) hangs past its own signal - a fake
+# fm-crew-state.sh that traps and ignores TERM, exactly like the real CLI can
+# under concurrent validation load. Before the outer hard-timeout
+# (bin/fm-classify-lib.sh's fm_hard_timeout, wrapping crew_absorb_class's call)
+# this blocked the watcher's poll loop indefinitely, so its liveness beacon
+# went stale for the incident's full 89 minutes. With the fix, the read is
+# force-killed and reads as "none" (not provably working) - fail toward the
+# safe side, never a false "working" - so the wake correctly surfaces rather
+# than hanging or being silently absorbed. Asserting the watcher exits within a
+# small bound (not the 40-tick/4s default used elsewhere, but still orders of
+# magnitude under an unbounded hang) is the direct proof: pre-fix this hangs
+# past the bound and the assertion fails instead of passing.
+test_hung_crew_state_read_does_not_stall_watcher() {
+  local dir state fakebin out drain_out status_file pid
+  dir=$(make_case hung-crew-state-read); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; drain_out="$dir/drain.out"
+  status_file="$state/task.status"
+  printf 'working: compiling step 2\n' > "$status_file"
+  # Overwrite make_case's default (instant, canned-verdict) fake fm-crew-state.sh
+  # with one that never answers on its own - it must be force-killed.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  export FM_CREW_ABSORB_TIMEOUT=2 FM_CREW_ABSORB_KILL_AFTER=1
+  watch_bg "$state" "$fakebin" "$out"
+  pid=$!
+  wait_for_exit "$pid" 80 || fail "watcher did not resolve a hung crew-state read within a small bound (would hang indefinitely pre-fix)"
+  grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not surface the signal once the hung read was force-killed"
+  [ -e "$state/.last-watcher-beat" ] || fail "watcher beacon was never touched"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after the hung-read surface failed"
+  grep "$(printf '\tsignal\t')" "$drain_out" | grep -F "$status_file" >/dev/null || fail "hung-read surface was not queued"
+  unset FM_CREW_ABSORB_TIMEOUT FM_CREW_ABSORB_KILL_AFTER
+  pass "a hung crew-state read is force-killed and correctly surfaces instead of stalling the watcher's poll loop"
+}
+
+test_hung_no_mistakes_status_does_not_freeze_watcher_beacon() {
+  local dir state fakebin out status_file calls_file wt pid beat1 beat2
+  dir=$(make_case hung-no-mistakes-status); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; status_file="$state/task.status"; calls_file="$dir/no-mistakes.calls"; wt="$dir/wt"
+  mkdir -p "$wt"
+  git -C "$wt" init -q
+  git -C "$wt" commit -q --allow-empty -m init
+  git -C "$wt" checkout -q -b fm/hung-no-mistakes-status
+  : > "$calls_file"
+  printf 'working: compiling step 2\n' > "$status_file"
+  fm_write_meta "$state/task.meta" "window=fm:fm-task" "worktree=$wt" "kind=ship"
+  cat > "$fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  axi)
+    shift
+    case "${1:-}" in
+      status)
+        trap '' TERM
+        printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
+        while :; do sleep 1; done ;;
+    esac ;;
+esac
+exit 0
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  display-message)
+    printf '%%1\n'
+    exit 0 ;;
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    exit 0 ;;
+  capture-pane)
+    printf 'work in progress\nesc to interrupt\n'
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/no-mistakes" "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$ROOT/bin/fm-crew-state.sh" \
+    FM_FAKE_NM_CALLS="$calls_file" FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_path_exists "$state/.last-watcher-beat" 30 || { reap "$pid"; fail "watcher beacon was never touched"; }
+  beat1=$(file_mtime "$state/.last-watcher-beat")
+  wait_mtime_after "$state/.last-watcher-beat" "$beat1" 90 \
+    || { reap "$pid"; fail "watcher beacon did not advance after a hung no-mistakes status timed out"; }
+  beat2=$(file_mtime "$state/.last-watcher-beat")
+  kill -0 "$pid" 2>/dev/null || fail "watcher exited instead of absorbing the no-verb signal after no-mistakes timed out"
+  [ ! -s "$out" ] || { reap "$pid"; fail "watcher printed a wake reason after the bounded no-mistakes timeout: $(cat "$out")"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "watcher enqueued a wake instead of continuing after the bounded no-mistakes timeout"; }
+  [ -s "$state/.seen-task_status" ] || { reap "$pid"; fail "watcher did not advance the signal suppressor after bounded no-mistakes timeout"; }
+  grep -F "status" "$calls_file" >/dev/null || { reap "$pid"; fail "fake no-mistakes axi status was never called"; }
+  [ "$beat2" -gt "$beat1" ] || { reap "$pid"; fail "watcher beacon mtime did not increase"; }
+  reap "$pid"
+  pass "a hung no-mistakes axi status is force-killed and the watcher beacon keeps advancing"
 }
 
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
@@ -1309,6 +1435,8 @@ test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
 test_turn_ended_not_working_surfaced
 test_working_note_not_working_surfaced
+test_hung_crew_state_read_does_not_stall_watcher
+test_hung_no_mistakes_status_does_not_freeze_watcher_beacon
 test_actionable_signal_surfaced
 test_terminal_stale_surfaced
 test_stale_terminal_status_overridden_by_active_run

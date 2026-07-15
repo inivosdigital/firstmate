@@ -273,6 +273,57 @@ signal_reason_is_actionable() {  # <file> ...
   return 1
 }
 
+# Hard-timeout mechanism shared by fm-crew-state.sh's own no-mistakes bound and
+# the outer crew-state-read bound below. Detected once at source time. Plain
+# `timeout N cmd` (no -k/--kill-after) is only ADVISORY once N elapses: it sends
+# the initial signal but never force-kills a command that ignores or is stuck
+# past it - e.g. a CLI blocked on a slow/queued daemon RPC under concurrent
+# validation load, the exact failure mode behind the 2026-07-09 89-minute
+# watcher stall (crew_is_provably_working -> fm-crew-state.sh -> `no-mistakes
+# axi status` never returned, so the watcher's poll loop, and therefore its
+# liveness beacon touch, never came back around). The perl fallback (no
+# timeout/gtimeout on PATH) already force-kills a whole process group, so it
+# needs no separate -k equivalent, just the same kill-after grace parameter.
+_FM_HARD_TIMEOUT_BIN=none
+if command -v timeout >/dev/null 2>&1; then _FM_HARD_TIMEOUT_BIN=timeout
+elif command -v gtimeout >/dev/null 2>&1; then _FM_HARD_TIMEOUT_BIN=gtimeout
+elif command -v perl >/dev/null 2>&1; then _FM_HARD_TIMEOUT_BIN=perl
+fi
+
+# fm_hard_timeout <secs> <kill-after-secs> <cmd> [args...]
+# Runs <cmd> bounded to <secs>, GUARANTEEING it is gone by <secs>+<kill-after-secs>:
+# still alive that long after the initial signal means a SIGKILL, not just another
+# SIGTERM. Prints <cmd>'s stdout. Exit reflects <cmd>'s own code, or the forced-kill
+# wrapper's own (124) when it had to intervene. With no bounding tool on PATH at
+# all, refuses outright (124) rather than risk an unbounded call.
+fm_hard_timeout() {
+  local secs=$1 kill_after=$2
+  shift 2
+  case "$_FM_HARD_TIMEOUT_BIN" in
+    timeout)  timeout -k "$kill_after" "$secs" "$@" ;;
+    gtimeout) gtimeout -k "$kill_after" "$secs" "$@" ;;
+    perl)
+      # shellcheck disable=SC2016  # single quotes are deliberate: Perl expands its own variables.
+      perl -e 'my ($t, $k) = (shift, shift); my $pid = fork; die "fork failed" unless defined $pid; if (!$pid) { setpgrp(0, 0); exec @ARGV } local $SIG{ALRM} = sub { kill "TERM", -$pid; select undef, undef, undef, $k; kill "KILL", -$pid; exit 124 }; alarm $t; waitpid $pid, 0; exit($? >> 8)' "$secs" "$kill_after" "$@"
+      ;;
+    *) return 124 ;;
+  esac
+}
+
+# Outer bound wrapping the ENTIRE fm-crew-state.sh read below - defense in depth
+# alongside that script's OWN internal per-call no-mistakes bound
+# (FM_CREW_STATE_NM_TIMEOUT/FM_CREW_STATE_NM_KILL_AFTER). fm-crew-state.sh can
+# make several sequential no-mistakes calls in one read (axi status, the
+# cross-branch runs fallback, a ci log tail), so this stays comfortably above
+# their worst-case legitimate total, while still guaranteeing the watcher's own
+# poll loop - and therefore its liveness beacon - can never block on this read
+# past a fixed ceiling, even if some future call site inside fm-crew-state.sh
+# forgets to route a no-mistakes call through its own bound.
+FM_CREW_ABSORB_TIMEOUT="${FM_CREW_ABSORB_TIMEOUT:-45}"
+case "$FM_CREW_ABSORB_TIMEOUT" in ''|0|*[!0-9]*) FM_CREW_ABSORB_TIMEOUT=45 ;; esac
+FM_CREW_ABSORB_KILL_AFTER="${FM_CREW_ABSORB_KILL_AFTER:-5}"
+case "$FM_CREW_ABSORB_KILL_AFTER" in ''|0|*[!0-9]*) FM_CREW_ABSORB_KILL_AFTER=5 ;; esac
+
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
 # ("state: <s> · source: <src> · <detail>"). Prints exactly one token:
@@ -282,7 +333,10 @@ signal_reason_is_actionable() {  # <file> ...
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
 #   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict).
+#             torn-down/unknown crew, or an unreadable verdict) - INCLUDING a
+#             fm-crew-state.sh read that hit the hard timeout above: a timed-out
+#             read must never read as working, or a genuinely wedged crew behind
+#             a hung no-mistakes call would be absorbed instead of surfaced.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused.
@@ -292,7 +346,7 @@ signal_reason_is_actionable() {  # <file> ...
 crew_absorb_class() {  # <id>
   local id=$1 line state src
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$("$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(fm_hard_timeout "$FM_CREW_ABSORB_TIMEOUT" "$FM_CREW_ABSORB_KILL_AFTER" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
