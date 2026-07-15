@@ -728,6 +728,10 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+mistyped ultracode string is flagged^{"rules":[{"when":"risky work","use":{"harness":"claude","ultracode":"true"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a JSON boolean (fm-dispatch-select.sh silently drops any other type)
+mistyped default ultracode number is flagged^{"rules":[{"when":"x","use":{"harness":"claude"}}],"default":{"harness":"claude","ultracode":1}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a JSON boolean (fm-dispatch-select.sh silently drops any other type)
+mistyped ultracode_role is flagged^{"rules":[{"when":"risky work","use":{"harness":"claude","ultracode":true,"ultracode_role":1}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string (fm-dispatch-select.sh silently drops any other type)
+valid ultracode profile is accepted^{"rules":[{"when":"risky work","use":{"harness":"claude","ultracode":true,"ultracode_role":"independent-review"}}]}^grep^CREW_DISPATCH: active config/crew-dispatch.json
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

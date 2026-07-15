@@ -18,8 +18,9 @@
 #   0  no risk signal found
 #   1  a RISK hit fired (one "RISK: <reason>" line per hit is printed)
 #   2  could not check: a malformed invocation, neither a brief nor a usable
-#      worktree/project exists yet (nothing to check), or the worktree/project
-#      exist but their diff base could not be resolved, so the binding diff
+#      worktree/project exists yet (nothing to check), or the meta records a
+#      worktree/project whose directories vanished, whose diff base could not
+#      be resolved, or whose diff command itself failed, so the binding diff
 #      checkpoint could not run (warned to stderr, never a silent clean pass)
 # Distinct codes matter so a caller branching on $? cannot mistake a malformed
 # invocation for a real risk hit. A hit means: floor this task's model/effort to
@@ -186,7 +187,13 @@ META="$STATE/$ID.meta"
 if [ -f "$META" ]; then
   WT=$(grep '^worktree=' "$META" | tail -1 | cut -d= -f2- || true)
   PROJ=$(grep '^project=' "$META" | tail -1 | cut -d= -f2- || true)
-  if [ -n "$WT" ] && [ -n "$PROJ" ] && [ -d "$WT" ] && [ -d "$PROJ" ]; then
+  if [ -n "$WT" ] && [ -n "$PROJ" ] && { [ ! -d "$WT" ] || [ ! -d "$PROJ" ]; }; then
+    # The meta promises a diff checkpoint (worktree=/project= recorded), but the
+    # directories are gone - a vanished worktree at Validate time must not read
+    # as a clean pass, exactly like an unresolvable diff base below.
+    echo "warning: meta for $ID records worktree=$WT and project=$PROJ but at least one no longer exists as a directory; the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
+    DIFF_UNRESOLVED=1
+  elif [ -n "$WT" ] && [ -n "$PROJ" ]; then
     CHECKED=1
     diff_base_resolved=0
     # The base resolution below duplicates bin/fm-review-diff.sh's origin fetch
@@ -204,20 +211,28 @@ if [ -f "$META" ]; then
       fi
       if git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
         diff_base_resolved=1
-        diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" -- 2>/dev/null || true)
-        risky_paths=
-        if [ -n "$diff_paths" ]; then
-          while IFS= read -r path; do
-            [ -n "$path" ] || continue
-            lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
-            if path_is_risky "$lower_path"; then
-              risky_paths="${risky_paths}${risky_paths:+, }$path"
-            fi
-          done <<< "$diff_paths"
-        fi
-        if [ -n "$risky_paths" ]; then
-          echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
-          FOUND=1
+        # A failing diff (no merge base after a rebase onto unrelated history,
+        # a shallow clone) must not read as an empty path list: that would be
+        # the silent clean pass the not-checkable contract below exists to
+        # prevent.
+        if diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" -- 2>/dev/null); then
+          risky_paths=
+          if [ -n "$diff_paths" ]; then
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+              if path_is_risky "$lower_path"; then
+                risky_paths="${risky_paths}${risky_paths:+, }$path"
+              fi
+            done <<< "$diff_paths"
+          fi
+          if [ -n "$risky_paths" ]; then
+            echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
+            FOUND=1
+          fi
+        else
+          echo "warning: git diff --name-only $BASE...HEAD failed for $ID in $WT; the diff checkpoint did not run - reporting not-checkable (exit 2), not a clean pass" >&2
+          DIFF_UNRESOLVED=1
         fi
       fi
     fi

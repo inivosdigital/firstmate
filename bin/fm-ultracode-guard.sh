@@ -50,6 +50,18 @@ if [ -z "$CMD" ] || [ -z "$ID" ]; then
   exit 1
 fi
 
+# Same unsafe-id shape check as bin/fm-x-link.sh: task ids are plain slugs, so
+# a path-shaped id ("./fix-x", "x/../fix-x") must be rejected before it is
+# compared against another id or used to build a state/ path - otherwise a
+# task can smuggle itself in as its own "independent" reviewer, or point the
+# meta probe outside state/.
+validate_task_id() {
+  case "$2" in
+    ''|.*|*[!A-Za-z0-9._-]*) echo "error: unsafe $1: $2" >&2; exit 1 ;;
+  esac
+}
+validate_task_id task-id "$ID"
+
 MARKER="$STATE/$ID.ultracode"
 
 cmd_flag() {
@@ -67,6 +79,7 @@ cmd_reviewed() {
   local reviewer=${3:-}
   [ $# -eq 3 ] || { usage; exit 1; }
   [ -n "$reviewer" ] || { echo "error: reviewed requires a reviewer-task-id" >&2; exit 1; }
+  validate_task_id reviewer-task-id "$reviewer"
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
     echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot independently review itself" >&2

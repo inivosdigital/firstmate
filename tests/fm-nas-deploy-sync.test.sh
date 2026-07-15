@@ -303,6 +303,27 @@ test_clustered_partial_restart_is_not_masked_online() {
   pass "a clustered pm2 app with one lagging instance is reported as a restart problem, not masked as online"
 }
 
+test_empty_procs_row_is_not_reported_verified() {
+  local home nas log out
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" noprocs-test)
+  advance_origin "$home" noprocs-test C1
+  write_map "$home" noprocs-test "$nas" ""
+  log="$home/restart.log"
+  write_pm2_stub "$home/fakebin" "$log"
+
+  out=$(run_sync "$home" noprocs-test)
+
+  assert_contains "$out" "no pm2 processes recorded" \
+    "empty-procs: did not report the missing pm2 mapping"
+  assert_contains "$out" "needs attention" "empty-procs: did not flag the deployment as needing attention"
+  case "$out" in
+    *"verified online"*) fail "empty-procs: a row with no pm2 processes was reported as verified online" ;;
+  esac
+  [ ! -s "$log" ] || fail "empty-procs: pm2 restart was invoked despite an empty process column"
+  pass "a mapping row with an empty pm2 column syncs but reports no processes to restart, never verified online"
+}
+
 test_hung_fetch_is_bounded_by_timeout() {
   local home nas out rc start elapsed
   if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
@@ -466,6 +487,7 @@ test_clean_behind_fast_forwards_and_restarts
 test_dirty_is_skipped_untouched
 test_diverged_is_stuck_untouched
 test_clustered_partial_restart_is_not_masked_online
+test_empty_procs_row_is_not_reported_verified
 test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried

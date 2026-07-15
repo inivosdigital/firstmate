@@ -626,6 +626,14 @@ crew_dispatch_validate() {
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
     elif has("default") and (.default | type) != "object" then "default must be an object"
     elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif ([(.rules // [])[]? | use_profiles(.use?)[]?]
+          + (if (.default? | type) == "object" then [.default] else [] end))
+         | map(select(has("ultracode") and (.ultracode | type) != "boolean")) | length > 0
+      then "ultracode must be a JSON boolean (fm-dispatch-select.sh silently drops any other type)"
+    elif ([(.rules // [])[]? | use_profiles(.use?)[]?]
+          + (if (.default? | type) == "object" then [.default] else [] end))
+         | map(select(has("ultracode_role") and ((.ultracode_role | type) != "string" or (.ultracode_role | length) == 0))) | length > 0
+      then "ultracode_role must be a non-empty string (fm-dispatch-select.sh silently drops any other type)"
     else
       ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
         | map(select(. != null))

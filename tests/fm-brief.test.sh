@@ -277,6 +277,7 @@ test_light_verify_absent_by_default() {
   id="brief-no-light-verify-e2"
   FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
   brief="$home/data/$id/brief.md"
+  assert_present "$brief" "default brief was not scaffolded"
   assert_no_grep "# Verification tier: Light" "$brief" \
     "brief scaffolded without --light-verify should not mention the Light verification tier"
   assert_no_grep "skips the document step" "$brief" \

@@ -28,11 +28,12 @@
 # ahead of it on PATH intercepts restart/list during tests - real tests must never
 # reach the real /mnt/nas/experiments or a real pm2 process.
 #
-# Every filesystem/git touch of $NAS_PATH is wrapped in a bounded timeout
-# (FM_NAS_SYNC_TIMEOUT seconds, default 15): the mount is a NAS, and an
-# unreachable one is a hang risk (a stuck stat/read), not a fast failure, which
-# would otherwise stall fm-teardown.sh's caller and break this script's
-# non-blocking contract.
+# Every filesystem/git touch of $NAS_PATH - and the pm2 restart/jlist calls,
+# whose target process's script lives on the same mount - is wrapped in a
+# bounded timeout (FM_NAS_SYNC_TIMEOUT seconds, default 15, SIGKILL 5s after
+# SIGTERM): the mount is a NAS, and an unreachable one is a hang risk (a stuck
+# stat/read), not a fast failure, which would otherwise stall fm-teardown.sh's
+# caller and break this script's non-blocking contract.
 #
 # $NAS_PATH is one single shared live-deployment checkout - unlike a project's
 # projects/<name> dev clone, which is scoped to one firstmate home, two ship
@@ -50,6 +51,10 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MAP="${FM_NAS_DEPLOYMENTS_OVERRIDE:-$DATA/nas-deployments.md}"
 NAS_SYNC_TIMEOUT="${FM_NAS_SYNC_TIMEOUT:-15}"
+if ! [[ "$NAS_SYNC_TIMEOUT" =~ ^([0-9]+([.][0-9]*)?|[.][0-9]+)$ ]]; then
+  echo "nas-deploy-sync: invalid FM_NAS_SYNC_TIMEOUT '$NAS_SYNC_TIMEOUT'; using 15s" >&2
+  NAS_SYNC_TIMEOUT=15
+fi
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
 FM_LOCK_LOG_PREFIX=nas-deploy-sync
@@ -72,11 +77,14 @@ elif command -v gtimeout >/dev/null 2>&1; then
 fi
 
 # bounded <args...>: run <args...>, killed after $NAS_SYNC_TIMEOUT seconds when
-# a `timeout`/`gtimeout` binary is available, run directly otherwise.
+# a `timeout`/`gtimeout` binary is available, run directly otherwise. -k gives
+# SIGKILL 5s after SIGTERM: a process wedged in an uninterruptible NAS wait can
+# ignore SIGTERM, and without the follow-up kill it would stall this script's
+# caller (fm-teardown.sh) indefinitely.
 bounded() {
   case "$HAVE_TIMEOUT" in
-    timeout) timeout "$NAS_SYNC_TIMEOUT" "$@" ;;
-    gtimeout) gtimeout "$NAS_SYNC_TIMEOUT" "$@" ;;
+    timeout) timeout -k 5 "$NAS_SYNC_TIMEOUT" "$@" ;;
+    gtimeout) gtimeout -k 5 "$NAS_SYNC_TIMEOUT" "$@" ;;
     *) "$@" ;;
   esac
 }
@@ -183,7 +191,10 @@ lookup_row() {
   ' "$MAP"
 }
 
-row=$(lookup_row)
+row=$(lookup_row) || {
+  echo "$NAME: skipped: cannot read deployment mapping $MAP"
+  exit 0
+}
 if [ -z "$row" ]; then
   echo "$NAME: skipped: no recorded NAS deployment"
   exit 0
@@ -238,8 +249,14 @@ if ! git_nas rev-parse --verify --quiet "$BASE^{commit}" >/dev/null; then
 fi
 
 cur=$(git_nas symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
+# A failed/timed-out status read must not read as "clean" - that is exactly the
+# unreachable-NAS case where merging a possibly dirty checkout would be wrong.
+status_out=$(git_nas status --porcelain 2>/dev/null) || {
+  echo "$NAME: skipped: cannot read git status at $NAS_PATH"
+  exit 0
+}
 dirty=no
-[ -z "$(git_nas status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+[ -z "$status_out" ] || dirty=yes
 
 if [ "$cur" != "$DEFAULT" ]; then
   echo "$NAME: STUCK: NAS checkout at $NAS_PATH is not on $DEFAULT - needs attention"
@@ -270,7 +287,10 @@ if ! git_nas merge-base --is-ancestor "$DEFAULT" "$BASE"; then
   exit 0
 fi
 
-before=$(git_nas rev-parse --short "$DEFAULT")
+before=$(git_nas rev-parse --short "$DEFAULT") || {
+  echo "$NAME: skipped: cannot read $DEFAULT at $NAS_PATH"
+  exit 0
+}
 merge_output=""
 if ! merge_output=$(git_nas merge --ff-only "$BASE" 2>&1); then
   reason="fast-forward failed"
@@ -278,14 +298,16 @@ if ! merge_output=$(git_nas merge --ff-only "$BASE" 2>&1); then
   echo "$NAME: skipped: $reason"
   exit 0
 fi
-after=$(git_nas rev-parse --short "$DEFAULT")
+# The merge already advanced the checkout; a transient failure reading the new
+# rev must not abort before the pm2 restart below runs.
+after=$(git_nas rev-parse --short "$DEFAULT" 2>/dev/null) || after="?"
 
 # process_online <proc>: true when pm2 currently reports EVERY instance of
 # <proc> as online (a clustered app can register several jlist entries under
 # the same name; one lagging instance must not be masked by the others).
 process_online() {
   local proc=$1 status
-  status=$(pm2 jlist 2>/dev/null | jq -r --arg n "$proc" \
+  status=$(bounded pm2 jlist 2>/dev/null | jq -r --arg n "$proc" \
     '[.[] | select(.name == $n) | .pm2_env.status] as $s
      | if ($s | length) == 0 then "missing"
        elif all($s[]; . == "online") then "online"
@@ -295,12 +317,14 @@ process_online() {
 }
 
 restart_problems=""
+restarted=0
 IFS=',' read -r -a procs <<< "$PROCS"
 for proc in "${procs[@]}"; do
   proc="${proc#"${proc%%[![:space:]]*}"}"
   proc="${proc%"${proc##*[![:space:]]}"}"
   [ -n "$proc" ] || continue
-  if ! pm2 restart "$proc" >/dev/null 2>&1; then
+  restarted=$(( restarted + 1 ))
+  if ! bounded pm2 restart "$proc" >/dev/null 2>&1; then
     restart_problems="$restart_problems $proc(restart failed)"
     continue
   fi
@@ -309,6 +333,10 @@ for proc in "${procs[@]}"; do
   fi
 done
 
+if [ "$restarted" -eq 0 ]; then
+  echo "$NAME: synced $before..$after but no pm2 processes recorded in the mapping row - nothing restarted, needs attention"
+  exit 0
+fi
 if [ -n "$restart_problems" ]; then
   echo "$NAME: synced $before..$after but restart verification failed:$restart_problems - needs attention"
   exit 0
