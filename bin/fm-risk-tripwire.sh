@@ -162,6 +162,38 @@ path_is_risky() {
   return 1
 }
 
+pr_number_from_target() {
+  local target=$1 n
+  case "$target" in
+    '') return 1 ;;
+    *"/pull/"*)
+      n=${target##*/pull/}
+      n=${n%%[!0-9]*}
+      ;;
+    [0-9]*)
+      n=${target%%[!0-9]*}
+      ;;
+    *) return 1 ;;
+  esac
+  [ -n "$n" ] || return 1
+  printf '%s' "$n"
+}
+
+resolve_pr_head() {
+  local pr_url=$1 recorded_head=$2 n resolved
+  if [ -n "$recorded_head" ] \
+    && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    printf '%s' "$recorded_head"
+    return 0
+  fi
+  n=$(pr_number_from_target "$pr_url") || return 1
+  git -C "$WT" remote get-url origin >/dev/null 2>&1 || return 1
+  git -C "$WT" fetch --quiet origin "refs/pull/$n/head" >/dev/null 2>&1 || return 1
+  resolved=$(git -C "$WT" rev-parse --verify 'FETCH_HEAD^{commit}' 2>/dev/null) || return 1
+  [ -n "$resolved" ] || return 1
+  printf '%s' "$resolved"
+}
+
 FOUND=0
 CHECKED=0
 DIFF_UNRESOLVED=0
@@ -189,6 +221,16 @@ if [ -f "$META" ]; then
   if [ -n "$WT" ] && [ -n "$PROJ" ] && [ -d "$WT" ] && [ -d "$PROJ" ]; then
     CHECKED=1
     diff_base_resolved=0
+    compare_ref=HEAD
+    PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
+    PR_HEAD_RECORDED=$(grep '^pr_head=' "$META" | tail -1 | cut -d= -f2- || true)
+    if [ -n "$PR_URL$PR_HEAD_RECORDED" ]; then
+      if PR_HEAD=$(resolve_pr_head "$PR_URL" "$PR_HEAD_RECORDED"); then
+        compare_ref=$PR_HEAD
+      elif [ -n "$PR_URL" ]; then
+        echo "warning: PR head unavailable for $ID; risk path scan may lag the open PR (using local HEAD)" >&2
+      fi
+    fi
     # The base resolution below duplicates bin/fm-review-diff.sh's origin fetch
     # and origin/<default> verification on purpose: this scan needs the changed
     # PATH LIST, but fm-review-diff.sh only exposes --stat (a diffstat), not a
@@ -204,7 +246,7 @@ if [ -f "$META" ]; then
       fi
       if git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
         diff_base_resolved=1
-        diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" -- 2>/dev/null || true)
+        diff_paths=$(git -C "$WT" diff --name-only "$BASE...$compare_ref" -- 2>/dev/null || true)
         risky_paths=
         if [ -n "$diff_paths" ]; then
           while IFS= read -r path; do

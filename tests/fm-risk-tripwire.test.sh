@@ -663,12 +663,39 @@ test_multiword_phrase_keyword_trips() {
   pass "fm-risk-tripwire still trips on multi-word risk phrases"
 }
 
+test_diff_uses_recorded_pr_head_when_present() {
+  local case_dir pr_head out status
+  case_dir=$(make_case pr-head)
+  printf 'Update generated docs.\n' > "$case_dir/data/task-x1/brief.md"
+  printf 'ordinary local change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "ordinary local change"
+  mkdir -p "$case_dir/wt/lib/auth"
+  printf 'auth change\n' > "$case_dir/wt/lib/auth/token.rb"
+  git -C "$case_dir/wt" add lib/auth/token.rb
+  git -C "$case_dir/wt" commit -qm "remote pr head touches auth"
+  pr_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" reset -q --hard HEAD~1
+  write_task_meta "$case_dir"
+  printf '%s\n' "pr_head=$pr_head" >> "$case_dir/state/task-x1.meta"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "pr-head: risk-adjacent paths present only in recorded pr_head must trip"
+  assert_contains "$out" "lib/auth/token.rb" "pr-head: should scan paths through recorded pr_head"
+  pass "fm-risk-tripwire scans the recorded PR head when it is ahead of local HEAD"
+}
+
 test_clean_brief_and_diff_passes
 test_bare_auth_matches_but_authoritative_does_not
 test_adjacent_keywords_both_reported
 test_unresolvable_diff_base_is_not_a_clean_pass
 test_unresolvable_diff_base_still_reports_brief_hit
 test_multiword_phrase_keyword_trips
+test_diff_uses_recorded_pr_head_when_present
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
 test_brief_only_mode_before_worktree_exists

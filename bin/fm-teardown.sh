@@ -133,6 +133,7 @@ task_tmp_is_safe() {
   case "$base" in
     */*|'') return 1 ;;
   esac
+  [ "$base" = "fm-$ID" ] && return 0
   prefix="fm-$ID."
   case "$base" in
     "$prefix"*) suffix=${base#"$prefix"} ;;

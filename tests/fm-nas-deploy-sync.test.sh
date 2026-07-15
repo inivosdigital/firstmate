@@ -202,6 +202,23 @@ SH
   chmod +x "$fakebin/git"
 }
 
+write_git_status_failure_stub() {
+  local fakebin=$1 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = status ]; then
+    echo "fatal: simulated status failure" >&2
+    exit 128
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
 # --- tests: standalone script -------------------------------------------------
 
 test_clean_behind_fast_forwards_and_restarts() {
@@ -346,6 +363,27 @@ test_transient_packed_refs_lock_is_retried() {
   assert_contains "$out" "locktrans-test: synced" "transient lock: sync did not complete after the lock self-cleared"
   assert_grep "cleared on its own" "$err" "transient lock: guard did not report the self-clear"
   pass "a transient packed-refs.lock signature on the NAS fetch is retried instead of giving up immediately"
+}
+
+test_status_failure_is_stuck_untouched() {
+  local home nas log out before after
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" statusfail-test)
+  advance_origin "$home" statusfail-test C1
+  before=$(head_sha "$nas")
+  write_map "$home" statusfail-test "$nas" statusfail-test
+  log="$home/restart.log"
+  write_pm2_stub "$home/fakebin" "$log"
+  write_git_status_failure_stub "$home/fakebin"
+
+  out=$(run_sync "$home" statusfail-test 2>/dev/null)
+
+  assert_contains "$out" "STUCK" "status-failure: did not report STUCK"
+  assert_contains "$out" "cannot inspect worktree status" "status-failure: did not name the inspection failure"
+  after=$(head_sha "$nas")
+  [ "$before" = "$after" ] || fail "status-failure: NAS checkout HEAD moved after status failed"
+  [ ! -s "$log" ] || fail "status-failure: pm2 restart was invoked after status failed"
+  pass "a NAS status inspection failure is reported STUCK and left untouched"
 }
 
 test_missing_map_file_is_silent_noop() {
@@ -513,6 +551,7 @@ test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
+test_status_failure_is_stuck_untouched
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project
 test_teardown_skips_nas_deploy_sync_for_remote_only_landing

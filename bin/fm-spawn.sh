@@ -203,6 +203,8 @@ fi
 ORCA_ABORT_CLEANUP=0
 ORCA_WORKTREE_ID=
 ORCA_TERMINAL=
+SPAWN_TASK_TMP_CLEANUP=0
+TASK_TMP=
 
 parse_orca_worktree_result() {
   local raw=$1 rest
@@ -222,7 +224,7 @@ parse_orca_worktree_result() {
 }
 
 orca_spawn_abort_cleanup() {
-  local status=$?
+  local status=${1:-$?}
   [ "$ORCA_ABORT_CLEANUP" = 1 ] || return "$status"
   ORCA_ABORT_CLEANUP=0
   if [ -n "${ORCA_TERMINAL:-}" ]; then
@@ -232,7 +234,7 @@ orca_spawn_abort_cleanup() {
     if ! fm_backend_remove_worktree orca "$ORCA_WORKTREE_ID" 2>/dev/null; then
       mkdir -p "$STATE" 2>/dev/null || true
       if [ -d "$STATE" ]; then
-        {
+        if {
           echo "window=$W"
           echo "worktree=${WT:-}"
           echo "project=$PROJ_ABS"
@@ -246,13 +248,31 @@ orca_spawn_abort_cleanup() {
           echo "backend=orca"
           echo "orca_worktree_id=$ORCA_WORKTREE_ID"
           [ -z "${ORCA_TERMINAL:-}" ] || echo "terminal=$ORCA_TERMINAL"
-        } > "$STATE/$ID.meta" 2>/dev/null || true
+        } > "$STATE/$ID.meta" 2>/dev/null; then
+          SPAWN_TASK_TMP_CLEANUP=0
+        fi
       fi
     fi
   fi
   return "$status"
 }
-trap orca_spawn_abort_cleanup EXIT
+
+cleanup_task_tmp_on_spawn_error() {
+  local status=${1:-$?}
+  if [ "$SPAWN_TASK_TMP_CLEANUP" = 1 ] && [ -n "${TASK_TMP:-}" ]; then
+    rm -rf -- "$TASK_TMP"
+    SPAWN_TASK_TMP_CLEANUP=0
+  fi
+  return "$status"
+}
+
+spawn_exit_cleanup() {
+  local status=$?
+  orca_spawn_abort_cleanup "$status"
+  status=$?
+  cleanup_task_tmp_on_spawn_error "$status"
+}
+trap spawn_exit_cleanup EXIT
 
 # Batch dispatch (see header): when the first positional is an `id=repo` pair, treat every
 # positional as one and spawn each by re-execing this script in single-task mode. We use
@@ -953,6 +973,7 @@ fi
 # whole root. GOTMPDIR (not TMPDIR) is the targeted knob: TMPDIR is too broad
 # (affects every program's temp, not just Go's).
 TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXX") || { echo "error: failed to create task temp root" >&2; exit 1; }
+SPAWN_TASK_TMP_CLEANUP=1
 mkdir -p "$TASK_TMP/gotmp"
 
 # Per-harness turn-end hook: a file that touches state/<id>.turn-ended when the
@@ -1110,6 +1131,7 @@ META_WINDOW=$T
   fi
 } > "$STATE/$ID.meta"
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
+SPAWN_TASK_TMP_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
 sq_turnend=$(shell_quote "$TURNEND")

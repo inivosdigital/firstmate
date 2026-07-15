@@ -117,6 +117,13 @@ test_spawn_contract_and_mkdir_pattern() {
   # shellcheck disable=SC2016
   grep -F 'TASK_TMP=$(mktemp -d "/tmp/fm-$ID.XXXXXX")' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: unique mktemp task root"
+  # shellcheck disable=SC2016
+  grep -F 'cleanup_task_tmp_on_spawn_error "$status"' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: temporary cleanup in spawn exit trap"
+  grep -F 'trap spawn_exit_cleanup EXIT' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: shared spawn exit cleanup trap"
+  grep -F 'SPAWN_TASK_TMP_CLEANUP=0' "$SPAWN" >/dev/null \
+    || fail "fm-spawn missing: cleanup trap disarm after meta write"
   # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
   grep -F 'echo "tasktmp=$TASK_TMP"' "$SPAWN" >/dev/null \
     || fail "fm-spawn missing: tasktmp= line in meta write"
@@ -216,6 +223,22 @@ META
   pass "fm-teardown skips gracefully when tasktmp= is absent (backward compat)"
 }
 
+test_teardown_removes_legacy_tasktmp_dir() {
+  local id=td-legacy-z6
+  local task_tmp="/tmp/fm-$id"
+  rm -rf "$task_tmp"
+  mkdir -p "$task_tmp/gotmp"
+  EXTRA_CLEANUP_DIRS+=("$task_tmp")
+  local fake
+  fake=$(make_fake_root "$id" "$task_tmp")
+
+  FM_HOME="$fake" bash "$fake/bin/fm-teardown.sh" "$id" >/dev/null 2>&1 \
+    || fail "teardown exited non-zero with a legacy tasktmp"
+  [ ! -e "$task_tmp" ] \
+    || fail "teardown did not remove the legacy deterministic tasktmp dir"
+  pass "fm-teardown removes legacy deterministic tasktmp roots"
+}
+
 test_teardown_skips_gracefully_when_dir_missing() {
   # tasktmp= points to a path that does not exist. Teardown must not error.
   local id=td-missing-z4
@@ -246,5 +269,6 @@ test_teardown_skips_unsafe_tasktmp_path() {
 test_spawn_contract_and_mkdir_pattern
 test_teardown_removes_tasktmp_dir
 test_teardown_skips_gracefully_without_tasktmp
+test_teardown_removes_legacy_tasktmp_dir
 test_teardown_skips_gracefully_when_dir_missing
 test_teardown_skips_unsafe_tasktmp_path

@@ -239,12 +239,18 @@ fi
 
 cur=$(git_nas symbolic-ref --quiet --short HEAD 2>/dev/null || echo "")
 dirty=no
-[ -z "$(git_nas status --porcelain 2>/dev/null | head -1)" ] || dirty=yes
+status_rc=0
+status_out=$(git_nas status --porcelain 2>/dev/null) || status_rc=$?
 
 if [ "$cur" != "$DEFAULT" ]; then
   echo "$NAME: STUCK: NAS checkout at $NAS_PATH is not on $DEFAULT - needs attention"
   exit 0
 fi
+if [ "$status_rc" -ne 0 ]; then
+  echo "$NAME: STUCK: cannot inspect worktree status at $NAS_PATH - needs attention"
+  exit 0
+fi
+[ -z "$(printf '%s\n' "$status_out" | head -1)" ] || dirty=yes
 if [ "$dirty" = yes ]; then
   echo "$NAME: STUCK: NAS checkout at $NAS_PATH has uncommitted changes - needs attention"
   exit 0
