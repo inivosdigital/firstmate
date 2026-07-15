@@ -605,9 +605,11 @@ crew_dispatch_validate() {
       elif ($u | type) == "object" then [$u]
       else []
       end;
+    def all_profiles:
+      ([(.rules // [])[]? | use_profiles(.use?)[]?]
+        + (if (.default? | type) == "object" then [.default] else [] end));
     def bad_efforts:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | {h: .harness, e: .effort}]
-        + (if (.default? | type) == "object" then [{h: .default.harness, e: .default.effort}] else [] end))
+      (all_profiles | map({h: .harness, e: .effort}))
       | map(select(.e != null))
       | map(select((.h | type) == "string" and verified(.h)))
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
@@ -626,6 +628,8 @@ crew_dispatch_validate() {
       "unknown select: " + ([ (.rules // [])[]? | .select? // empty | select(. != "quota-balanced") ] | unique | join(", "))
     elif has("default") and (.default | type) != "object" then "default must be an object"
     elif has("default") and ((.default.harness? | type) != "string" or (.default.harness | length) == 0) then "default needs harness when present"
+    elif (all_profiles | map(select(has("ultracode") and (.ultracode | type) != "boolean")) | length) > 0 then "ultracode must be boolean"
+    elif (all_profiles | map(select(has("ultracode_role") and (.ultracode_role | type) != "string")) | length) > 0 then "ultracode_role must be a string"
     else
       ([(.rules // [])[]? | use_profiles(.use?)[]?.harness] + [.default?.harness?]
         | map(select(. != null))

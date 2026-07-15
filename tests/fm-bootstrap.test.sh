@@ -728,6 +728,8 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+non-boolean ultracode is flagged^{"rules":[{"when":"safety work","use":{"harness":"claude","ultracode":"true"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be boolean
+non-string ultracode role is flagged^{"rules":[{"when":"safety work","use":{"harness":"claude","ultracode":true,"ultracode_role":true}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a string
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }
