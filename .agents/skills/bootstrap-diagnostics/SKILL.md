@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one.
+  Use whenever the session-start digest's bootstrap section prints any diagnostic or capability line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_HARNESS_OVERRIDE, CREW_DISPATCH, FLEET_SYNC, SECONDMATE_SYNC, SECONDMATE_LIVENESS, TASKS_AXI, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one.
   A silent bootstrap section means all good and needs no skill load.
 user-invocable: false
 metadata:
@@ -50,6 +50,9 @@ The inline rules in `AGENTS.md` section 3 still bind: detect, then consent, then
 - `SERVICE_FAILED: <unit> - failed since <timestamp>` - a systemd unit named in the optional local `config/critical-services` file is in the failed state (`docs/configuration.md` "Critical service watch"); a pure read-only detection (`systemctl is-failed`, no root), so a read-only session still surfaces it.
   Report it to the captain in plain language; never restart the unit yourself - a unit that failed may be unsafe to restart without knowing why.
   An absent or empty config file, a host without `systemctl`, or no failed unit all print nothing.
+- `AUTODEPLOY_FAILED: <label> - <last line>` - the last line of a status log named in the optional local `config/autodeploy-logs` file reports failure (`bin/fm-watch.sh`'s `autodeploy_scan` owns the failure convention; `bin/fm-bootstrap.sh`'s `autodeploy_logs_check` is its session-start counterpart, a pure read-only detection that catches a deploy that failed while no watcher was armed to sweep it).
+  Tell the captain plainly that the live deploy for `<label>` is failing, relaying the log line; firstmate never touches the deploy itself.
+  An absent or empty config file, a missing or transiently unreadable log (a NAS hiccup), or a healthy last line all print nothing.
 - `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)` - the always-on FYI variant: firstmate's OWN repo tracking how far it has drifted from its read-only upstream template (`kunchenguid/firstmate`, the `upstream` remote after the remote swap).
   It prints every session; record it silently like any capability fact and take no action while the wording stays FYI.
   It only reports - the network fetch that refreshes the ref runs in the locked fleet-sync sweep, and reconciling upstream is never a bootstrap side effect.

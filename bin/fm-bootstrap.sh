@@ -122,6 +122,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-x-lib.sh"
 # shellcheck source=bin/fm-backend.sh disable=SC1091
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-autodeploy-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-autodeploy-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -687,6 +689,34 @@ critical_services_check() {
   done < "$file"
 }
 
+# Detect autodeploy-log failures. Reads one status-log path per line from
+# config/autodeploy-logs (blank lines and full-line # comments ignored, same
+# parsing as critical_services_check above) and prints one AUTODEPLOY_FAILED
+# line per log whose last line reports failure. The failure predicate and
+# fail-quiet-on-unreadable behavior are owned by fm-autodeploy-lib.sh's
+# fm_autodeploy_line_failed, the same definition bin/fm-watch.sh's periodic
+# autodeploy_scan uses; this is that sweep's session-start counterpart, for
+# whenever no watcher is armed to catch a failure between sessions. Pure
+# read-only detection: no state writes, no queued signals.
+autodeploy_logs_check() {
+  local file log last label
+  file="$CONFIG/autodeploy-logs"
+  [ -f "$file" ] || return 0
+  while IFS= read -r log || [ -n "$log" ]; do
+    log="${log#"${log%%[![:space:]]*}"}"
+    log="${log%"${log##*[![:space:]]}"}"
+    [ -n "$log" ] || continue
+    case "$log" in '#'*) continue ;; esac
+    [ -r "$log" ] || continue
+    last=$(tail -n 1 "$log" 2>/dev/null) || continue
+    [ -n "$last" ] || continue
+    if fm_autodeploy_line_failed "$last"; then
+      label=$(basename "$(dirname "$log")")
+      echo "AUTODEPLOY_FAILED: $label - $last"
+    fi
+  done < "$file"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -747,6 +777,7 @@ if ! fm_backlog_backend_manual "$CONFIG" && fm_tasks_axi_compatible; then
   echo "TASKS_AXI: available"
 fi
 critical_services_check
+autodeploy_logs_check
 upstream_drift_report
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync

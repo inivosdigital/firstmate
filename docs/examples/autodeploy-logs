@@ -1,6 +1,7 @@
 # config/autodeploy-logs - poll-based autodeploy status logs firstmate watches
-# for failure on its periodic sweep (bin/fm-watch.sh's autodeploy_scan). Copy
-# this into a local, gitignored config/autodeploy-logs and replace the
+# for failure, on its periodic sweep (bin/fm-watch.sh's autodeploy_scan) and at
+# every session-start bootstrap (bin/fm-bootstrap.sh's autodeploy_logs_check).
+# Copy this into a local, gitignored config/autodeploy-logs and replace the
 # placeholder with your own status-log path(s). One absolute log path per
 # non-empty, non-comment line; blank lines and full-line "#" comments are
 # ignored.
@@ -9,11 +10,13 @@
 # (bin/fm-fleet-sync.sh): a durable, timestamped, append-only status log whose
 # LAST line reports the most recent run's health - a healthy run ends in an
 # "ok ..." rollup, a failed one in an "ALERT ..." rollup or a STUCK:/FAILED:
-# alert line. On its periodic sweep firstmate reads only that last line; when it
-# reports a failure not already surfaced, firstmate wakes and relays the line to
-# the captain, then stays quiet about that same failure until it changes or a
-# later successful run clears it. It never touches the deploy: reading the log is
-# the whole job.
+# alert line. Both readers check only that last line; when it reports a failure,
+# the periodic sweep wakes and relays the line to the captain once, staying quiet
+# about that same failure until it changes or a later successful run clears it,
+# while bootstrap surfaces it fresh every session start as a read-only diagnostic
+# - the session-start counterpart for whenever no watcher was armed to catch it
+# between sessions. Neither ever touches the deploy: reading the log is the whole
+# job.
 #
 # An ABSENT or empty config/autodeploy-logs is a no-op. A missing or temporarily
 # unreadable log (e.g. a NAS mount hiccup) is silently skipped rather than
