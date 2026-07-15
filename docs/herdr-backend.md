@@ -662,6 +662,18 @@ The agent prompt glyphs `❯` (claude) and `›` (codex) read `empty` either way
 Per-backend dead-shell coverage: `tests/fm-daemon.test.sh`'s `test_tmux_composer_state_bare_shell_is_unknown` and `test_inject_msg_defers_on_dead_shell_unknown` (tmux + the injector), `tests/fm-backend-herdr.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`, `tests/fm-backend-orca.test.sh`'s `test_composer_state_bare_shell_prompt_is_unknown`, and `tests/fm-backend-cmux.test.sh`'s `test_composer_state_unknown_when_no_composer_row_found`.
 The herdr incident regressions (`tests/fm-backend-herdr.test.sh`'s composer-state, wait-for-working, and send-text-submit sections) stay green, and `shellcheck bin/*.sh bin/backends/*.sh tests/*.sh` passes clean.
 
+## Incident (2026-07-14): no-break-space composer padding read as a false "Enter swallowed"
+
+`fm-send`'s submit-verify loop reported `exit 1` / "Enter swallowed; text left in composer" three times against a genuinely-submitted steer to a `claude` target, each time while the crewmate was already processing the message (`bin/fm-peek.sh` on the target confirmed the send had landed).
+Root cause: claude draws its cleared composer prompt as the glyph `❯` followed by a NON-BREAKING SPACE (U+00A0), not an ASCII space.
+Under a glibc UTF-8 locale, `[[:space:]]` does not classify U+00A0 as whitespace, so the shared classifier's ASCII-only trimming left the U+00A0 behind as phantom content and read the otherwise-empty composer as `pending`.
+`fm_tmux_submit_enter_core` then read `pending` on every retry, exhausted them, and returned the `pending` verdict that `fm-send` surfaces as the false swallow.
+The false alarm was intermittent because a busy footer or dim ghost text landing on the same cursor row both read empty, so the bare `❯<nbsp>` line only showed through on some captures, which is why it took three occurrences to pin.
+
+**Fix.** `fm_composer_classify_content` now normalizes U+00A0 and its narrow sibling U+202F to an ASCII space (`fm_composer_normalize_ws`, `bin/fm-composer-lib.sh`) before trimming, so a composer empty but for no-break padding reads `empty` on every backend, while real typed text separated by a no-break space still classifies `pending`.
+
+**Evidence and regression coverage.** `tests/fm-composer-nbsp.test.sh` records the exact captured cursor-row bytes (`tmux capture-pane -e -p`, tmux 3.x, 2026-07-14) and pins the fix at four layers: the shared classifier, `fm_tmux_composer_state` on the real styled line, `fm_tmux_submit_enter_core`, and the full `fm-send` exit code.
+
 ## Incident (2026-07-10): away-mode injection wedged all night on the primary claude-on-herdr composer's ghost text
 
 The captain woke to find away-mode had never injected: 20 escalations buffered, the max-defer wedge marker at 30623s undelivered, the wake queue at 65.
