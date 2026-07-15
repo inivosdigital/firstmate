@@ -45,6 +45,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 mkdir -p "$STATE"
 
 # shellcheck source=bin/fm-wake-lib.sh
@@ -563,6 +564,62 @@ mark_all_captain_relevant_surfaced() {
   done < <(scan_captain_relevant_statuses "$STATE")
 }
 
+# --- Periodic autodeploy-log sweep ------------------------------------------
+# The always-on twin of bootstrap's critical_services_check, but for poll-based
+# autodeploy jobs that write firstmate's fleet-sync STUCK:/FAILED:/ALERT line
+# convention (bin/fm-fleet-sync.sh) to a durable status log, so a deploy failure
+# between sessions surfaces on the periodic sweep instead of waiting for the next
+# session start. Each non-empty, non-"#" line of config/autodeploy-logs names one
+# such status log. The LAST line of each log is the authoritative per-run health:
+# a healthy run ends in an "ok ..." rollup, a failed one in an "ALERT ..." rollup
+# or a STUCK:/FAILED: alert line, so a later successful run self-clears the alarm.
+# Absent config, an unreadable log (a NAS hiccup), or a healthy last line are all
+# silent - the check is cheap and fail-quiet so it can run on every heartbeat.
+_autodeploy_marker_path() {  # <log-path> -> per-log surfaced-marker path
+  printf '%s/.autodeploy-surfaced-%s' "$STATE" "$(printf '%s' "$1" | tr -c 'A-Za-z0-9' '_')"
+}
+
+# Strip a leading ISO-8601 (date -Is) timestamp so a persistent identical failure
+# dedupes across runs despite each run stamping a fresh time. A non-ISO fallback
+# timestamp is left intact (degrades to re-surfacing per run, never to a miss).
+_autodeploy_strip_ts() {  # <line> -> line without a leading ISO timestamp
+  printf '%s' "$1" | sed 's/^[0-9]\{4\}-[0-9]\{2\}-[0-9]\{2\}T[0-9:.,+-]*[[:space:]]*//'
+}
+
+# Sweep config/autodeploy-logs. For each configured log whose last line reports a
+# failure not already surfaced, enqueue a check wake carrying that line and record
+# it surfaced; clear the record when a log reports healthy again so a recurrence
+# re-arms. The enqueue happens BEFORE the marker advances, so a kill in between
+# re-surfaces (at-least-once) rather than dropping the failure. Returns 0 when it
+# enqueued at least one new failure (the caller then wakes), 1 otherwise.
+autodeploy_scan() {
+  local file="$CONFIG/autodeploy-logs" log last stripped marker mfile label reason found=1
+  [ -f "$file" ] || return 1
+  while IFS= read -r log || [ -n "$log" ]; do
+    log="${log#"${log%%[![:space:]]*}"}"
+    log="${log%"${log##*[![:space:]]}"}"
+    [ -n "$log" ] || continue
+    case "$log" in '#'*) continue ;; esac
+    mfile=$(_autodeploy_marker_path "$log")
+    [ -r "$log" ] || continue                       # missing/unreadable: fail quiet, keep prior state
+    last=$(tail -n 1 "$log" 2>/dev/null) || continue
+    [ -n "$last" ] || continue
+    if printf '%s' "$last" | grep -Eq 'STUCK:|FAILED:|needs attention|(^|[[:space:]])ALERT([[:space:]]|$)'; then
+      stripped=$(_autodeploy_strip_ts "$last")
+      marker=$(cat "$mfile" 2>/dev/null || true)
+      [ "$stripped" = "$marker" ] && continue       # this exact failure already surfaced
+      label=$(basename "$(dirname "$log")")
+      reason="check: autodeploy $label reports failure: $last"
+      fm_wake_append check "$log" "$reason" || return 1
+      printf '%s' "$stripped" > "$mfile"
+      found=0
+    else
+      rm -f "$mfile"                                 # healthy run re-arms the alarm
+    fi
+  done < "$file"
+  return "$found"
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -1032,6 +1089,12 @@ EOF
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    # Periodic autodeploy-log sweep, independent of the crew fleet-scan: enqueues a
+    # check wake per new failure and records it surfaced. Runs in every mode (the
+    # check wake it enqueues rides along in whatever wake this block emits, and the
+    # away-mode daemon escalates check wakes) so a deploy failure is caught whether
+    # or not the fleet has other work.
+    autodeploy_new=1; autodeploy_scan && autodeploy_new=0
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -1049,6 +1112,10 @@ EOF
       touch "$STATE/.last-heartbeat"
       mark_all_captain_relevant_surfaced
       wake "heartbeat"
+    elif [ "$autodeploy_new" = 0 ]; then
+      # A new autodeploy failure was enqueued above; surface it now as a check.
+      touch "$STATE/.last-heartbeat"
+      wake "check: autodeploy failure"
     else
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
