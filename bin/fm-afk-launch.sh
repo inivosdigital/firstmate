@@ -77,22 +77,39 @@ fm_afk_launch_lock_owned() {
 }
 
 fm_afk_launch_lock_acquire() {
-  local i incomplete=0 identity
+  local i incomplete=0 identity pending=""
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   for i in $(seq 1 200); do
     if mkdir "$FM_AFK_LAUNCH_LOCK" 2>/dev/null; then
+      # The pid file (and the ps-backed identity lookup after it) take a few
+      # milliseconds to land. A TERM/INT arriving in that window would hit
+      # fm_afk_launch_main's normal 'exit N' traps before the lock is
+      # ownership-tagged, so fm_afk_launch_lock_release couldn't recognize
+      # and release it. Record the signal instead of exiting immediately,
+      # then act on it right after publishing finishes.
+      trap 'pending=TERM' TERM
+      trap 'pending=INT' INT
       if ! printf '%s' "$$" > "$FM_AFK_LAUNCH_LOCK/pid"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        trap 'exit 143' TERM; trap 'exit 130' INT
         return 1
       fi
       identity=$(fm_pid_identity "$$" 2>/dev/null) || {
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        trap 'exit 143' TERM; trap 'exit 130' INT
         return 1
       }
       if [ -z "$identity" ] || ! printf '%s' "$identity" > "$FM_AFK_LAUNCH_LOCK/pid-identity"; then
         rm -rf "$FM_AFK_LAUNCH_LOCK"
+        trap 'exit 143' TERM; trap 'exit 130' INT
         return 1
       fi
+      trap 'exit 143' TERM
+      trap 'exit 130' INT
+      case "$pending" in
+        TERM) fm_afk_launch_lock_release; exit 143 ;;
+        INT) fm_afk_launch_lock_release; exit 130 ;;
+      esac
       return 0
     fi
     if [ ! -s "$FM_AFK_LAUNCH_LOCK/pid" ] || [ ! -s "$FM_AFK_LAUNCH_LOCK/pid-identity" ]; then
@@ -603,10 +620,15 @@ fm_afk_launch_stop() {
 
 fm_afk_launch_main() {
   local result
-  fm_afk_launch_lock_acquire || return 1
+  # Traps go up before lock_acquire, not after: fm_afk_launch_lock_release
+  # is a no-op until the lock's pid file names this process, so installing
+  # them early is safe and closes the window where a TERM/INT arriving right
+  # after the lock directory is created but before the trap is set would
+  # kill the process via the default disposition and leak the lock.
   trap fm_afk_launch_lock_release EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+  fm_afk_launch_lock_acquire || return 1
   case "${1:-start}" in
     start) fm_afk_launch_start ;;
     start-native) fm_afk_launch_start_native ;;
