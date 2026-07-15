@@ -31,8 +31,13 @@ pass() {
 }
 
 TMP_ROOT=
+EXTRA_CLEANUP_DIRS=()
 
 cleanup() {
+  local d
+  for d in "${EXTRA_CLEANUP_DIRS[@]:-}"; do
+    [ -n "$d" ] && rm -rf "$d"
+  done
   if [ -n "${TMP_ROOT:-}" ]; then
     rm -rf "$TMP_ROOT"
   fi
@@ -125,6 +130,7 @@ test_spawn_contract_and_mkdir_pattern() {
   mkdir -p "$sim_root/state"
   TASK_TMP=$(mktemp -d "/tmp/fm-$id.XXXXXX") || fail "mktemp failed"
   task_tmp=$TASK_TMP
+  EXTRA_CLEANUP_DIRS+=("$task_tmp")
   mkdir -p "$TASK_TMP/gotmp"
   {
     echo "tasktmp=$TASK_TMP"
@@ -148,6 +154,7 @@ test_teardown_removes_tasktmp_dir() {
   local id=td-rm-z2
   local task_tmp
   task_tmp=$(mktemp -d "/tmp/fm-$id.XXXXXX") || fail "mktemp failed"
+  EXTRA_CLEANUP_DIRS+=("$task_tmp")
   mkdir -p "$task_tmp/gotmp"
   printf 'leftover\n' > "$task_tmp/gotmp/build-artifact"
   local fake
