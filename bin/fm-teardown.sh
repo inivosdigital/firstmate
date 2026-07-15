@@ -1074,8 +1074,12 @@ fi
 # restarting - see bin/fm-nas-deploy-sync.sh's header. Scouts and secondmates
 # never land a project change, so they are excluded the same as the fleet-sync
 # call above; unlike that call, local-only IS included here, since a local-only
-# merge is just as much a landed change as a PR merge.
-if [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
+# merge is just as much a landed change as a PR merge. A forced teardown carries
+# no landed-work guarantee at all (--force is the explicit discard path, used
+# precisely when the safety checks above were skipped), so it is excluded too -
+# otherwise a discard of unlanded work would still trigger a live NAS pull and
+# pm2 restart for no reason.
+if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$FORCE" != "--force" ]; then
   "$FM_ROOT/bin/fm-nas-deploy-sync.sh" "$(basename "$PROJ")" || true
 fi
 echo "teardown $ID complete (window $T, worktree $WT)"
