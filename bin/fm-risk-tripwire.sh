@@ -11,9 +11,12 @@
 # Checks whatever is available for <task-id>:
 #   - data/<task-id>/brief.md, if it exists (works before spawn, right after
 #     bin/fm-brief.sh scaffolds it - the first checkpoint)
-#   - the worktree's changed file paths vs its project's default branch, if
-#     state/<task-id>.meta records worktree=/project= (works after spawn, at
-#     Validate time - the second, binding checkpoint against the real diff)
+#   - the changed file paths between its project's default branch and either
+#     the worktree's local HEAD, or the open PR's head when state/<task-id>.meta
+#     records pr=/pr_head= (mirroring bin/fm-review-diff.sh, so a no-mistakes fix
+#     round already pushed to the PR is included even when the local worktree
+#     branch is stale) - works after spawn, at Validate time - the second,
+#     binding checkpoint against the real diff
 # Exit codes:
 #   0  no risk signal found
 #   1  a RISK hit fired (one "RISK: <reason>" line per hit is printed)
@@ -27,9 +30,10 @@
 # regardless of which rule the natural-language dispatch match picked, per
 # AGENTS.md section 4's risk floor.
 #
-# This is a coarse, unpushed-diff-vs-default-branch name-only comparison, not
-# the PR-aware exact diff bin/fm-review-diff.sh computes - good enough for a
-# keyword scan, not a substitute for that script's authoritative base.
+# This independently resolves the same PR-head base bin/fm-review-diff.sh uses
+# (see resolve_pr_head below) because that script only exposes --stat, not a
+# --name-only path list this scan needs - good enough for a keyword scan, not a
+# substitute for that script's authoritative diff.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

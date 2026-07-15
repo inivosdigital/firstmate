@@ -119,6 +119,15 @@ An absent or empty file is a no-op, and a host without `systemctl` (no systemd) 
 The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same units.
 See [`examples/critical-services`](examples/critical-services) for a copyable config; report a failed unit to the captain in plain language and never restart it, since a unit that failed may be unsafe to restart without knowing why.
 
+## Upstream template drift (UPSTREAM_DRIFT)
+
+firstmate's own repo tracks a read-only upstream template (`kunchenguid/firstmate`, the `upstream` remote after the remote swap; see `AGENTS.md` section 1) that this fleet can never push or merge into directly, so local `main` and `upstream/main` drift apart silently over time.
+Every session, bootstrap prints one `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)` FYI line by reading whatever `refs/remotes/upstream/main` currently holds, without fetching, so the report is safe in the read-only/no-lock detect path.
+The wording escalates to `UPSTREAM_DRIFT: this repo's upstream sync needs attention - ...` once local `main` is more than 30 commits behind `upstream/main` or their merge-base is older than 10 days.
+It only reports; reconciling upstream is always a deliberately dispatched, reviewed ship task, never automated.
+No-op when there is no `upstream` remote or no `upstream/main` ref yet.
+The network fetch that refreshes `refs/remotes/upstream/main` runs only in the locked, mutating fleet-sync sweep, bounded by `FM_UPSTREAM_FETCH_TIMEOUT` (default 20s); it requires a `timeout` or `gtimeout` binary, otherwise the fetch is skipped and the last-fetched ref is kept.
+
 ## Gate defaults (.no-mistakes.yaml)
 
 The tracked `.no-mistakes.yaml` keeps test evidence outside the repo and defines `commands.test` so no-mistakes runs firstmate's bash behavior suite directly.
@@ -412,6 +421,7 @@ FM_TIER_HEAVY_MIN_FILES=8          # fm-tier-guard.sh: changed-file count that e
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
+FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep to fetch upstream/main for the UPSTREAM_DRIFT report; requires timeout/gtimeout or the fetch is skipped
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller
 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-nas-deploy-sync.sh hits the orphaned .git/packed-refs.lock signature on the shared NAS checkout (two landed teardowns for the same project can race it)

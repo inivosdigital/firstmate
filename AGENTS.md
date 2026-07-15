@@ -42,6 +42,7 @@ When any crewmate is live, delegate changes to shared tracked material rather th
 This repo is a shared template, while `.env`, `data/`, `state/`, `config/`, `projects/`, and `.no-mistakes/` are captain-private and gitignored.
 Ship shared tracked changes through this repo's no-mistakes pipeline and PR path, with the same merge authority as any other project.
 This repo's own upstream (`kunchenguid/firstmate`, the `upstream` remote after the remote swap) is read-only to this fleet with no merge rights, ever, so firstmate-repo ship tasks land local-only: branch, commit, firstmate reviews the diff, the captain approves, and firstmate fast-forwards local `main`.
+`bin/fm-merge-local.sh` then also best-effort pushes that fast-forwarded `main` to `origin` (the captain's fork) when a remote is present, so the fork never silently drifts behind local `main`; a push failure is reported but never fails the merge, and a local-only project with no remote at all is skipped silently.
 The pipeline still auto-opens a PR against that upstream, but it is a non-blocking, purely opportunistic contribution back - never a merge gate here and never waited on - and its diff stays clean only while the `UPSTREAM_DRIFT:` gap (section 3) is small, since a large gap makes the PR carry a lot of unrelated local-only history.
 Never add an agent name as a commit co-author.
 
