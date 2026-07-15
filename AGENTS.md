@@ -221,6 +221,9 @@ A report escalates the task to at least Sonnet/high in place, without losing its
 A crewmate's own report - it cannot find root cause, a "confirmed" fix touches a shared path, or it raised a tradeoff buried in seemingly mechanical work - is a second, non-mechanical trigger with the same effect.
 Either way, escalate the model/effort in place and never silently de-escalate for the rest of that task's life.
 
+A trivial-tier task also runs the Light verification tier: scaffold its brief with `bin/fm-brief.sh --light-verify` (section 11) so it cites `verify-trivial` instead of the default full verification workflow, and for a no-mistakes-mode task, skip the document step when triggering its validation (`no-mistakes axi run --skip=document`) since that tier's mandatory side-effect confidence gate already covers what the step would check.
+A tier-guard or self-reported escalation above lifts the task off the Light verification tier for the rest of its life, exactly like the model/effort escalation it rides alongside.
+
 **Ultracode confirmation.**
 Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`; it refuses until a genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - has reviewed the finished diff and its findings were addressed, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`.
 
@@ -352,6 +355,7 @@ Every ship brief must retain the worktree-isolation assertion and stop if launch
 If a ship task touches firstmate's shared tracked material, explicitly require `firstmate-coding-guidelines` before editing.
 If a task will drive Herdr lifecycle behavior, scaffold with `--herdr-lab`; if that need appears after an unguarded scaffold, stop and regenerate rather than adding commands by hand.
 The generated Herdr contract must use a named non-`default` isolated lab and its guarded helper for every lifecycle action.
+For a task dispatched at the trivial (Haiku/low) tier, scaffold with `--light-verify` so the brief points at `verify-trivial` (loaded per section 13's trigger) instead of the default full verification workflow; the flag is likewise rejected for `--secondmate` briefs.
 
 Load `secondmate-provisioning` before creating or using a charter brief and preserve its idle-by-default and marked-return-channel contracts.
 Status appends are sparse supervisor-actionable events, not routine progress; `bin/fm-classify-lib.sh` owns keyed open and resolved semantics.
@@ -380,6 +384,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the X-mode configuration blocker, and on any milestone or terminal wake for an X-mode-linked task before posting its completion follow-up; relevant only when X mode is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `verify-trivial` - load before authoring or filling in a Light-tier brief's Task section (a brief scaffolded with `bin/fm-brief.sh --light-verify`, section 11) and before advancing such a task to PR-ready.
 
 ## 14. X mode
 
