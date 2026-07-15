@@ -51,15 +51,6 @@ if [ "${1:-}" = status ] && [ "${2:-}" = --json ] && [ "${FM_HERDR_SCRIPT_STATUS
   printf '{"client":{"version":"0.7.1","protocol":14},"server":{"running":true}}\n'
   exit 0
 fi
-# fm_backend_herdr_server_ensure launches `herdr server` fire-and-forget
-# (backgrounded) so its poll loop can proceed concurrently. No test scripts a
-# canned response for it, so it must never read/write the shared call-ordinal
-# COUNT_FILE below - doing so races with whichever synchronous call the poll
-# loop issues at the same moment, losing an update and permanently shifting
-# every later call's response number.
-if [ "${1:-}" = server ]; then
-  exit 0
-fi
 next=$(( $(cat "$COUNT_FILE" 2>/dev/null || echo 0) + 1 ))
 n=$next
 echo "$n" > "$COUNT_FILE"
