@@ -24,6 +24,9 @@ Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed 
 A declared external wait trades that silence for one bounded recheck per pause window, so a forgotten pause cannot remain invisible indefinitely.
 Crew status files are append-only wake-event logs, not current-state fields.
 `bin/fm-crew-state.sh <id>` is the cheap current-state read for an actionable heartbeat review: it attributes the matching no-mistakes run, active or terminal, to the crew's own branch and keeps that run-step authoritative even if the pane has closed.
+Every no-mistakes call inside that read, and the whole read itself as watched from `crew_absorb_class`, is force-killed on a hard timeout (`FM_CREW_STATE_NM_TIMEOUT`/`FM_CREW_STATE_NM_KILL_AFTER`, `FM_CREW_ABSORB_TIMEOUT`/`FM_CREW_ABSORB_KILL_AFTER`) rather than merely signaled.
+A plain `timeout N cmd` with no kill-after is only advisory once N elapses, and an uncooperative no-mistakes CLI defeating that soft bound under concurrent validation load caused the watcher's liveness beacon to stall for 89 minutes on 2026-07-09 before this fix landed.
+A timed-out read reads as `none` (not provably working), never a false `working`, so it surfaces rather than being silently absorbed.
 During no-mistakes' `ci` monitor phase, it also reads the ci step log tail because `axi status` reports both "still waiting on checks" and "checks green, waiting on merge" as `ci,running`.
 The most recent recognized ci log marker wins, so checks-green monitoring reports done while a later re-arm, failed-check, or issue marker returns the crew to working.
 Only when no matching run exists does it fall back to the pane busy-signature and then a status-log event whose verb maps to a recognized run-state; a dead pane without a run reports unknown instead of trusting a stale log.
