@@ -707,8 +707,7 @@ autodeploy_logs_check() {
     log="${log%"${log##*[![:space:]]}"}"
     [ -n "$log" ] || continue
     case "$log" in '#'*) continue ;; esac
-    [ -r "$log" ] || continue
-    last=$(tail -n 1 "$log" 2>/dev/null) || continue
+    last=$(fm_autodeploy_read_last_line "$log") || continue
     [ -n "$last" ] || continue
     if fm_autodeploy_line_failed "$last"; then
       label=$(basename "$(dirname "$log")")
