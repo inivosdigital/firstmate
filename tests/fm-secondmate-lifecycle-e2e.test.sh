@@ -27,6 +27,9 @@ set -u
 # shellcheck source=tests/secondmate-helpers.sh disable=SC1091
 . "$(dirname "${BASH_SOURCE[0]}")/secondmate-helpers.sh"
 
+# Reclaim any leftover root from a prior run killed abnormally (e.g. by the OOM
+# killer, which SIGKILLs and so bypasses every EXIT trap) before adding another.
+fm_test_sweep_stale_tmproots fm-secondmate-lifecycle
 TMP_ROOT=$(fm_test_tmproot fm-secondmate-lifecycle)
 export FM_BACKEND=tmux
 

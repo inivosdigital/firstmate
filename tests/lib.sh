@@ -53,27 +53,83 @@ pass() {
 # --- self-cleaning temp root ------------------------------------------------
 #
 # fm_test_tmproot <prefix> echoes a fresh temp dir and registers it for removal
-# on EXIT. The first call installs the cleanup trap. A test file that needs
-# extra teardown (e.g. killing a daemon) should define its own EXIT trap and
-# call fm_test_cleanup from inside it so registered dirs are still removed.
+# on EXIT. A test file that needs extra teardown (e.g. killing a daemon) should
+# define its own EXIT trap and call fm_test_cleanup from inside it so registered
+# dirs are still removed.
+#
+# Registration goes through an on-disk manifest, not just the FM_TEST_CLEANUP_DIRS
+# array: every call site uses `TMP_ROOT=$(fm_test_tmproot prefix)`, and bash always
+# runs a command substitution in a subshell, so a trap installed - or an array
+# entry appended - inside fm_test_tmproot itself would apply only to that
+# short-lived subshell and vanish the instant it exits. Confirmed empirically: an
+# EXIT trap set there fires immediately on subshell exit, deleting the very
+# directory just created, before control ever returns to the caller; the caller's
+# own shell never gets a trap installed at all, so nothing then protects the
+# directory a later `mkdir -p` silently recreates. Writing the path to a manifest
+# file survives the subshell boundary because subshells share the real
+# filesystem even though they don't share shell state; the real top-level trap,
+# installed once below when this library is sourced (never inside a subshell,
+# since sourcing always runs in the current shell), reads the manifest at the
+# actual script's exit. FM_TEST_CLEANUP_DIRS keeps working unchanged for a
+# caller that appends to it directly at its own top level (not through a
+# command substitution), such as a helper that creates its temp dir with a bare
+# `mktemp -d` assignment.
+#
+# Directory names embed the owning PID (<prefix>.<pid>.XXXXXX) so a later
+# invocation's startup sweep (fm_test_sweep_stale_tmproots) can tell a leftover
+# from a still-running test apart without relying on age alone.
+#
+# None of this saves a directory from a SIGKILL (e.g. the OOM killer): no trap,
+# EXIT or otherwise, ever runs for that signal, so a killed run's temp root is
+# unavoidably left behind. fm_test_sweep_stale_tmproots is the actual safety net
+# for that case - it runs at the start of the next invocation.
 
 FM_TEST_CLEANUP_DIRS=()
+FM_TEST_CLEANUP_MANIFEST="${TMPDIR:-/tmp}/.fm-test-cleanup.$$"
 
 fm_test_cleanup() {
   local d
   for d in "${FM_TEST_CLEANUP_DIRS[@]:-}"; do
-    [ -n "$d" ] && rm -rf "$d"
+    [ -n "$d" ] && rm -rf -- "$d"
   done
+  if [ -f "$FM_TEST_CLEANUP_MANIFEST" ]; then
+    while IFS= read -r d; do
+      [ -n "$d" ] && rm -rf -- "$d"
+    done < "$FM_TEST_CLEANUP_MANIFEST"
+    rm -f -- "$FM_TEST_CLEANUP_MANIFEST"
+  fi
 }
+trap fm_test_cleanup EXIT
 
 fm_test_tmproot() {
   local prefix=${1:-fm-test} root
-  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.XXXXXX")
-  if [ "${#FM_TEST_CLEANUP_DIRS[@]}" -eq 0 ]; then
-    trap fm_test_cleanup EXIT
-  fi
-  FM_TEST_CLEANUP_DIRS+=("$root")
+  root=$(mktemp -d "${TMPDIR:-/tmp}/${prefix}.$$.XXXXXX")
+  printf '%s\n' "$root" >> "$FM_TEST_CLEANUP_MANIFEST"
   printf '%s\n' "$root"
+}
+
+# fm_test_sweep_stale_tmproots <prefix> removes any leftover
+# <prefix>.<pid>.XXXXXX directory under TMPDIR whose owning PID is no longer
+# alive - the actual safety net for a SIGKILL-terminated prior run, which no
+# EXIT trap (see above) can ever run for. A directory whose PID is still alive
+# is left untouched, so a genuinely concurrent run of the same test on this host
+# is never swept. Call it once at the top of a test file, before that file's own
+# fm_test_tmproot call, for any prefix known to create large fixtures (e.g. a
+# full repo clone) worth reclaiming promptly rather than waiting on the next
+# `rm -rf` of an already-registered root.
+fm_test_sweep_stale_tmproots() {
+  local prefix=$1 dir base pid
+  for dir in "${TMPDIR:-/tmp}/${prefix}".*; do
+    [ -d "$dir" ] || continue
+    base=$(basename "$dir")
+    pid=${base#"$prefix".}
+    pid=${pid%%.*}
+    case "$pid" in
+      ''|*[!0-9]*) continue ;; # not the <prefix>.<pid>.XXXXXX scheme; leave it alone
+    esac
+    kill -0 "$pid" 2>/dev/null && continue # owner still alive: a genuine concurrent run
+    rm -rf -- "$dir"
+  done
 }
 
 # --- fakebin / PATH shims ---------------------------------------------------
