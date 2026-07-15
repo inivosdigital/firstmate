@@ -22,9 +22,11 @@
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
 # Uncommitted changes are never landed.
-# local-only projects additionally accept work merged into the local default
-# branch (firstmate performs that merge on the captain's approval) as a fallback
-# for the common case where there is no remote at all.
+# Any project, not only local-only ones, additionally accepts work merged into the
+# LOCAL default branch (a worktree and its project's primary checkout are linked
+# worktrees of the same repository, so this covers a firstmate-performed local-only
+# merge as well as work landed into local main by hand on the captain's approval for
+# a project whose delivery mode is not local-only, e.g. a PR closed unmerged upstream).
 # Scout tasks (kind=scout in meta) carve out of that check: their worktree is
 # declared scratch and the report at data/<task-id>/report.md is the work
 # product - teardown proceeds once the report exists, and refuses without it.

@@ -238,7 +238,7 @@ Absent `select` means use the first array element, or the only object in the sin
 `default` is optional.
 An omitted model or effort means the selected harness uses its own default for that axis.
 If a selected profile carries an effort value the chosen harness does not accept, `fm-spawn.sh` records the requested `effort=` in task meta for traceability but omits the launch flag, and bootstrap reports the invalid harness/effort pair as a `CREW_DISPATCH` diagnostic when it is visible in the file.
-`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin, vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
+`quota-balanced` selection is deterministic and implemented by `bin/fm-dispatch-select.sh`, whose header owns the general-window rules, the 20 point stale-clear freshness margin (`FM_DISPATCH_STALE_CLEAR_MARGIN`), the quota-command override (`FM_DISPATCH_QUOTA_AXI`), vendor-availability handling, and the degrade-to-first-element fallbacks; quota trouble never blocks dispatch.
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files produce a `CREW_DISPATCH: active config/crew-dispatch.json` block that lists each rule and prints `default:` when present.
@@ -414,6 +414,8 @@ FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
+FM_DISPATCH_QUOTA_AXI=quota-axi    # fm-dispatch-select.sh: override for the quota command invoked with --json for quota-balanced selection
+FM_DISPATCH_STALE_CLEAR_MARGIN=20  # fm-dispatch-select.sh: point margin a candidate's quota must clear a stale reading by before quota-balanced treats it as fresh
 FM_TIER_TRIVIAL_MAX_LINES=30       # fm-tier-guard.sh: changed-line count a trivial (haiku/low) task may reach before escalation fires
 FM_TIER_TRIVIAL_MAX_FILES=2        # fm-tier-guard.sh: changed-file count a trivial (haiku/low) task may reach before escalation fires
 FM_TIER_TRIVIAL_MAX_AGE_SECONDS=1800   # fm-tier-guard.sh: elapsed seconds a trivial (haiku/low) task may run before escalation fires (30 min)
@@ -423,6 +425,7 @@ FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wak
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's best-effort `git fetch upstream` behind the UPSTREAM_DRIFT diagnostic; a stall just leaves the last-fetched ref in place
+FM_LOCAL_PUSH_TIMEOUT=20   # seconds allowed for fm-merge-local.sh's best-effort, non-interactive `git push origin` after a local-only merge; a stalled or credential-prompting remote just leaves the merge succeeded and the push unsynced
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller
 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-nas-deploy-sync.sh hits the orphaned .git/packed-refs.lock signature on the shared NAS checkout (two landed teardowns for the same project can race it)
