@@ -570,8 +570,7 @@ autodeploy_scan() {
     [ -n "$log" ] || continue
     case "$log" in '#'*) continue ;; esac
     mfile=$(_autodeploy_marker_path "$log")
-    [ -r "$log" ] || continue                       # missing/unreadable: fail quiet, keep prior state
-    last=$(tail -n 1 "$log" 2>/dev/null) || continue
+    last=$(fm_autodeploy_read_last_line "$log") || continue
     [ -n "$last" ] || continue
     if fm_autodeploy_line_failed "$last"; then
       stripped=$(_autodeploy_strip_ts "$last")
