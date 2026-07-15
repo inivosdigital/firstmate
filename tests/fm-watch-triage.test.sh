@@ -1096,6 +1096,158 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+# --- periodic autodeploy-log sweep (config/autodeploy-logs) ------------------
+
+# Run autodeploy_scan once against <state>/<config> by sourcing fm-watch.sh in a
+# subshell - its source guard returns before the runtime lock/loop, so only the
+# functions load. Echoes "rc=<exit>"; the durable wake queue and per-log surfaced
+# markers land under <state>. Keeps the scan hermetic (no real watcher, no timing).
+run_autodeploy_scan() {  # <state> <config>
+  # Pass fm-watch.sh as $1 (not $0), so its BASH_SOURCE[0] != $0 source guard
+  # fires and the runtime loop below it never starts (same trick as append_wake).
+  FM_STATE_OVERRIDE="$1" FM_CONFIG_OVERRIDE="$2" \
+    bash -c '. "$1"; autodeploy_scan; printf "rc=%s\n" "$?"' _ "$WATCH" 2>/dev/null
+}
+
+# Marker path fm-watch.sh's autodeploy_scan uses for a given log (mirror the
+# script's tr sanitization so a test can assert on the record directly).
+autodeploy_marker() {  # <state> <log-path>
+  printf '%s/.autodeploy-surfaced-%s' "$1" "$(printf '%s' "$2" | tr -c 'A-Za-z0-9' '_')"
+}
+
+test_autodeploy_absent_config_is_noop() {
+  local dir state config rc
+  dir=$(make_case autodeploy-absent); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config"   # config dir present, but no autodeploy-logs file in it
+  rc=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc" = "rc=1" ] || fail "absent config/autodeploy-logs was not a no-op (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "absent config enqueued a wake"
+  pass "an absent config/autodeploy-logs is a silent no-op"
+}
+
+test_autodeploy_failure_enqueues_labelled_check() {
+  local dir state config log rc
+  dir=$(make_case autodeploy-fail); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config" "$state/beamanalyzer-autodeploy"
+  log="$state/beamanalyzer-autodeploy/status.log"
+  printf '%s\n' "$log" > "$config/autodeploy-logs"
+  # A failing run: an ok rollup, then a STUCK alert line, then the ALERT rollup
+  # that is the run's authoritative last line.
+  printf '2026-07-15T10:00:00+00:00 ok nas=unchanged prod=unchanged deployed=no\n' > "$log"
+  printf '2026-07-15T10:05:00+00:00 beamanalyzer-autodeploy: prod: STUCK: v2 has diverged - needs attention\n' >> "$log"
+  printf '2026-07-15T10:05:00+00:00 ALERT nas=unchanged prod=unsafe deployed=no\n' >> "$log"
+  rc=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc" = "rc=0" ] || fail "a failing autodeploy last line was not actionable (got $rc)"
+  grep "$(printf '\tcheck\t')" "$state/.wake-queue" >/dev/null || fail "no check wake enqueued for the failure"
+  grep -F "ALERT nas=unchanged prod=unsafe" "$state/.wake-queue" >/dev/null || fail "check wake did not carry the failing last line"
+  grep -F "autodeploy beamanalyzer-autodeploy reports failure" "$state/.wake-queue" >/dev/null || fail "check wake did not label the deploy"
+  [ -s "$(autodeploy_marker "$state" "$log")" ] || fail "failure was not recorded surfaced"
+  pass "a failing autodeploy last line enqueues a labelled check wake and records it surfaced"
+}
+
+test_autodeploy_healthy_is_silent_and_rearms() {
+  local dir state config log marker rc
+  dir=$(make_case autodeploy-healthy); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config" "$state/deploy"
+  log="$state/deploy/status.log"
+  printf '%s\n' "$log" > "$config/autodeploy-logs"
+  marker=$(autodeploy_marker "$state" "$log")
+  printf 'ALERT nas=unsafe prod=unchanged deployed=no' > "$marker"   # stale prior alarm
+  printf '2026-07-15T11:00:00+00:00 ok nas=unchanged prod=unchanged deployed=no\n' > "$log"
+  rc=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc" = "rc=1" ] || fail "a healthy ok last line was treated as actionable (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "a healthy last line enqueued a wake"
+  [ ! -e "$marker" ] || fail "a healthy run did not clear the surfaced marker (alarm would never re-arm)"
+  pass "a healthy ok last line is silent and clears any prior surfaced marker"
+}
+
+test_autodeploy_persistent_failure_dedupes() {
+  local dir state config log rc1 rc2 count
+  dir=$(make_case autodeploy-dedupe); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config" "$state/deploy"
+  log="$state/deploy/status.log"
+  printf '%s\n' "$log" > "$config/autodeploy-logs"
+  printf '2026-07-15T12:00:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' > "$log"
+  rc1=$(run_autodeploy_scan "$state" "$config")
+  # A later run reports the SAME failure but stamps a fresh time (autodeploy re-runs
+  # every few minutes); the timestamp must not defeat dedupe.
+  printf '2026-07-15T12:05:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' >> "$log"
+  rc2=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc1" = "rc=0" ] || fail "first scan of a new failure was not actionable (got $rc1)"
+  [ "$rc2" = "rc=1" ] || fail "an unchanged persistent failure re-surfaced despite a fresh timestamp (got $rc2)"
+  count=$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${count:-0}" = "1" ] || fail "persistent failure enqueued ${count:-0} check wakes, expected exactly 1"
+  pass "a persistent identical failure surfaces once despite each run's changing timestamp"
+}
+
+test_autodeploy_recurrence_after_clear_resurfaces() {
+  local dir state config log rc_fail rc_ok rc_again count
+  dir=$(make_case autodeploy-recur); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config" "$state/deploy"
+  log="$state/deploy/status.log"
+  printf '%s\n' "$log" > "$config/autodeploy-logs"
+  printf '2026-07-15T13:00:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' > "$log"
+  rc_fail=$(run_autodeploy_scan "$state" "$config")
+  printf '2026-07-15T13:05:00+00:00 ok nas=unchanged prod=unchanged deployed=no\n' >> "$log"
+  rc_ok=$(run_autodeploy_scan "$state" "$config")
+  printf '2026-07-15T13:10:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' >> "$log"
+  rc_again=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc_fail" = "rc=0" ] || fail "initial failure not actionable (got $rc_fail)"
+  [ "$rc_ok" = "rc=1" ] || fail "healthy recovery not silent (got $rc_ok)"
+  [ "$rc_again" = "rc=0" ] || fail "a failure recurring after a clean run did not re-surface (got $rc_again)"
+  count=$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${count:-0}" = "2" ] || fail "expected 2 check wakes across fail/clear/fail, got ${count:-0}"
+  pass "a failure recurring after a healthy run re-surfaces once the alarm re-armed"
+}
+
+test_autodeploy_unreadable_log_is_silent() {
+  local dir state config rc
+  dir=$(make_case autodeploy-unreadable); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config"
+  # Point at a log that does not exist; a NAS mount hiccup looks the same.
+  printf '%s\n' "$state/nope/status.log" > "$config/autodeploy-logs"
+  rc=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc" = "rc=1" ] || fail "a missing/unreadable log was not skipped silently (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "a missing log enqueued a wake"
+  pass "a missing or unreadable configured log is skipped silently, not alarmed"
+}
+
+test_autodeploy_comments_blanks_and_whitespace() {
+  local dir state config log rc
+  dir=$(make_case autodeploy-comments); state="$dir/state"; config="$dir/config"
+  mkdir -p "$config" "$state/deploy"
+  log="$state/deploy/status.log"
+  {
+    printf '# watched autodeploy logs\n'
+    printf '\n'
+    printf '   %s   \n' "$log"   # surrounding whitespace must be trimmed
+  } > "$config/autodeploy-logs"
+  printf '2026-07-15T14:00:00+00:00 deploy: build: FAILED: npm ERR code ELIFECYCLE\n' > "$log"
+  rc=$(run_autodeploy_scan "$state" "$config")
+  [ "$rc" = "rc=0" ] || fail "a FAILED: last line on a whitespace-padded path was not detected (got $rc)"
+  grep -F "build: FAILED: npm ERR" "$state/.wake-queue" >/dev/null || fail "FAILED: line not surfaced"
+  pass "blank lines and # comments are ignored and surrounding whitespace on a path is trimmed"
+}
+
+test_autodeploy_failure_surfaced_on_heartbeat() {
+  local dir state fakebin config out drain_out pid
+  dir=$(make_case autodeploy-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
+  config="$dir/config"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$config" "$state/beamanalyzer-autodeploy"
+  printf '%s\n' "$state/beamanalyzer-autodeploy/status.log" > "$config/autodeploy-logs"
+  printf '2026-07-15T10:30:00+00:00 ALERT nas=unsafe prod=unchanged deployed=no\n' \
+    > "$state/beamanalyzer-autodeploy/status.log"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a configured autodeploy failure on the periodic sweep"
+  grep -F "check: autodeploy" "$out" >/dev/null || fail "watcher did not exit with a check wake for the autodeploy failure: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after autodeploy heartbeat failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" >/dev/null || fail "autodeploy check wake was not queued"
+  grep -F "ALERT nas=unsafe" "$drain_out" >/dev/null || fail "drained check wake did not carry the failure line"
+  pass "a configured autodeploy status log's failure surfaces as a check wake on the watcher's periodic sweep"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1129,3 +1281,11 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_autodeploy_absent_config_is_noop
+test_autodeploy_failure_enqueues_labelled_check
+test_autodeploy_healthy_is_silent_and_rearms
+test_autodeploy_persistent_failure_dedupes
+test_autodeploy_recurrence_after_clear_resurfaces
+test_autodeploy_unreadable_log_is_silent
+test_autodeploy_comments_blanks_and_whitespace
+test_autodeploy_failure_surfaced_on_heartbeat
