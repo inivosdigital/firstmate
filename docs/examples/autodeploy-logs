@@ -6,11 +6,14 @@
 # non-empty, non-comment line; blank lines and full-line "#" comments are
 # ignored.
 #
-# Each listed log is expected to follow firstmate's fleet-sync line convention
-# (bin/fm-fleet-sync.sh): a durable, timestamped, append-only status log whose
-# LAST line reports the most recent run's health - a healthy run ends in an
-# "ok ..." rollup, a failed one in an "ALERT ..." rollup or a STUCK:/FAILED:
-# alert line. Both readers check only that last line; when it reports a failure,
+# Each listed log is expected to be a durable, timestamped, append-only status
+# log written by an external per-project autodeploy tool (e.g. beamanalyzer's
+# deploy job), whose LAST line reports the most recent run's health: a healthy
+# run ends in an "ok ..." rollup and a failed one in an "ALERT ..." rollup, plus
+# firstmate's own STUCK:/FAILED:/needs-attention alert-line format. The match set
+# lives in bin/fm-autodeploy-lib.sh's fm_autodeploy_line_failed; the ok/ALERT
+# rollup is the deploy tool's own convention, not something bin/fm-fleet-sync.sh
+# produces. Both readers check only that last line; when it reports a failure,
 # the periodic sweep wakes and relays the line to the captain once, staying quiet
 # about that same failure until it changes or a later successful run clears it,
 # while bootstrap surfaces it fresh every session start as a read-only diagnostic
