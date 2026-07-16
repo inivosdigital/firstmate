@@ -899,7 +899,7 @@ run_autodeploy_bootstrap() {
 }
 
 test_autodeploy_logs_check() {
-  local case_dir home fakebin out log elapsed real_tail
+  local case_dir home fakebin out log elapsed real_tail bash_env
 
   # A log whose last line reports failure surfaces with its label and content.
   case_dir="$TMP_ROOT/autodeploy-failed"
@@ -977,6 +977,45 @@ SH
   fakebin=$(setup_autodeploy_case "$case_dir")
   out=$(run_autodeploy_bootstrap "$home" "$fakebin")
   [ -z "$out" ] || fail "absent config should be a no-op, got: $out"
+
+  # With no timeout mechanism (timeout, gtimeout, perl) on PATH, the feature
+  # would otherwise silently never alert; a configured log surfaces a one-time
+  # AUTODEPLOY_INERT diagnostic instead of the usual per-log AUTODEPLOY_FAILED
+  # check. Shadow `command -v` for only those three names, mirroring the
+  # no-systemctl case above, so the check is deterministic on any host.
+  bash_env="$TMP_ROOT/no-timeout-mechanism.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ]; then
+    case "${2:-}" in
+      timeout|gtimeout|perl) return 1 ;;
+    esac
+  fi
+  builtin command "$@"
+}
+SH
+
+  case_dir="$TMP_ROOT/autodeploy-no-timeout-mechanism"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  mkdir -p "$case_dir/logs/app-a"
+  log="$case_dir/logs/app-a/status.log"
+  printf 'ALERT should never be checked\n' > "$log"
+  printf '%s\n' "$log" > "$home/config/autodeploy-logs"
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "AUTODEPLOY_INERT: config/autodeploy-logs is set but no timeout mechanism (timeout, gtimeout, or perl) is on PATH; autodeploy-alert checks cannot run" ] \
+    || fail "no timeout mechanism should surface AUTODEPLOY_INERT: got: $out"
+
+  # Same no-mechanism host, but the config lists only comments/blank lines:
+  # nothing is actually configured to warn about, so it stays silent.
+  case_dir="$TMP_ROOT/autodeploy-no-timeout-mechanism-empty"
+  home="$case_dir/home"
+  fakebin=$(setup_autodeploy_case "$case_dir")
+  printf '%s\n' '# nothing configured yet' '' > "$home/config/autodeploy-logs"
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 "$ROOT/bin/fm-bootstrap.sh")
+  [ -z "$out" ] || fail "empty config on a no-mechanism host should stay silent, got: $out"
 
   pass "bootstrap surfaces failed autodeploy logs and stays silent otherwise"
 }
