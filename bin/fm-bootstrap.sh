@@ -226,7 +226,7 @@ upstream_drift_report() {
 # neither binary is installed at all. No-op without an upstream remote.
 upstream_drift_fetch() {
   git -C "$FM_ROOT" remote get-url upstream >/dev/null 2>&1 || return 0
-  local seconds="${FM_UPSTREAM_FETCH_TIMEOUT:-20}" pid start
+  local seconds="${FM_UPSTREAM_FETCH_TIMEOUT:-20}" pid start monitor_was_on=0
   if command -v timeout >/dev/null 2>&1; then
     timeout "$seconds" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
     return 0
@@ -235,18 +235,22 @@ upstream_drift_fetch() {
     gtimeout "$seconds" git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null || true
     return 0
   fi
+  case $- in *m*) monitor_was_on=1 ;; esac
+  set -m 2>/dev/null || true
   git -C "$FM_ROOT" fetch --quiet upstream 2>/dev/null &
   pid=$!
   start=$SECONDS
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$((SECONDS - start))" -ge "$seconds" ]; then
-      kill "$pid" 2>/dev/null || true
+      kill -TERM "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
       wait "$pid" 2>/dev/null || true
+      [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
       return 0
     fi
     sleep 1
   done
   wait "$pid" 2>/dev/null || true
+  [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
 }
 
 fleet_sync() {
