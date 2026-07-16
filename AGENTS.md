@@ -540,8 +540,10 @@ bin/fm-teardown.sh <id>
 The script refuses if the worktree holds uncommitted changes or committed work that has not landed; treat a refusal as a stop-and-investigate, not an obstacle.
 `bin/fm-teardown.sh`'s header owns the full landed-work definition (remote-reachable, merged-PR-head containment for the squash-merge-then-delete-branch flow, content already in the default branch, local-only merges) and the `pr=` discovery fallback for merges that skipped `bin/fm-pr-check.sh`.
 Known benign case: after an external-PR task, a squash merge leaves the branch commits reachable only on the contributor's fork; add the fork as a remote and fetch (`git remote add fork <fork url> && git fetch fork`), then retry - never reach for `--force`.
-A successful PR-based teardown also refreshes that project's clone through `bin/fm-fleet-sync.sh`, best-effort.
-Any non-scout, non-secondmate teardown - PR-based or local-only - also best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh` (section 2); a project with no recorded deployment is a silent no-op.
+After a successful PR-based teardown, it also runs `bin/fm-fleet-sync.sh` for that project, best-effort, so safe clone states catch up to the merge, clean detached ancestor drift self-heals, and the just-merged branch, now gone on the remote and free of its worktree, is pruned immediately.
+Unsafe drift is reported as `STUCK:` and left untouched.
+Any non-scout, non-secondmate, non-forced teardown - PR-based or local-only - also best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh` (section 2); a project with no recorded deployment is a silent no-op.
+A forced teardown (`--force`) skips this sync, since `--force` carries no landed-work guarantee.
 Then update the backlog using the teardown reminder: run `tasks-axi done` when the default tasks-axi backend is active and compatible, otherwise move the task to Done in `data/backlog.md` manually with the full `https://...` PR URL or local merge note and date and keep Done to the 10 most recent.
 Re-evaluate the queue and dispatch only queued work whose blockers are gone and whose time/date gate, if any, has arrived.
 
