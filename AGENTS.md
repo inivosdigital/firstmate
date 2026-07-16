@@ -234,7 +234,8 @@ Tear down a ship task only after landing is confirmed.
 A teardown refusal for uncommitted or unlanded work is a stop-and-investigate result, never an obstacle to bypass.
 Never force teardown without explicit discard authority.
 `bin/fm-teardown.sh`'s header owns the full landed-work definition; a known benign case is an external-PR task whose squash merge leaves the branch commits reachable only on the contributor's fork - add the fork as a remote and fetch, then retry, never reach for `--force`.
-After a successful PR-based teardown it also best-effort syncs that project's clone via `bin/fm-fleet-sync.sh`, and any non-scout, non-secondmate teardown best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh`; a project with no recorded deployment is a silent no-op.
+After a successful PR-based teardown it also best-effort syncs that project's clone via `bin/fm-fleet-sync.sh`, and any non-scout, non-secondmate, non-forced teardown best-effort syncs and restarts that project's live NAS deployment, if one is recorded in `data/nas-deployments.md`, through `bin/fm-nas-deploy-sync.sh`; a project with no recorded deployment is a silent no-op.
+A forced teardown (`--force`) skips this sync, since `--force` carries no landed-work guarantee.
 After successful teardown, record completion, retain only the configured recent Done history, and re-evaluate queued work whose blockers and time gates have cleared.
 
 A secondmate is persistent and an empty queue is healthy.

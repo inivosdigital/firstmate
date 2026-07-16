@@ -411,6 +411,7 @@ FM_TIER_HEAVY_MIN_LINES=400        # fm-tier-guard.sh: changed-line count that e
 FM_TIER_HEAVY_MIN_FILES=8          # fm-tier-guard.sh: changed-file count that escalates any tier via the general heavy-scale ceiling
 FM_WATCH_TRIAGE_LOG_MAX_BYTES=262144   # size cap for the watcher's absorbed-wake debug log
 FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's best-effort clone refresh; unset/blank defaults to max(20, 5 + 3 * origin-backed-project-count)
+FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's bounded `git fetch upstream` (UPSTREAM_DRIFT); bounded by timeout, gtimeout, or a background-kill fallback when neither binary is installed
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller

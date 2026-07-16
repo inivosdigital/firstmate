@@ -237,7 +237,8 @@ Local-only projects, clones without an origin remote, and fetch failures remain 
 The refresh also prunes local branches whose remote is gone and that no worktree still needs.
 
 A landed ship task's `projects/<name>` dev clone is not the same checkout as a live deployment of that project running elsewhere on the host.
-When a project has a row in `data/nas-deployments.md`, non-scout, non-secondmate teardown also best-effort fast-forwards that project's separate live NAS checkout and restarts its recorded pm2 process(es), verifying each comes back online (`bin/fm-nas-deploy-sync.sh`).
+When a project has a row in `data/nas-deployments.md`, non-scout, non-secondmate, non-forced teardown also best-effort fast-forwards that project's separate live NAS checkout and restarts its recorded pm2 process(es), verifying each comes back online (`bin/fm-nas-deploy-sync.sh`).
+A forced teardown (`--force`) skips this sync, since it carries no landed-work guarantee.
 It mirrors the same clean/fast-forward-only safety as the clone refresh above, including the bounded orphaned-packed-refs-lock recovery, and reports a diverged or dirty checkout as `STUCK:` rather than touching it; a project absent from the mapping is a silent no-op.
 Every filesystem/git touch of the NAS checkout is time-bounded so an unreachable mount cannot hang the teardown call that triggered it.
 
