@@ -19,6 +19,7 @@ Live or inconclusive liveness remains fail-open at that initial surface, and the
 Its initial normal-mode status signal still surfaces through the no-verb path, while away mode self-handles that routine signal and owns the later recheck.
 Fresh stale panes use the same current-state read before trusting the status log, so an active run or busy pane outranks an old captain-relevant status-log line left behind before validation.
 No-change heartbeats are also benign.
+Independent of the crew fleet-scan, every heartbeat also sweeps the optional local `config/autodeploy-logs` list (`bin/fm-watch.sh`'s `autodeploy_scan`): each configured status log's last line is read against firstmate's fleet-sync failure convention (`bin/fm-autodeploy-lib.sh`, shared with `bin/fm-bootstrap.sh`'s session-start counterpart check), a new failure enqueues a `check:` wake and is marked surfaced so it does not repeat, and a later healthy line clears that marker so a recurrence re-arms.
 Absorbed wakes advance their suppression markers, log to `state/.watch-triage.log`, and keep the watcher blocking without a queue record or LLM turn.
 After each drain, `fm-wake-drain.sh` runs the same liveness guard as the supervision scripts, so a lapsed watcher chain surfaces even on a turn that only drains and handles queued wakes.
 Routine watcher polling, supervision no-ops, elapsed waiting time, and absorbed benign wakes stay silent.
