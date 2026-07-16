@@ -61,8 +61,7 @@ ID=${1:-}
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
-NM_TIMEOUT=${FM_CREW_STATE_NM_TIMEOUT:-10}
-case "$NM_TIMEOUT" in ''|0|*[!0-9]*) NM_TIMEOUT=10 ;; esac
+NM_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_STATE_NM_TIMEOUT:-10}" 10)
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire
@@ -207,8 +206,7 @@ strip_quotes() {
 # load) - a plain `timeout N cmd` with no kill-after is only advisory once N
 # elapses, and defeating that soft bound was the root cause of the 2026-07-09
 # 89-minute watcher stall.
-NM_KILL_AFTER=${FM_CREW_STATE_NM_KILL_AFTER:-2}
-case "$NM_KILL_AFTER" in ''|0|*[!0-9]*) NM_KILL_AFTER=2 ;; esac
+NM_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_STATE_NM_KILL_AFTER:-2}" 2)
 nm_run() {  # <args...>
   ( cd "$WT" && fm_hard_timeout "$NM_TIMEOUT" "$NM_KILL_AFTER" no-mistakes "$@" ) 2>/dev/null || true
 }

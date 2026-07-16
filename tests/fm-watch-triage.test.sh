@@ -287,6 +287,21 @@ test_absorb_zero_env_values_sanitized_to_default() {
   pass "FM_CREW_ABSORB_TIMEOUT=0 and FM_CREW_ABSORB_KILL_AFTER=0 fall back to sanitized defaults, never a literal 0"
 }
 
+# Regression: the exclusion pattern above only caught the literal string "0",
+# not other all-zero digit spellings GNU `timeout` also treats as "no
+# timeout" - verified empirically, `timeout -k 1 00 sleep N` runs the full N
+# seconds, identical to a literal 0. Pins that FM_CREW_ABSORB_TIMEOUT=00 and
+# FM_CREW_ABSORB_KILL_AFTER=00 also fall back to their sanitized defaults.
+test_absorb_zero_padded_env_values_sanitized_to_default() {
+  local out
+  out=$(FM_CREW_ABSORB_TIMEOUT=00 FM_CREW_ABSORB_KILL_AFTER=00 bash -c \
+    ". \"$ROOT/bin/fm-classify-lib.sh\"; printf 'timeout=%s kill_after=%s\n' \"\$FM_CREW_ABSORB_TIMEOUT\" \"\$FM_CREW_ABSORB_KILL_AFTER\"")
+  assert_not_contains "$out" "timeout=00 " "FM_CREW_ABSORB_TIMEOUT=00 was not sanitized away from a zero-padded 0 (disables the outer hard-timeout bound)"
+  assert_not_contains "$out" "kill_after=00" "FM_CREW_ABSORB_KILL_AFTER=00 was not sanitized away from a zero-padded 0"
+  assert_contains "$out" "timeout=45 kill_after=5" "FM_CREW_ABSORB_TIMEOUT/KILL_AFTER=00 fall back to their sanitized defaults (45/5)"
+  pass "FM_CREW_ABSORB_TIMEOUT=00 and FM_CREW_ABSORB_KILL_AFTER=00 fall back to sanitized defaults, never a zero-padded 0"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -1449,6 +1464,7 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_absorb_zero_env_values_sanitized_to_default
+test_absorb_zero_padded_env_values_sanitized_to_default
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
