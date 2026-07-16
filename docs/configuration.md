@@ -409,6 +409,7 @@ FM_FLEET_SYNC_BOOTSTRAP_TIMEOUT=     # optional seconds allowed for bootstrap's 
 FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's bounded `git fetch upstream` (UPSTREAM_DRIFT); bounded by timeout, gtimeout, or a background-kill fallback when neither binary is installed
 FM_FLEET_PRUNE=1        # set to 0 to skip pruning local branches whose upstream is gone
 FM_UPSTREAM_FETCH_TIMEOUT=20   # seconds allowed for the locked fleet-sync sweep's best-effort `git fetch upstream` behind the UPSTREAM_DRIFT diagnostic; a stall just leaves the last-fetched ref in place
+FM_AUTODEPLOY_LOG_READ_TIMEOUT=5   # seconds allowed per config/autodeploy-logs status-log read before fm-autodeploy-lib.sh's fm_autodeploy_read_last_line gives up on a hung/unreachable log (NAS hiccup)
 FM_NAS_DEPLOYMENTS_OVERRIDE=   # alternate data/nas-deployments.md path for fm-nas-deploy-sync.sh, mainly for tests
 FM_NAS_SYNC_TIMEOUT=15   # seconds allowed per filesystem/git touch of fm-nas-deploy-sync.sh's $NAS_PATH before it is killed, so an unreachable NAS mount cannot hang fm-teardown.sh's caller
 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=3        # fetch retries after fm-nas-deploy-sync.sh hits the orphaned .git/packed-refs.lock signature on the shared NAS checkout (two landed teardowns for the same project can race it)

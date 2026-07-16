@@ -720,10 +720,24 @@ critical_services_check() {
 # autodeploy_scan uses; this is that sweep's session-start counterpart, for
 # whenever no watcher is armed to catch a failure between sessions. Pure
 # read-only detection: no state writes, no queued signals.
+#
+# When config/autodeploy-logs names at least one log but no read-timeout
+# mechanism is on PATH, fm_autodeploy_read_last_line would return 1 for every
+# call and the whole feature would silently never alert; print a one-time
+# AUTODEPLOY_INERT diagnostic instead of the usual per-log AUTODEPLOY_FAILED
+# checks so the captain learns the feature is disabled instead of assuming a
+# healthy deploy. A missing or transiently unreadable log stays fail-quiet -
+# that is a different, transient condition, not a permanent feature-disable.
 autodeploy_logs_check() {
   local file log last label
   file="$CONFIG/autodeploy-logs"
   [ -f "$file" ] || return 0
+  if ! fm_autodeploy_read_timeout_available; then
+    if grep -Eq '^[[:space:]]*[^#[:space:]]' "$file"; then
+      echo "AUTODEPLOY_INERT: config/autodeploy-logs is set but no timeout mechanism (timeout, gtimeout, or perl) is on PATH; autodeploy-alert checks cannot run"
+    fi
+    return 0
+  fi
   while IFS= read -r log || [ -n "$log" ]; do
     log="${log#"${log%%[![:space:]]*}"}"
     log="${log%"${log##*[![:space:]]}"}"
