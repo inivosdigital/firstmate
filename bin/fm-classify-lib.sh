@@ -241,6 +241,23 @@ elif command -v gtimeout >/dev/null 2>&1; then _FM_HARD_TIMEOUT_BIN=gtimeout
 elif command -v perl >/dev/null 2>&1; then _FM_HARD_TIMEOUT_BIN=perl
 fi
 
+# fm_sanitize_timeout_bound <value> <default>
+# Validates a positive-integer fm_hard_timeout bound, falling back to
+# <default> for anything empty, non-numeric, or all-zero digits ("0", "00",
+# "000", ...) - GNU `timeout` treats ANY all-zero duration spelling as "no
+# timeout" (`timeout -k 1 00 sleep 5` runs the full 5s, identical to a literal
+# 0), which would silently defeat the hard-timeout guarantee every caller of
+# this sanitizer relies on.
+fm_sanitize_timeout_bound() {
+  local v=$1 default=$2
+  case "$v" in
+    ''|*[!0-9]*) v=$default ;;
+    *[1-9]*) ;;
+    *) v=$default ;;
+  esac
+  printf '%s' "$v"
+}
+
 # fm_hard_timeout <secs> <kill-after-secs> <cmd> [args...]
 # Runs <cmd> bounded to <secs>, GUARANTEEING it is gone by <secs>+<kill-after-secs>:
 # still alive that long after the initial signal means a SIGKILL, not just another
@@ -270,10 +287,8 @@ fm_hard_timeout() {
 # poll loop - and therefore its liveness beacon - can never block on this read
 # past a fixed ceiling, even if some future call site inside fm-crew-state.sh
 # forgets to route a no-mistakes call through its own bound.
-FM_CREW_ABSORB_TIMEOUT="${FM_CREW_ABSORB_TIMEOUT:-45}"
-case "$FM_CREW_ABSORB_TIMEOUT" in ''|0|*[!0-9]*) FM_CREW_ABSORB_TIMEOUT=45 ;; esac
-FM_CREW_ABSORB_KILL_AFTER="${FM_CREW_ABSORB_KILL_AFTER:-5}"
-case "$FM_CREW_ABSORB_KILL_AFTER" in ''|0|*[!0-9]*) FM_CREW_ABSORB_KILL_AFTER=5 ;; esac
+FM_CREW_ABSORB_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_TIMEOUT:-45}" 45)
+FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFTER:-5}" 5)
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
