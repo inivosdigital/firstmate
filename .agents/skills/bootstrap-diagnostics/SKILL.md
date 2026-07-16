@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, AUTODEPLOY_INERT, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -56,6 +56,8 @@ When any diagnostic needs captain attention, report the plain consequence and re
 - `AUTODEPLOY_FAILED: <label> - <last line>` - the last line of a status log named in the optional local `config/autodeploy-logs` file reports failure (`bin/fm-watch.sh`'s `autodeploy_scan` owns the failure convention; `bin/fm-bootstrap.sh`'s `autodeploy_logs_check` is its session-start counterpart, a pure read-only detection that catches a deploy that failed while no watcher was armed to sweep it).
   Tell the captain plainly that the live deploy for `<label>` is failing, relaying the log line; firstmate never touches the deploy itself.
   An absent or empty config file, a missing or transiently unreadable log (a NAS hiccup), or a healthy last line all print nothing.
+- `AUTODEPLOY_INERT: config/autodeploy-logs is set but no timeout mechanism (timeout, gtimeout, or perl) is on PATH; autodeploy-alert checks cannot run` - the host has none of the three mechanisms `fm-autodeploy-lib.sh`'s `fm_autodeploy_read_last_line` needs to bound a log read, so every autodeploy check silently no-ops on both the bootstrap check and the watcher's periodic sweep.
+  Tell the captain plainly that autodeploy alerting is disabled on this host until `timeout` (coreutils), `gtimeout` (macOS via Homebrew's coreutils), or `perl` is installed; this is a one-time-per-session capability gap, not a deploy failure.
 - `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)` - the always-on FYI variant: firstmate's OWN repo tracking how far it has drifted from its read-only upstream template (`kunchenguid/firstmate`, the `upstream` remote after the remote swap).
   It prints every session; record it silently like any capability fact and take no action while the wording stays FYI.
   It only reports - the network fetch that refreshes the ref runs in the locked fleet-sync sweep, and reconciling upstream is never a bootstrap side effect.
