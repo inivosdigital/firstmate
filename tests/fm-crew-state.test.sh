@@ -1112,6 +1112,35 @@ SH
   pass "FM_CREW_STATE_NM_TIMEOUT=0 and FM_CREW_STATE_NM_KILL_AFTER=0 fall back to sanitized defaults, never a literal 0"
 }
 
+# Regression: the sanitizer fix above only excluded the literal string "0",
+# not other all-zero digit spellings GNU `timeout` also treats as "no
+# timeout" - verified empirically, `timeout -k 1 00 sleep N` runs the full N
+# seconds, identical to a literal 0. Pins that FM_CREW_STATE_NM_TIMEOUT=00 and
+# FM_CREW_STATE_NM_KILL_AFTER=00 also fall back to their sanitized defaults.
+test_zero_padded_nm_timeout_values_sanitized_to_default() {
+  reset_fakes
+  local d calls_file out
+  d=$(new_case zero-padded-nm-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-zero-padded-timeout
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/timeout.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf 'kill_after=%s secs=%s\n' "\$2" "\$3" >> "$calls_file"
+shift 3
+exec "\$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+  fm_write_meta "$d/state/feat-zero-padded-timeout.meta" "window=fm:fm-feat-zero-padded-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zero-padded-timeout)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=00 FM_CREW_STATE_NM_KILL_AFTER=00 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-zero-padded-timeout)
+  assert_contains "$out" "state: working" "the sanitized zero-padded-timeout call still resolves the run-step normally"
+  assert_not_contains "$(cat "$calls_file")" "secs=00" "FM_CREW_STATE_NM_TIMEOUT=00 reached timeout as a zero-padded 0 (disables the bound entirely)"
+  assert_not_contains "$(cat "$calls_file")" "kill_after=00" "FM_CREW_STATE_NM_KILL_AFTER=00 reached timeout -k as a zero-padded 0"
+  pass "FM_CREW_STATE_NM_TIMEOUT=00 and FM_CREW_STATE_NM_KILL_AFTER=00 fall back to sanitized defaults, never a zero-padded 0"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1246,6 +1275,7 @@ test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_uncooperative_no_mistakes_is_force_killed
 test_zero_nm_timeout_values_sanitized_to_default
+test_zero_padded_nm_timeout_values_sanitized_to_default
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
