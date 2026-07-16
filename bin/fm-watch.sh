@@ -455,8 +455,8 @@ mark_all_captain_relevant_surfaced() {
 
 # --- Periodic autodeploy-log sweep ------------------------------------------
 # The always-on twin of bootstrap's critical_services_check, but for poll-based
-# autodeploy jobs that write firstmate's fleet-sync STUCK:/FAILED:/ALERT line
-# convention (bin/fm-fleet-sync.sh) to a durable status log, so a deploy failure
+# autodeploy jobs that write their own durable status log in the failure
+# convention bin/fm-autodeploy-lib.sh's fm_autodeploy_line_failed matches, so a deploy failure
 # between sessions surfaces on the periodic sweep instead of waiting for the next
 # session start. bin/fm-bootstrap.sh's autodeploy_logs_check is the session-start
 # counterpart for whenever no watcher is armed to run this sweep; both share the
