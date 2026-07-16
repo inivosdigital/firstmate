@@ -275,6 +275,24 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# Regression: FM_CREW_STATE_NM_TIMEOUT=0 previously slipped past its sanitizer
+# and reached `timeout` as a literal 0, which GNU coreutils treats as "disable
+# the timeout" - the exact failure mode this outer bound exists to guarantee
+# against. FM_CREW_ABSORB_TIMEOUT/FM_CREW_ABSORB_KILL_AFTER use the identical
+# exclusion pattern (bin/fm-classify-lib.sh), so pin that a literal 0 for either
+# one also falls back to its sanitized default rather than reaching
+# fm_hard_timeout unbounded. Re-sources the library after setting the env vars
+# so the sanitizer's case statement actually re-evaluates them.
+test_absorb_zero_env_values_sanitized_to_default() {
+  local out
+  out=$(FM_CREW_ABSORB_TIMEOUT=0 FM_CREW_ABSORB_KILL_AFTER=0 bash -c \
+    ". \"$ROOT/bin/fm-classify-lib.sh\"; printf 'timeout=%s kill_after=%s\n' \"\$FM_CREW_ABSORB_TIMEOUT\" \"\$FM_CREW_ABSORB_KILL_AFTER\"")
+  assert_not_contains "$out" "timeout=0 " "FM_CREW_ABSORB_TIMEOUT=0 was not sanitized away from a literal 0 (disables the outer hard-timeout bound)"
+  assert_not_contains "$out" "kill_after=0" "FM_CREW_ABSORB_KILL_AFTER=0 was not sanitized away from a literal 0"
+  assert_contains "$out" "timeout=45 kill_after=5" "FM_CREW_ABSORB_TIMEOUT/KILL_AFTER=0 fall back to their sanitized defaults (45/5)"
+  pass "FM_CREW_ABSORB_TIMEOUT=0 and FM_CREW_ABSORB_KILL_AFTER=0 fall back to sanitized defaults, never a literal 0"
+}
+
 # signal_crew_provably_working: a no-verb "signal:" wake is benign ONLY when EVERY
 # task it references is provably working; if any crew has stopped, or no task can be
 # resolved, it surfaces. Files map to ids by stripping .status / .turn-ended.
@@ -1548,6 +1566,7 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_absorb_zero_env_values_sanitized_to_default
 test_signal_crew_provably_working_classifier
 test_provably_working_signal_absorbed
 test_turn_ended_provably_working_absorbed
