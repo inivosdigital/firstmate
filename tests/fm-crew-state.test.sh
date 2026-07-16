@@ -1079,6 +1079,39 @@ SH
   pass "an uncooperative no-mistakes call is force-killed via timeout -k rather than left to hang"
 }
 
+# Regression: a prior version of the NM_TIMEOUT sanitizer only excluded '' and
+# non-digit strings, letting FM_CREW_STATE_NM_TIMEOUT=0 reach `timeout` as a
+# literal 0 - which GNU coreutils documents as disabling the timeout entirely
+# ("a duration of 0 disables the associated timeout"), defeating this whole
+# hard-timeout guarantee. Pins that 0 for both NM_TIMEOUT and NM_KILL_AFTER
+# falls back to their sanitized defaults instead. Intercepts `timeout` itself to
+# record the exact secs/kill-after it was invoked with, so the assertion is
+# instant regardless of what the sanitized default resolves to (no need to wait
+# out a real bound).
+test_zero_nm_timeout_values_sanitized_to_default() {
+  reset_fakes
+  local d calls_file out
+  d=$(new_case zero-nm-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-zero-timeout
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/timeout.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf 'kill_after=%s secs=%s\n' "\$2" "\$3" >> "$calls_file"
+shift 3
+exec "\$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+  fm_write_meta "$d/state/feat-zero-timeout.meta" "window=fm:fm-feat-zero-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zero-timeout)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=0 FM_CREW_STATE_NM_KILL_AFTER=0 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-zero-timeout)
+  assert_contains "$out" "state: working" "the sanitized-timeout call still resolves the run-step normally"
+  assert_not_contains "$(cat "$calls_file")" "secs=0" "FM_CREW_STATE_NM_TIMEOUT=0 reached timeout as a literal 0 (disables the bound entirely)"
+  assert_not_contains "$(cat "$calls_file")" "kill_after=0" "FM_CREW_STATE_NM_KILL_AFTER=0 reached timeout -k as a literal 0"
+  pass "FM_CREW_STATE_NM_TIMEOUT=0 and FM_CREW_STATE_NM_KILL_AFTER=0 fall back to sanitized defaults, never a literal 0"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1212,6 +1245,7 @@ test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
 test_uncooperative_no_mistakes_is_force_killed
+test_zero_nm_timeout_values_sanitized_to_default
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
