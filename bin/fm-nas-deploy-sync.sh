@@ -86,6 +86,19 @@ git_nas() {
   bounded git -C "$NAS_PATH" "$@"
 }
 
+# bounded_is_provably_stale <lock> <dir> <min_age_secs>: fm_lock_is_provably_stale,
+# bounded like every other filesystem/git touch of $NAS_PATH - its [ -e ], lsof,
+# and stat probes can hang on a degraded NAS exactly like git_nas's calls do.
+# timeout/gtimeout only bound a real subprocess, not an in-process shell
+# function, so this execs the check in a fresh bash -c instead.
+export FM_LOCK_LOG_PREFIX
+export -f fm_lock_log fm_lock_path_mtime fm_lock_lsof_holder fm_lock_has_live_holder fm_lock_age fm_lock_is_provably_stale
+bounded_is_provably_stale() {
+  # shellcheck disable=SC2016 # single-quoted so the timeout'd child bash
+  # expands $1/$2/$3 from ITS OWN args, not this shell's.
+  bounded bash -c 'fm_lock_is_provably_stale "$1" "$2" "$3"' bash "$1" "$2" "$3"
+}
+
 usage() {
   echo "usage: fm-nas-deploy-sync.sh <project-name>" >&2
 }
@@ -149,9 +162,9 @@ fetch_with_packed_refs_lock_guard() {
 
   # Retries exhausted and still the lock signature. Clear ONLY if provably stale.
   lock=$(packed_refs_lock_path) || lock=""
-  if [ -n "$lock" ] && [ -e "$lock" ]; then
-    if fm_lock_is_provably_stale "$lock" "$NAS_PATH" "$NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
-      if ! rm -f "$lock"; then
+  if [ -n "$lock" ] && bounded test -e "$lock"; then
+    if bounded_is_provably_stale "$lock" "$NAS_PATH" "$NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS"; then
+      if ! bounded rm -f "$lock"; then
         echo "$NAME: failed to remove provably-stale packed-refs lock $lock; leaving it in place" >&2
         return "$rc"
       fi

@@ -202,6 +202,39 @@ SH
   chmod +x "$fakebin/git"
 }
 
+# write_git_persistent_packed_refs_lock_stub <fakebin>: EVERY `fetch` call fails
+# with the packed-refs.lock "File exists" signature (never clears), forcing the
+# guard through every retry into the provably-stale probe/removal path; every
+# other call delegates to the real git.
+write_git_persistent_packed_refs_lock_stub() {
+  local fakebin=$1 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+is_fetch=0
+for a in "\$@"; do [ "\$a" = fetch ] && is_fetch=1; done
+if [ "\$is_fetch" = 1 ]; then
+  echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '.git/packed-refs.lock': File exists." >&2
+  exit 1
+fi
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# write_lsof_hung_stub <fakebin>: any `lsof` call hangs indefinitely (well past
+# FM_NAS_SYNC_TIMEOUT), simulating the stuck-holder-check a degraded NAS mount
+# can produce during the provably-stale probe.
+write_lsof_hung_stub() {
+  local fakebin=$1
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 20
+SH
+  chmod +x "$fakebin/lsof"
+}
+
 # --- tests: standalone script -------------------------------------------------
 
 test_clean_behind_fast_forwards_and_restarts() {
@@ -348,6 +381,39 @@ test_transient_packed_refs_lock_is_retried() {
   pass "a transient packed-refs.lock signature on the NAS fetch is retried instead of giving up immediately"
 }
 
+test_stale_lock_probe_lsof_hang_is_bounded() {
+  local home nas lockpath out rc start elapsed
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP (no timeout/gtimeout binary): stale-lock-probe hang timeout bound check"
+    return
+  fi
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" stalelock-test)
+  advance_origin "$home" stalelock-test C1
+  write_map "$home" stalelock-test "$nas" stalelock-test
+  write_pm2_stub "$home/fakebin" "$home/restart.log"
+  write_git_persistent_packed_refs_lock_stub "$home/fakebin"
+  write_lsof_hung_stub "$home/fakebin"
+
+  lockpath="$nas/.git/packed-refs.lock"
+  : > "$lockpath"
+  touch -t 197001010000 "$lockpath"
+
+  start=$SECONDS
+  set +e
+  out=$(FM_NAS_SYNC_TIMEOUT=1 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 FM_NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync "$home" stalelock-test 2>/dev/null)
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - start ))
+
+  expect_code 0 "$rc" "stale-lock-probe: sync should still exit 0 when the lsof holder check hangs"
+  [ "$elapsed" -lt 10 ] || fail "stale-lock-probe: sync took ${elapsed}s - the provably-stale probe's lsof check was not bounded (stub sleeps 20s)"
+  assert_contains "$out" "stalelock-test: skipped: fetch failed" "stale-lock-probe: did not report the still-blocked fetch as a failure"
+  pass "a hung lsof holder check during the packed-refs.lock stale probe is killed by FM_NAS_SYNC_TIMEOUT instead of blocking the caller"
+}
+
 test_missing_map_file_is_silent_noop() {
   local home out rc
   home=$(new_home)
@@ -469,5 +535,6 @@ test_clustered_partial_restart_is_not_masked_online
 test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
+test_stale_lock_probe_lsof_hang_is_bounded
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project
