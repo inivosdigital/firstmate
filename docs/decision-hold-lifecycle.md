@@ -21,6 +21,7 @@ For an open keyed status decision, it appends a `captain-held [key=<key>]: ...` 
 `bin/fm-classify-lib.sh` recognizes that transfer as closing the live status copy without claiming that the captain has answered it.
 
 Scout teardown calls the script's read-only `verify` subcommand after checking for the report and before removing any source state.
+`verify` requires a compatible tasks-axi only when the origin's recorded `decision_keys` is non-empty; an origin completed with `--none` verifies without one, matching every other tasks-axi touchpoint's fallback to manual backlog handling when tasks-axi is incompatible.
 The `--force` path remains the explicit captain-approved discard escape hatch.
 
 The `resolve` subcommand requires a decision file and at least one existing dependent task whose structured `blocked-by` edge points to the hold.
