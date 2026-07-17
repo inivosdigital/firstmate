@@ -823,6 +823,9 @@ ultracode string value is flagged^{"rules":[{"when":"safety-critical work","use"
 ultracode number value is flagged^{"rules":[{"when":"safety-critical work","use":[{"harness":"claude","ultracode":1}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a boolean: 1
 ultracode_role non-string value is flagged^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":true,"ultracode_role":42}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string: 42
 ultracode_role empty string is flagged^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":true,"ultracode_role":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string: ""
+default ultracode boolean true is accepted^{"default":{"harness":"claude","ultracode":true,"ultracode_role":"independent-review"}}^empty^
+default ultracode string value is flagged^{"default":{"harness":"claude","ultracode":"yes"}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a boolean: "yes"
+default ultracode_role non-string value is flagged^{"default":{"harness":"claude","ultracode":true,"ultracode_role":42}}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string: 42
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

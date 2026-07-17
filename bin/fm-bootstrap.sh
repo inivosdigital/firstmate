@@ -795,12 +795,14 @@ crew_dispatch_validate() {
       | map("\(.h):\(.e)")
       | unique;
     def bad_ultracode:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode")) | .ultracode]
+      (([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode")) | .ultracode]
+        + (if (.default? | type) == "object" and (.default | has("ultracode")) then [.default.ultracode] else [] end))
         | map(select(type != "boolean"))
         | map(tojson)
         | unique);
     def bad_ultracode_role:
-      ([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode_role")) | .ultracode_role]
+      (([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode_role")) | .ultracode_role]
+        + (if (.default? | type) == "object" and (.default | has("ultracode_role")) then [.default.ultracode_role] else [] end))
         | map(select((type != "string") or (length == 0)))
         | map(tojson)
         | unique);
