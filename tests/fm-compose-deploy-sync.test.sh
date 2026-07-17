@@ -30,7 +30,8 @@
 #     says so plainly (lower confidence)
 #   - a shell-command health check, health-check retries, and a custom compose file
 #   - a hung fetch is bounded by FM_COMPOSE_SYNC_TIMEOUT; a transient packed-refs
-#     lock is retried
+#     lock is retried; the exhausted-retry stale-lock probe (lsof/stat on the NAS
+#     path) is itself bounded so a wedged mount cannot hang the sync there either
 #   - the script is NOT auto-wired into fm-teardown.sh (wiring is a separate decision)
 set -u
 
@@ -247,6 +248,37 @@ fi
 exec "\$real" "\$@"
 SH
   chmod +x "$fakebin/git"
+}
+
+# write_git_persistent_packed_refs_lock_stub <fakebin>: EVERY `fetch` fails with the
+# packed-refs.lock "File exists" signature, so retries never clear it and the
+# stale-lock probe is always reached; every other call delegates to the real git.
+write_git_persistent_packed_refs_lock_stub() {
+  local fakebin=$1 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+is_fetch=0
+for a in "\$@"; do [ "\$a" = fetch ] && is_fetch=1; done
+if [ "\$is_fetch" = 1 ]; then
+  echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '.git/packed-refs.lock': File exists." >&2
+  exit 1
+fi
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
+# write_lsof_hung_stub <fakebin>: `lsof` hangs well past FM_COMPOSE_SYNC_TIMEOUT, so
+# the stale-lock live-holder probe wedges unless it is bounded in a child process.
+write_lsof_hung_stub() {
+  local fakebin=$1
+  cat > "$fakebin/lsof" <<'SH'
+#!/usr/bin/env bash
+sleep 20
+SH
+  chmod +x "$fakebin/lsof"
 }
 
 # --- tests -------------------------------------------------------------------
@@ -642,6 +674,42 @@ test_transient_packed_refs_lock_is_retried() {
   pass "a transient packed-refs.lock signature on the compose-checkout fetch is retried instead of giving up immediately"
 }
 
+# Regression: once retries are exhausted the guard probes whether the lingering
+# packed-refs.lock is provably stale, which touches lsof/stat against the same NAS
+# path. Those touches must be bounded like the fetch itself, or a wedged mount
+# hangs the whole sync. lsof is stubbed to sleep well past the timeout; the sync
+# must still return promptly, not block on the probe.
+test_stale_lock_probe_lsof_hang_is_bounded() {
+  local home nas lockpath out rc start elapsed
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP (no timeout/gtimeout binary): stale-lock-probe hang timeout bound check"
+    return
+  fi
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" stalelock)
+  advance_origin "$home" stalelock C1
+  write_map "$home" stalelock "$nas" - - - - -
+  write_git_persistent_packed_refs_lock_stub "$home/fakebin"
+  write_lsof_hung_stub "$home/fakebin"
+  lockpath="$nas/.git/packed-refs.lock"
+  : > "$lockpath"
+  touch -t 197001010000 "$lockpath"
+
+  start=$SECONDS
+  set +e
+  out=$(FM_COMPOSE_SYNC_TIMEOUT=1 FM_COMPOSE_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+    FM_COMPOSE_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 FM_COMPOSE_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync "$home" stalelock 2>/dev/null)
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - start ))
+
+  expect_code 0 "$rc" "stale-lock probe: sync should still exit 0 when the live-holder probe hangs"
+  [ "$elapsed" -lt 10 ] || fail "stale-lock probe: sync took ${elapsed}s - the bounded lsof/stat probe did not stop the hang (lsof stub sleeps 20s)"
+  assert_contains "$out" "stalelock: skipped: fetch failed" "stale-lock probe: did not report the still-blocked fetch as a failure"
+  pass "the stale packed-refs-lock probe's lsof/stat touches are bounded instead of hanging on a wedged NAS mount"
+}
+
 test_not_wired_into_teardown() {
   assert_no_grep "fm-compose-deploy-sync" "$ROOT/bin/fm-teardown.sh" \
     "wiring: fm-teardown.sh must NOT auto-invoke fm-compose-deploy-sync.sh yet (that is a separate, explicit decision)"
@@ -668,4 +736,5 @@ test_health_check_retries_then_passes
 test_custom_compose_file_passed
 test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
+test_stale_lock_probe_lsof_hang_is_bounded
 test_not_wired_into_teardown
