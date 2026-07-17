@@ -4,6 +4,10 @@
 # host runs from its own separate checkout under /mnt/nas/experiments/<name>/,
 # managed by pm2 - that checkout does not update itself (see the 2026-07-04 entry
 # in data/learnings.md). This script closes that gap after a landed ship task.
+# It is one of two deployment topologies; a project managed by Docker Compose
+# (optionally systemd-wrapped) instead of pm2 uses the sibling
+# bin/fm-compose-deploy-sync.sh instead - a project uses exactly one of the two,
+# never both.
 #
 # Looks the project up in data/nas-deployments.md, a pipe-table with one row per
 # deployed project: "| <project> | <nas_repo_path> | <pm2_process(es)> |" (comma-
