@@ -115,6 +115,15 @@ show_field() {  # <show-output> <field>
   printf '%s\n' "$output" | sed -n "s/^  $field: //p" | head -1
 }
 
+show_blocked_by() {  # <show-output>
+  local value
+  value=$(show_field "$1" blocked_by | tr -d '[:space:]')
+  case "$value" in
+    \"*\") value=${value#\"}; value=${value%\"} ;;
+  esac
+  printf '%s\n' "$value"
+}
+
 origin_exists_here() {  # <origin-id>
   [ -f "$STATE/$1.meta" ] && return 0
   [ -f "$DATA/$1/report.md" ] && return 0
@@ -415,7 +424,7 @@ command_resolve() {
     state=$(show_field "$show" state)
     [ "$state" != "done" ] || [ "$resolution_recorded" = 1 ] \
       || fail "routed task $dep is already done"
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
+    blocked=$(show_blocked_by "$show")
     case ",$blocked," in
       *",$id,"*) : ;;
       *)
@@ -435,7 +444,7 @@ command_resolve() {
     || fail "could not record the captain decision on $id"
   for dep in $routed; do
     show=$(task_show "$dep") || fail "routed task $dep disappeared before routing"
-    blocked=$(show_field "$show" blocked_by | tr -d '[:space:]')
+    blocked=$(show_blocked_by "$show")
     case ",$blocked," in
       *",$id,"*)
         tasks_axi unblock "$dep" --by "$id" >/dev/null \

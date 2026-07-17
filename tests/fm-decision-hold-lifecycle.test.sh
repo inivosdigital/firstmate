@@ -410,6 +410,60 @@ test_terminal_single_owner_status_decision_does_not_block_empty_inventory() {
   pass "terminal single-owner stale status decisions do not block empty inventory"
 }
 
+test_resolve_succeeds_with_multiple_blockers() {
+  local home id hold show blocked
+  home=$(make_home multi-blocker)
+  id=sample-multi-review
+  mkdir -p "$home/data/$id"
+  tasks_in "$home" add "$id" "Investigate sample multi-blocker" --kind scout --repo sample --start >/dev/null \
+    || fail "could not create investigation backlog fixture"
+  write_origin_meta "$home" "$id"
+
+  hold=$(run_decisions "$home" hold "$id" route \
+    --title "Choose the sample multi-blocker route" --reason "captain route choice pending" --repo sample) \
+    || fail "could not register route hold"
+
+  tasks_in "$home" add sample-multi-implementation "Apply the selected multi-blocker route" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create dependent work fixture"
+  tasks_in "$home" add sample-multi-other-blocker "Unrelated blocking work" \
+    --kind ship --repo sample >/dev/null \
+    || fail "could not create second blocker fixture"
+  tasks_in "$home" block sample-multi-implementation --by "$hold" >/dev/null \
+    || fail "could not route dependent work behind the decision hold"
+  tasks_in "$home" block sample-multi-implementation --by sample-multi-other-blocker >/dev/null \
+    || fail "could not add a second blocker to the dependent work"
+
+  show=$(tasks_in "$home" show sample-multi-implementation --full)
+  blocked=$(printf '%s\n' "$show" | sed -n 's/^  blocked_by: //p')
+  case "$blocked" in
+    *,*) : ;;
+    *) fail "fixture did not produce a comma-joined multi-blocker list: $blocked" ;;
+  esac
+
+  printf 'Use route north for the sample system.\n' > "$home/multi-route-decision.txt"
+  run_decisions "$home" resolve "$id" route --decision-file "$home/multi-route-decision.txt" \
+    --routed-to sample-multi-implementation >/dev/null \
+    || fail "resolve spuriously failed to see the durable block among 2+ blockers"
+
+  show=$(tasks_in "$home" show "$hold" --full)
+  assert_contains "$show" "state: done" "resolved hold with a co-blocked dependent did not close"
+
+  show=$(tasks_in "$home" show sample-multi-implementation --full)
+  assert_contains "$show" "blocked: yes" \
+    "resolve cleared the unrelated second blocker instead of only the resolved hold's edge"
+  blocked=$(printf '%s\n' "$show" | sed -n 's/^  blocked_by: //p')
+  case "$blocked" in
+    *sample-multi-other-blocker*) : ;;
+    *) fail "resolve removed the unrelated blocker's edge: $blocked" ;;
+  esac
+  case "$blocked" in
+    *"$hold"*) fail "resolve left the resolved hold's edge in place: $blocked" ;;
+    *) : ;;
+  esac
+  pass "resolve durably routes a decision when the dependent task has 2+ blockers"
+}
+
 test_secondmate_hold_stays_in_authoritative_home() {
   local parent mate origin hold json
   parent=$(make_home main-routing)
@@ -462,4 +516,5 @@ test_origin_slug_validation_precedes_path_construction
 test_visual_review_uses_shared_completion_owner
 test_none_inventory_and_resolved_prose_do_not_create_holds
 test_terminal_single_owner_status_decision_does_not_block_empty_inventory
+test_resolve_succeeds_with_multiple_blockers
 test_secondmate_hold_stays_in_authoritative_home
