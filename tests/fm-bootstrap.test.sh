@@ -74,6 +74,42 @@ SH
   printf '%s\n' "$fakebin"
 }
 
+# Fake systemctl for the critical-services check. It shadows any real systemctl
+# on PATH so the test is deterministic on a systemd host. FM_FAKE_FAILED_UNITS is
+# a space-separated set of units reported as failed; FM_FAKE_SERVICE_TS is the
+# StateChangeTimestamp value returned for `show` (empty = unavailable). is-failed
+# prints its state to stdout (as the real one does without --quiet), so a case
+# expecting silence also proves the production call redirects that stream.
+add_fake_systemctl() {
+  local fakebin=$1
+  cat > "$fakebin/systemctl" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  is-failed)
+    shift
+    unit=
+    for a in "$@"; do
+      case "$a" in --*) ;; *) unit=$a ;; esac
+    done
+    for f in ${FM_FAKE_FAILED_UNITS:-}; do
+      if [ "$f" = "$unit" ]; then
+        printf '%s\n' failed
+        exit 0
+      fi
+    done
+    printf '%s\n' inactive
+    exit 1
+    ;;
+  show)
+    printf '%s\n' "${FM_FAKE_SERVICE_TS:-}"
+    exit 0
+    ;;
+esac
+exit 0
+SH
+  chmod +x "$fakebin/systemctl"
+}
+
 add_quota_axi() {
   local fakebin=$1
   cat > "$fakebin/quota-axi" <<'SH'
