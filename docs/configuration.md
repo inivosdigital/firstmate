@@ -509,4 +509,4 @@ Teardown never removes a lock during the retry window, and after that window it 
 Only after those retries exhaust does it remove the lock, and only when it is provably stale - still present, mtime age at least `FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS` (default 30), and no `lsof` holder of the lock file or of the clone worktree itself (a live `git` keeps that as its cwd even in the window after it closes the lock and before it exits).
 A live lock, a missing `lsof`, any failed check, or any other fetch failure keeps today's behavior.
 Every wait, retry, and removal is printed to stderr, and a successful recovery also prints one `recovered:` summary line to stdout so a session-start refresh - which discards fleet-sync stderr and relays only stdout - still surfaces it.
-The shared staleness proof lives in `bin/fm-lock-lib.sh`, which both `fm-teardown.sh` and `fm-fleet-sync.sh` use.
+The shared staleness proof lives in `bin/fm-lock-lib.sh`, which `fm-teardown.sh`, `fm-fleet-sync.sh`, `fm-nas-deploy-sync.sh`, and `fm-compose-deploy-sync.sh` all use.

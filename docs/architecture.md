@@ -254,6 +254,10 @@ A forced teardown (`--force`) skips this sync, since it carries no landed-work g
 It mirrors the same clean/fast-forward-only safety as the clone refresh above, including the bounded orphaned-packed-refs-lock recovery, and reports a diverged or dirty checkout as `STUCK:` rather than touching it; a project absent from the mapping is a silent no-op.
 Every filesystem/git touch of the NAS checkout is time-bounded so an unreachable mount cannot hang the teardown call that triggered it.
 
+A project deployed via systemd + Docker Compose instead of pm2 uses the separate `data/compose-deployments.md` mapping and `bin/fm-compose-deploy-sync.sh` - the same fast-forward-only, `STUCK:`-reporting, time-bounded safety, plus a mount gate before touching the checkout at all and a post-deploy health check.
+Unlike the pm2 sync above, it is deliberately not wired into teardown's automatic call chain; firstmate invokes it explicitly.
+A project uses exactly one of the two topologies, never both.
+
 ## Self-updates stay safe
 
 `/updatefirstmate` fast-forwards the running firstmate repo and registered secondmate homes from `origin`, then re-reads updated instructions and nudges updated secondmates without touching project clones.
