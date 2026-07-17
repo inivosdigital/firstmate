@@ -18,9 +18,11 @@
 #   0  no risk signal found
 #   1  a RISK hit fired (one "RISK: <reason>" line per hit is printed)
 #   2  could not check: a malformed invocation, neither a brief nor a usable
-#      worktree/project exists yet (nothing to check), or the worktree/project
-#      exist but their diff base could not be resolved, so the binding diff
-#      checkpoint could not run (warned to stderr, never a silent clean pass)
+#      worktree/project exists yet (nothing to check), the worktree/project
+#      exist but their diff base could not be resolved, or the diff base
+#      resolved but the diff command itself failed (a bad ref, a corrupt
+#      object, or any other git error), so the binding diff checkpoint could
+#      not run (warned to stderr, never a silent clean pass)
 # Distinct codes matter so a caller branching on $? cannot mistake a malformed
 # invocation for a real risk hit. A hit means: floor this task's model/effort to
 # the safety-critical profile (opus/xhigh, ultracode independent-review)
@@ -204,20 +206,31 @@ if [ -f "$META" ]; then
       fi
       if git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null 2>&1; then
         diff_base_resolved=1
-        diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" -- 2>/dev/null || true)
-        risky_paths=
-        if [ -n "$diff_paths" ]; then
-          while IFS= read -r path; do
-            [ -n "$path" ] || continue
-            lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
-            if path_is_risky "$lower_path"; then
-              risky_paths="${risky_paths}${risky_paths:+, }$path"
-            fi
-          done <<< "$diff_paths"
-        fi
-        if [ -n "$risky_paths" ]; then
-          echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
-          FOUND=1
+        # Unlike the fetch/rev-parse above, a failure here is NOT the legitimate
+        # "no base yet" case - the base already resolved - so it must not fall
+        # through the same silent "|| true" the base-resolution steps use. A
+        # genuine git error (a bad ref, a corrupt object, any other git
+        # failure) at this point must still fail the run loudly rather than
+        # read as an empty, risk-free diff (the fail-open direction for a
+        # safety floor).
+        if diff_paths=$(git -C "$WT" diff --name-only "$BASE...HEAD" --); then
+          risky_paths=
+          if [ -n "$diff_paths" ]; then
+            while IFS= read -r path; do
+              [ -n "$path" ] || continue
+              lower_path=$(printf '%s' "$path" | tr '[:upper:]' '[:lower:]')
+              if path_is_risky "$lower_path"; then
+                risky_paths="${risky_paths}${risky_paths:+, }$path"
+              fi
+            done <<< "$diff_paths"
+          fi
+          if [ -n "$risky_paths" ]; then
+            echo "RISK: diff for $ID touches risk-adjacent path(s): $risky_paths"
+            FOUND=1
+          fi
+        else
+          echo "error: git diff failed for $ID (base $BASE) even though the diff base resolved; the binding diff checkpoint errored rather than completing - reporting not-checkable (exit 2), not a clean pass" >&2
+          DIFF_UNRESOLVED=1
         fi
       fi
     fi

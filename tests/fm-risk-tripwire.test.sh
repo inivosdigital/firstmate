@@ -49,6 +49,41 @@ run_tripwire() {
     "$TRIPWIRE" task-x1
 }
 
+# run_tripwire_with_fakebin <case_dir> <fakebin>: like run_tripwire, but
+# prepends <fakebin> onto PATH so a shimmed git shadows the real one for every
+# git call the script (and its sourced fm-tangle-lib.sh helpers) make.
+run_tripwire_with_fakebin() {
+  local case_dir=$1 fakebin=$2
+  PATH="$fakebin:$PATH" \
+  FM_ROOT_OVERRIDE="$ROOT" \
+  FM_STATE_OVERRIDE="$case_dir/state" \
+  FM_DATA_OVERRIDE="$case_dir/data" \
+    "$TRIPWIRE" task-x1
+}
+
+# write_git_diff_name_only_fails_stub <fakebin>: fail any `git ... diff
+# --name-only ...` call (a bad ref, a corrupt object, or any other git error
+# hitting the binding diff checkpoint after its base already resolved), and
+# delegate every other git call - including the rev-parse that resolves the
+# base itself - to the real binary. Mirrors tests/fm-nas-deploy-sync.test.sh's
+# write_git_hung_fetch_stub pattern, adapted to target the diff call site.
+write_git_diff_name_only_fails_stub() {
+  local fakebin=$1 realgit
+  realgit=$(command -v git)
+  cat > "$fakebin/git" <<SH
+#!/usr/bin/env bash
+real="$realgit"
+for a in "\$@"; do
+  if [ "\$a" = --name-only ]; then
+    echo "fatal: simulated corrupt object (test stub)" >&2
+    exit 128
+  fi
+done
+exec "\$real" "\$@"
+SH
+  chmod +x "$fakebin/git"
+}
+
 # Scaffold a real ship brief via bin/fm-brief.sh, then substitute the {TASK}
 # placeholder with the given task text - exercising the actual scaffold
 # boilerplate rather than a hand-written stand-in. Any extra args (e.g.
@@ -648,6 +683,64 @@ test_unresolvable_diff_base_still_reports_brief_hit() {
   pass "fm-risk-tripwire still reports a brief hit (1) when the diff base is unresolvable"
 }
 
+test_diff_command_failure_after_base_resolved_is_not_a_clean_pass() {
+  # A diff base that resolves cleanly but whose actual `git diff --name-only`
+  # call then fails (a bad ref, a corrupt object, any other git error) must NOT
+  # fall through the same "|| true" the base-resolution steps legitimately use,
+  # and must NOT read as an empty, risk-free diff. This is distinct from the
+  # "no base resolved yet" case (test_unresolvable_diff_base_is_not_a_clean_pass):
+  # here the base resolved fine, only the diff command itself errored, so the
+  # message must say so rather than claiming the base was unresolvable.
+  local case_dir out status fakebin
+  case_dir=$(make_case diff-cmd-fails)
+  printf 'Fix a typo in the help text.\n' > "$case_dir/data/task-x1/brief.md"
+  printf 'ordinary change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "ordinary change"
+  write_task_meta "$case_dir"
+
+  fakebin=$(fm_fakebin "$case_dir")
+  write_git_diff_name_only_fails_stub "$fakebin"
+
+  set +e
+  out=$(run_tripwire_with_fakebin "$case_dir" "$fakebin" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 2 "$status" "diff-cmd-fails: a diff error after the base resolved must read as could-not-check (2), not a clean pass (0)"
+  assert_contains "$out" "git diff failed" "diff-cmd-fails: should warn that the diff command itself failed, not just that the base was unresolvable"
+  case "$out" in
+    *"could not resolve a diff base"*)
+      fail "diff-cmd-fails: must be distinguished from the unresolved-base case, got: $out" ;;
+  esac
+  pass "fm-risk-tripwire reports could-not-check when the diff command itself fails after the base resolved, not a clean pass"
+}
+
+test_diff_command_failure_still_reports_brief_hit() {
+  # A brief risk hit must still win (exit 1) even when the diff command itself
+  # errors after its base resolved - the risk floor beats the could-not-check
+  # downgrade, exactly like the unresolvable-base sibling case.
+  local case_dir out status fakebin
+  case_dir=$(make_case diff-cmd-fails-brief-hit)
+  printf 'Add a data migration for the new billing schema.\n' > "$case_dir/data/task-x1/brief.md"
+  printf 'ordinary change\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "ordinary change"
+  write_task_meta "$case_dir"
+
+  fakebin=$(fm_fakebin "$case_dir")
+  write_git_diff_name_only_fails_stub "$fakebin"
+
+  set +e
+  out=$(run_tripwire_with_fakebin "$case_dir" "$fakebin" 2>/dev/null)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "diff-cmd-fails-brief-hit: a brief risk hit must still win (1) even when the diff command itself fails"
+  assert_contains "$out" "RISK: brief for task-x1" "diff-cmd-fails-brief-hit: should still name the brief hit"
+  pass "fm-risk-tripwire still reports a brief hit (1) when the diff command itself fails after the base resolved"
+}
+
 test_multiword_phrase_keyword_trips() {
   local case_dir out status
   case_dir="$TMP_ROOT/phrase-keyword"
@@ -668,6 +761,8 @@ test_bare_auth_matches_but_authoritative_does_not
 test_adjacent_keywords_both_reported
 test_unresolvable_diff_base_is_not_a_clean_pass
 test_unresolvable_diff_base_still_reports_brief_hit
+test_diff_command_failure_after_base_resolved_is_not_a_clean_pass
+test_diff_command_failure_still_reports_brief_hit
 test_multiword_phrase_keyword_trips
 test_brief_keyword_trips_wire
 test_diff_path_trips_wire
