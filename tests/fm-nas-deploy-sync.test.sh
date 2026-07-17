@@ -414,6 +414,53 @@ test_stale_lock_probe_lsof_hang_is_bounded() {
   pass "a hung lsof holder check during the packed-refs.lock stale probe is killed by FM_NAS_SYNC_TIMEOUT instead of blocking the caller"
 }
 
+# test_packed_refs_lock_path_resolution_hang_is_bounded: packed_refs_lock_path()
+# resolves a relative `git rev-parse --git-path` result (the common case for a
+# plain deployment clone) via `cd "$NAS_PATH" && pwd -P`, run in a fresh bash -c
+# under the same `bounded` timeout wrapper bounded_is_provably_stale uses - a
+# degraded/unreachable NAS mount can hang that cd/pwd exactly like it hangs
+# lsof or fetch. Simulates the hang with an exported `cd` function (PATH
+# fakebins cannot intercept the `cd`/`pwd` builtins) scoped to a subshell so it
+# never leaks into other tests, hanging only when called with this test's NAS
+# path and delegating to the real builtin otherwise.
+test_packed_refs_lock_path_resolution_hang_is_bounded() {
+  local home nas out rc start elapsed
+  if ! command -v timeout >/dev/null 2>&1 && ! command -v gtimeout >/dev/null 2>&1; then
+    pass "SKIP (no timeout/gtimeout binary): packed-refs-lock path resolution hang timeout bound check"
+    return
+  fi
+  home=$(new_home)
+  nas=$(build_nas_pair "$home" pathhang-test)
+  advance_origin "$home" pathhang-test C1
+  write_map "$home" pathhang-test "$nas" pathhang-test
+  write_pm2_stub "$home/fakebin" "$home/restart.log"
+  write_git_persistent_packed_refs_lock_stub "$home/fakebin"
+
+  start=$SECONDS
+  set +e
+  out=$(
+    nas_path_hang="$nas"
+    export nas_path_hang
+    # shellcheck disable=SC2317,SC2329 # Exported and invoked by the bounded bash -c subprocess.
+    cd() {
+      [ "$1" = "$nas_path_hang" ] && sleep 20
+      builtin cd "$@"
+    }
+    export -f cd
+    FM_NAS_SYNC_TIMEOUT=1 FM_NAS_SYNC_PACKED_REFS_LOCK_RETRIES=1 \
+      FM_NAS_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 FM_NAS_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+      run_sync "$home" pathhang-test 2>/dev/null
+  )
+  rc=$?
+  set -e
+  elapsed=$(( SECONDS - start ))
+
+  expect_code 0 "$rc" "path-resolution: sync should still exit 0 when the packed-refs-lock path resolution hangs"
+  [ "$elapsed" -lt 10 ] || fail "path-resolution: sync took ${elapsed}s - packed_refs_lock_path's cd/pwd -P was not bounded (stub sleeps 20s)"
+  assert_contains "$out" "pathhang-test: skipped: fetch failed" "path-resolution: did not report the still-blocked fetch as a failure"
+  pass "a hung packed-refs-lock path resolution (cd/pwd -P against a degraded NAS mount) is bounded by FM_NAS_SYNC_TIMEOUT"
+}
+
 test_missing_map_file_is_silent_noop() {
   local home out rc
   home=$(new_home)
@@ -536,5 +583,6 @@ test_absent_project_is_silent_noop
 test_hung_fetch_is_bounded_by_timeout
 test_transient_packed_refs_lock_is_retried
 test_stale_lock_probe_lsof_hang_is_bounded
+test_packed_refs_lock_path_resolution_hang_is_bounded
 test_missing_map_file_is_silent_noop
 test_teardown_invokes_nas_deploy_sync_for_landed_project

@@ -129,7 +129,9 @@ packed_refs_lock_path() {
   case "$lock" in
     /*) printf '%s\n' "$lock" ;;
     *)
-      abs=$(cd "$NAS_PATH" && pwd -P) || return 1
+      # shellcheck disable=SC2016 # single-quoted so the timeout'd child bash
+      # expands $1 from ITS OWN arg, not this shell's.
+      abs=$(bounded bash -c 'cd "$1" && pwd -P' bash "$NAS_PATH") || return 1
       printf '%s/%s\n' "$abs" "$lock"
       ;;
   esac
