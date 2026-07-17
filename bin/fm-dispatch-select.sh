@@ -7,6 +7,13 @@
 # profile object, or an ordered array of profile objects.
 # Output is one compact JSON profile object on stdout.
 #
+# A profile's `ultracode` must be a JSON boolean and `ultracode_role` a
+# non-empty string (docs/configuration.md "Crew dispatch profiles"); a
+# present-but-wrong-type value exits 2 with an explanation instead of being
+# silently dropped from the resolved profile, since a rule that looks
+# ultracode-flagged but resolves as inert would skip the mandatory
+# independent-review guard (bin/fm-ultracode-guard.sh) without anyone noticing.
+#
 # quota-balanced is deterministic, and this header is the single owner of its
 # contract:
 #   - It runs quota-axi --json (or the --quota-json fixture).
@@ -109,6 +116,16 @@ profiles_json=$(printf '%s\n' "$SPEC_JSON" | jq -ec '
 
 profile_count=$(printf '%s\n' "$profiles_json" | jq 'length')
 [ "$profile_count" -gt 0 ] || { echo "error: dispatch profile array must not be empty" >&2; exit 2; }
+
+bad_ultracode=$(printf '%s\n' "$profiles_json" | jq -r '
+  [.[] | select(has("ultracode")) | .ultracode | select(type != "boolean") | tojson] | unique | join(", ")
+')
+[ -z "$bad_ultracode" ] || { echo "error: ultracode must be a boolean, got: $bad_ultracode" >&2; exit 2; }
+
+bad_ultracode_role=$(printf '%s\n' "$profiles_json" | jq -r '
+  [.[] | select(has("ultracode_role")) | .ultracode_role | select((type != "string") or (length == 0)) | tojson] | unique | join(", ")
+')
+[ -z "$bad_ultracode_role" ] || { echo "error: ultracode_role must be a non-empty string, got: $bad_ultracode_role" >&2; exit 2; }
 
 first_profile() {
   printf '%s\n' "$profiles_json" | jq -c '

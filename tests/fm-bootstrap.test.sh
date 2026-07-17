@@ -818,6 +818,11 @@ empty array use is flagged^{"rules":[{"when":"big feature","use":[]}]}^exact^CRE
 array profile without harness is flagged^{"rules":[{"when":"big feature","use":[{"model":"gpt-5.5"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - each use profile needs harness
 unknown select is flagged^{"rules":[{"when":"big feature","use":[{"harness":"claude"},{"harness":"codex"}],"select":"mystery"}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - unknown select: mystery
 array profile unsupported effort is flagged^{"rules":[{"when":"big feature","use":[{"harness":"codex","effort":"max"}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - invalid effort: codex:max
+ultracode boolean true is accepted^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":true,"ultracode_role":"independent-review"}}]}^empty^
+ultracode string value is flagged^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":"true"}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a boolean: "true"
+ultracode number value is flagged^{"rules":[{"when":"safety-critical work","use":[{"harness":"claude","ultracode":1}]}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode must be a boolean: 1
+ultracode_role non-string value is flagged^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":true,"ultracode_role":42}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string: 42
+ultracode_role empty string is flagged^{"rules":[{"when":"safety-critical work","use":{"harness":"claude","ultracode":true,"ultracode_role":""}}]}^exact^CREW_DISPATCH: invalid config/crew-dispatch.json - ultracode_role must be a non-empty string: ""
 ROWS
   pass "bootstrap validates crew-dispatch.json and reports malformed or unverified configs"
 }

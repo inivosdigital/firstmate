@@ -235,6 +235,7 @@ Per rule, `when` and `use` are required.
 `use.ultracode` and `use.ultracode_role` are optional.
 A profile with `ultracode: true` means a task matched to this rule must get a genuinely independent second pass on its finished diff before PR-ready, launched as its own separately dispatched task, never a sub-task the implementing crewmate spawns itself; `ultracode_role` is a short label for what that pass should do (`independent-review` is the only role this fleet's own rules use today).
 `bin/fm-ultracode-guard.sh` tracks this mechanically; `AGENTS.md` section 4's dispatch procedure covers when firstmate flags it, and section 7's Validate step covers the PR-ready gate it backs.
+`ultracode` must be a JSON boolean and `ultracode_role`, when present, a non-empty string; both bootstrap validation and `bin/fm-dispatch-select.sh` reject a present-but-wrong-type value outright rather than silently dropping it, because a rule that looks ultracode-flagged but resolves as inert would skip the independent-review guard without anyone noticing.
 `select` is optional and currently supports `quota-balanced`.
 Absent `select` means use the first array element, or the only object in the single-object form; the first array element is the deterministic tie-break and the ultimate fallback.
 `default` is optional.
@@ -244,7 +245,7 @@ If a selected profile carries an effort value the chosen harness does not accept
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json` plus one `BOOTSTRAP_INFO:` fact per rule and default profile.
-Malformed JSON, an unverified harness, a malformed array profile, an unknown `select`, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
+Malformed JSON, an unverified harness, a malformed array profile, an unknown `select`, an effort value unsupported by that harness, a non-boolean `ultracode`, or a non-string `ultracode_role` is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`; missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 If no dispatch rule fits, firstmate uses the dispatch profile `default` when present, then falls back to `config/crew-harness`.
 Because the spawn backstop is gated by file presence, any fallback path after a missing match, validation error, or missing `jq` still passes a resolved harness explicitly until the file is fixed or removed.
 Secondmate homes inherit this file from the primary, so a secondmate's own crewmates apply the same dispatch profile behavior.
