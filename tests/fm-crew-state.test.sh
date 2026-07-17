@@ -1040,6 +1040,107 @@ SH
   pass "no timeout command uses perl bound"
 }
 
+# Regression for the 2026-07-09 89-minute watcher stall: a `no-mistakes axi
+# status` call that ignores its initial signal (blocked deep in a slow/queued
+# daemon RPC under concurrent validation load) must still be gone by
+# NM_TIMEOUT+NM_KILL_AFTER, never merely asked to stop. Unlike
+# test_no_timeout_uses_perl_bound above (which forces the perl fallback by
+# hiding timeout/gtimeout from PATH), this deliberately runs with the REAL
+# system PATH so the PRIMARY `timeout` path - what production actually uses on
+# this box - is what gets exercised. A plain `timeout N cmd` with no
+# -k/--kill-after is only advisory: without nm_run's -k fix this test hangs
+# indefinitely instead of completing.
+test_uncooperative_no_mistakes_is_force_killed() {
+  reset_fakes
+  local d out start elapsed calls_file calls
+  d=$(new_case uncooperative)
+  make_repo_on_branch "$d/wt" fm/feat-uncooperative
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/no-mistakes.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/no-mistakes" <<'SH'
+#!/usr/bin/env bash
+trap '' TERM
+printf '%s\n' "$*" >> "${FM_FAKE_NM_CALLS:-/dev/null}"
+while :; do sleep 1; done
+SH
+  chmod +x "$d/fakebin/no-mistakes"
+  fm_write_meta "$d/state/feat-uncooperative.meta" "window=fm:fm-feat-uncooperative" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_BUSY=1
+  start=$SECONDS
+  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 "$CREW_STATE" feat-uncooperative)
+  elapsed=$((SECONDS - start))
+  assert_contains "$out" "state: working" "SIGTERM-ignoring no-mistakes falls back to pane"
+  assert_contains "$out" "source: pane" "SIGTERM-ignoring no-mistakes -> pane source"
+  [ "$elapsed" -lt 6 ] || fail "timeout -k did not force-kill an uncooperative no-mistakes call (elapsed ${elapsed}s)"
+  calls=$(awk 'END { print NR + 0 }' "$calls_file" 2>/dev/null || echo 0)
+  [ "$calls" -ge 1 ] || fail "the uncooperative no-mistakes call never ran"
+  pass "an uncooperative no-mistakes call is force-killed via timeout -k rather than left to hang"
+}
+
+# Regression: a prior version of the NM_TIMEOUT sanitizer only excluded '' and
+# non-digit strings, letting FM_CREW_STATE_NM_TIMEOUT=0 reach `timeout` as a
+# literal 0 - which GNU coreutils documents as disabling the timeout entirely
+# ("a duration of 0 disables the associated timeout"), defeating this whole
+# hard-timeout guarantee. Pins that 0 for both NM_TIMEOUT and NM_KILL_AFTER
+# falls back to their sanitized defaults instead. Intercepts `timeout` itself to
+# record the exact secs/kill-after it was invoked with, so the assertion is
+# instant regardless of what the sanitized default resolves to (no need to wait
+# out a real bound).
+test_zero_nm_timeout_values_sanitized_to_default() {
+  reset_fakes
+  local d calls_file out
+  d=$(new_case zero-nm-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-zero-timeout
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/timeout.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf 'kill_after=%s secs=%s\n' "\$2" "\$3" >> "$calls_file"
+shift 3
+exec "\$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+  fm_write_meta "$d/state/feat-zero-timeout.meta" "window=fm:fm-feat-zero-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zero-timeout)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=0 FM_CREW_STATE_NM_KILL_AFTER=0 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-zero-timeout)
+  assert_contains "$out" "state: working" "the sanitized-timeout call still resolves the run-step normally"
+  assert_not_contains "$(cat "$calls_file")" "secs=0" "FM_CREW_STATE_NM_TIMEOUT=0 reached timeout as a literal 0 (disables the bound entirely)"
+  assert_not_contains "$(cat "$calls_file")" "kill_after=0" "FM_CREW_STATE_NM_KILL_AFTER=0 reached timeout -k as a literal 0"
+  pass "FM_CREW_STATE_NM_TIMEOUT=0 and FM_CREW_STATE_NM_KILL_AFTER=0 fall back to sanitized defaults, never a literal 0"
+}
+
+# Regression: the sanitizer fix above only excluded the literal string "0",
+# not other all-zero digit spellings GNU `timeout` also treats as "no
+# timeout" - verified empirically, `timeout -k 1 00 sleep N` runs the full N
+# seconds, identical to a literal 0. Pins that FM_CREW_STATE_NM_TIMEOUT=00 and
+# FM_CREW_STATE_NM_KILL_AFTER=00 also fall back to their sanitized defaults.
+test_zero_padded_nm_timeout_values_sanitized_to_default() {
+  reset_fakes
+  local d calls_file out
+  d=$(new_case zero-padded-nm-timeout)
+  make_repo_on_branch "$d/wt" fm/feat-zero-padded-timeout
+  make_fakebin "$d" >/dev/null
+  calls_file="$d/timeout.calls"
+  : > "$calls_file"
+  cat > "$d/fakebin/timeout" <<SH
+#!/usr/bin/env bash
+printf 'kill_after=%s secs=%s\n' "\$2" "\$3" >> "$calls_file"
+shift 3
+exec "\$@"
+SH
+  chmod +x "$d/fakebin/timeout"
+  fm_write_meta "$d/state/feat-zero-padded-timeout.meta" "window=fm:fm-feat-zero-padded-timeout" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-zero-padded-timeout)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=00 FM_CREW_STATE_NM_KILL_AFTER=00 PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" "$CREW_STATE" feat-zero-padded-timeout)
+  assert_contains "$out" "state: working" "the sanitized zero-padded-timeout call still resolves the run-step normally"
+  assert_not_contains "$(cat "$calls_file")" "secs=00" "FM_CREW_STATE_NM_TIMEOUT=00 reached timeout as a zero-padded 0 (disables the bound entirely)"
+  assert_not_contains "$(cat "$calls_file")" "kill_after=00" "FM_CREW_STATE_NM_KILL_AFTER=00 reached timeout -k as a zero-padded 0"
+  pass "FM_CREW_STATE_NM_TIMEOUT=00 and FM_CREW_STATE_NM_KILL_AFTER=00 fall back to sanitized defaults, never a zero-padded 0"
+}
+
 # (i) kind=scout skips the run lookup entirely (its deliverable is a report).
 test_scout_skips_run_lookup() {
   reset_fakes
@@ -1172,6 +1273,9 @@ test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_still_reports_active_run_step
 test_no_timeout_uses_perl_bound
+test_uncooperative_no_mistakes_is_force_killed
+test_zero_nm_timeout_values_sanitized_to_default
+test_zero_padded_nm_timeout_values_sanitized_to_default
 test_scout_skips_run_lookup
 test_torn_down_worktree
 test_missing_meta
