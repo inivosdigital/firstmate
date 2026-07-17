@@ -18,6 +18,18 @@
 #
 # An unknown/missing project or unknown mode falls back to "no-mistakes off" and warns
 # to stderr, so a typo never silently drops the gate.
+#
+# firstmate's own repo is a special case: it is never registered in
+# data/projects.md (AGENTS.md section 1), so a task worktree of the firstmate
+# repo itself would otherwise hit the unregistered-project fallback below. A
+# task operating on firstmate's own repo is passed the basename of its
+# worktree (fm-spawn.sh: PROJ_NAME=$(basename "$PROJ_ABS")), which matches
+# basename "$FM_ROOT" the same way it would for any other checkout, so that
+# comparison is reused here to resolve such a task to "local-only off"
+# (AGENTS.md section 1: firstmate-repo ship tasks land local-only). The
+# registry is still checked first, so a project that happens to share
+# firstmate's basename keeps its own configured mode rather than being
+# silently overridden.
 # Usage: fm-project-mode.sh <project-name>
 set -eu
 
@@ -29,6 +41,10 @@ REG="$DATA/projects.md"
 NAME=${1:?usage: fm-project-mode.sh <project-name>}
 
 if [ ! -f "$REG" ]; then
+  if [ "$NAME" = "$(basename "$FM_ROOT")" ]; then
+    echo "local-only off"
+    exit 0
+  fi
   echo "warn: no registry at $REG; defaulting $NAME to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
@@ -51,6 +67,10 @@ parsed=$(awk -v n="$NAME" '
 ' "$REG")
 
 if [ -z "$parsed" ]; then
+  if [ "$NAME" = "$(basename "$FM_ROOT")" ]; then
+    echo "local-only off"
+    exit 0
+  fi
   echo "warn: project \"$NAME\" not in registry; defaulting to no-mistakes off" >&2
   echo "no-mistakes off"
   exit 0
