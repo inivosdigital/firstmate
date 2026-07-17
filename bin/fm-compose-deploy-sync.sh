@@ -155,6 +155,17 @@ git_nas() {
   bounded git -C "$NAS_PATH" "$@"
 }
 
+# run_in_nas <bounded-helper> <cmd...>: run <cmd...> with CWD=$NAS_PATH, with
+# both the cd (a builtin timeout/gtimeout cannot bound directly) and <cmd...>
+# bounded together in one child, so a degraded NAS mount cannot wedge on the
+# cd itself even after it is past the fetch/merge steps.
+run_in_nas() {
+  local b=$1
+  shift
+  # shellcheck disable=SC2016 # single-quoted so the bounded child expands its own args.
+  "$b" bash -c 'cd "$1" || exit 127; shift; exec "$@"' bash "$NAS_PATH" "$@"
+}
+
 # bounded_is_provably_stale <lock> <dir> <min_age_secs>: fm_lock_is_provably_stale,
 # bounded like every other filesystem/git touch of $NAS_PATH - its [ -e ], lsof,
 # and stat probes can hang on a degraded NAS exactly like git_nas's calls do.
@@ -424,14 +435,14 @@ fi
 compose_args=()
 [ -n "$COMPOSE_FILE" ] && compose_args=(-f "$COMPOSE_FILE")
 compose() {
-  ( cd "$NAS_PATH" && bounded_deploy docker compose ${compose_args[@]+"${compose_args[@]}"} "$@" )
+  run_in_nas bounded_deploy docker compose ${compose_args[@]+"${compose_args[@]}"} "$@"
 }
 
 # Migrate first, in the checkout, before anything is brought up against a
 # half-migrated schema.
 if [ -n "$MIGRATE_CMD" ]; then
   migrate_out=""
-  if ! migrate_out=$( ( cd "$NAS_PATH" && bounded_deploy bash -c "$MIGRATE_CMD" ) 2>&1 ); then
+  if ! migrate_out=$(run_in_nas bounded_deploy bash -c "$MIGRATE_CMD" 2>&1); then
     reason="migration failed"
     [ -z "$migrate_out" ] || reason="$reason: $(first_line "$migrate_out")"
     echo "$NAME: synced $before..$after but $reason - needs attention"
@@ -470,7 +481,7 @@ fi
 # "running" state. Tolerates compose's JSON-array and JSON-lines ps output.
 containers_running() {
   local json out
-  json=$( ( cd "$NAS_PATH" && bounded_health docker compose ${compose_args[@]+"${compose_args[@]}"} ps --format json ) 2>/dev/null ) || return 1
+  json=$(run_in_nas bounded_health docker compose ${compose_args[@]+"${compose_args[@]}"} ps --format json 2>/dev/null) || return 1
   out=$(printf '%s' "$json" | jq -rs '
     flatten
     | if length == 0 then "none"
@@ -486,7 +497,7 @@ health_ok() {
   if [ -n "$HEALTH_CHECK" ]; then
     case "$HEALTH_CHECK" in
       http://*|https://*) bounded_health curl -fsS "$HEALTH_CHECK" >/dev/null 2>&1 ;;
-      *) ( cd "$NAS_PATH" && bounded_health bash -c "$HEALTH_CHECK" ) >/dev/null 2>&1 ;;
+      *) run_in_nas bounded_health bash -c "$HEALTH_CHECK" >/dev/null 2>&1 ;;
     esac
   else
     containers_running
