@@ -793,6 +793,16 @@ crew_dispatch_validate() {
       | map(select(. as $p | effort_ok($p.h; $p.e) | not))
       | map("\(.h):\(.e)")
       | unique;
+    def bad_ultracode:
+      ([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode")) | .ultracode]
+        | map(select(type != "boolean"))
+        | map(tojson)
+        | unique);
+    def bad_ultracode_role:
+      ([(.rules // [])[]? | use_profiles(.use?)[]? | select(has("ultracode_role")) | .ultracode_role]
+        | map(select((type != "string") or (length == 0)))
+        | map(tojson)
+        | unique);
     if type != "object" then "top-level value must be an object"
     elif has("rules") and (.rules | type) != "array" then "rules must be an array"
     elif [(.rules // [])[]? | select(type != "object")] | length > 0 then "each rule must be an object"
@@ -813,6 +823,8 @@ crew_dispatch_validate() {
         | unique) as $bad_harnesses
       | if ($bad_harnesses | length) > 0 then "unverified harness: " + ($bad_harnesses | join(", "))
         elif (bad_efforts | length) > 0 then "invalid effort: " + (bad_efforts | join(", "))
+        elif (bad_ultracode | length) > 0 then "ultracode must be a boolean: " + (bad_ultracode | join(", "))
+        elif (bad_ultracode_role | length) > 0 then "ultracode_role must be a non-empty string: " + (bad_ultracode_role | join(", "))
         else empty
         end
     end

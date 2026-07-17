@@ -174,6 +174,59 @@ SH
   pass "single-object use and no-select arrays preserve first-profile selection"
 }
 
+test_ultracode_boolean_is_preserved() {
+  local out
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","model":"opus","effort":"xhigh","ultracode":true,"ultracode_role":"independent-review"}')
+  [ "$out" = '{"harness":"claude","model":"opus","effort":"xhigh","ultracode":true,"ultracode_role":"independent-review"}' ] \
+    || fail "boolean ultracode true and its role should be preserved, got: $out"
+  pass "ultracode boolean true and ultracode_role pass through unchanged"
+}
+
+test_ultracode_non_boolean_string_fails_loud() {
+  local out err status
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","ultracode":"true"}' 2>"$TMP_ROOT/ultracode-string.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/ultracode-string.err")
+  expect_code 2 "$status" "a hand-edited string ultracode should fail loud, not resolve"
+  [ -z "$out" ] || fail "a non-boolean ultracode must never resolve to a profile, got: $out"
+  assert_contains "$err" "ultracode must be a boolean" "a non-boolean ultracode should be reported"
+  pass "a JSON string ultracode value fails loud instead of being silently dropped"
+}
+
+test_ultracode_non_boolean_number_fails_loud() {
+  local out err status
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","ultracode":1}' 2>"$TMP_ROOT/ultracode-number.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/ultracode-number.err")
+  expect_code 2 "$status" "a numeric ultracode should fail loud, not resolve"
+  [ -z "$out" ] || fail "a non-boolean ultracode must never resolve to a profile, got: $out"
+  assert_contains "$err" "ultracode must be a boolean" "a numeric ultracode should be reported"
+  pass "a numeric ultracode value fails loud instead of being silently coerced away"
+}
+
+test_ultracode_rejected_inside_quota_balanced_array() {
+  local out err status array_rule
+  array_rule='{"when":"big feature","use":[{"harness":"claude","ultracode":"true"},{"harness":"codex"}],"select":"quota-balanced"}'
+  out=$("$ROOT/bin/fm-dispatch-select.sh" "$array_rule" 2>"$TMP_ROOT/ultracode-array.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/ultracode-array.err")
+  expect_code 2 "$status" "a non-boolean ultracode anywhere in a quota-balanced array should fail loud"
+  [ -z "$out" ] || fail "a non-boolean ultracode must never resolve to a profile, got: $out"
+  assert_contains "$err" "ultracode must be a boolean" "a non-boolean ultracode inside an array should be reported"
+  pass "a non-boolean ultracode inside a quota-balanced profile array fails loud before any selection runs"
+}
+
+test_ultracode_role_non_string_fails_loud() {
+  local out err status
+  out=$("$ROOT/bin/fm-dispatch-select.sh" '{"harness":"claude","ultracode":true,"ultracode_role":42}' 2>"$TMP_ROOT/ultracode-role.err")
+  status=$?
+  err=$(cat "$TMP_ROOT/ultracode-role.err")
+  expect_code 2 "$status" "a non-string ultracode_role should fail loud, not resolve"
+  [ -z "$out" ] || fail "a non-string ultracode_role must never resolve to a profile, got: $out"
+  assert_contains "$err" "ultracode_role must be a non-empty string" "a non-string ultracode_role should be reported"
+  pass "a non-string ultracode_role value fails loud instead of being silently dropped"
+}
+
 test_higher_min_vendor_wins
 test_exact_tie_uses_first_profile
 test_quota_missing_falls_back_to_first
@@ -182,5 +235,10 @@ test_bad_quota_json_falls_back_to_first
 test_stale_with_cache_needs_clear_margin_to_beat_fresh
 test_vendor_absent_or_unusable_falls_back_conservatively
 test_backward_compatible_first_selection
+test_ultracode_boolean_is_preserved
+test_ultracode_non_boolean_string_fails_loud
+test_ultracode_non_boolean_number_fails_loud
+test_ultracode_rejected_inside_quota_balanced_array
+test_ultracode_role_non_string_fails_loud
 
 echo "# all fm-dispatch-select tests passed"
