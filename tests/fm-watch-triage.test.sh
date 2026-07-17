@@ -269,6 +269,107 @@ test_crew_absorb_class_classifier() {
   pass "crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree"
 }
 
+# Regression (2026-07-15 live incident: ship-firstmate-autodeploy-alert-relay,
+# ship-firstmate-fmsend-verify): an EXITED crewmate can leave a no-mistakes run's
+# step orphaned mid-flight - never cancelled, so fm-crew-state.sh keeps reading a
+# stale in-progress CI poll as `working · source: run-step` forever, even though
+# nothing is actually advancing that run anymore. When the task itself declared a
+# `paused:` status line and its own agent process is CONFIRMED dead
+# (fm_backend_agent_alive), the declared pause is the more authoritative signal -
+# crew_absorb_class must defer to it instead of the stale run-step, or the
+# watcher's stale path never latches .paused-<key> and keeps re-nagging every
+# poll instead of honoring the documented pause recheck cadence
+# (FM_PAUSE_RESURFACE_SECS, docs/architecture.md "Event-driven supervision"). A
+# live or ambiguous-liveness crewmate must NOT be overridden by a stray paused:
+# line - run-step precedence still holds while the crewmate could plausibly
+# resume the run itself.
+test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step() {
+  local dir fakebin state
+  dir=$(make_case absorb-orphaned-pause); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  printf 'paused: awaiting the deploy window\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  fm_backend_agent_alive() { printf 'dead'; }
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "an exited crewmate's orphaned run-step working verdict was not overridden by its own declared pause"
+
+  fm_backend_agent_alive() { printf 'alive'; }
+  [ "$(crew_absorb_class task-a)" = working ] \
+    || fail "a live crewmate's run-step was wrongly overridden by a stray paused: line"
+
+  fm_backend_agent_alive() { printf 'unknown'; }
+  [ "$(crew_absorb_class task-a)" = working ] \
+    || fail "an unconfirmed (unknown) liveness read wrongly licensed the paused override"
+
+  unset -f fm_backend_agent_alive
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: an exited crewmate's declared pause overrides an orphaned run-step verdict; live/unknown liveness keeps run-step precedence"
+}
+
+# Behavioral regression, same live incident: drives the real fm-watch.sh subprocess
+# through several poll cycles (FM_POLL=1) with an unchanging pane, an orphaned
+# working/run-step verdict, a declared pause, and a fake tmux reporting the
+# crewmate's foreground process as a bare shell (exited). Before the fix,
+# crew_absorb_class returned `working` every cycle (never latching
+# .paused-<key>), so the watcher kept re-running the classify path and would
+# eventually wedge-escalate instead of quietly honoring the pause cadence. Pins
+# that the marker latches on first sight and the watcher stays silent across
+# repeated polls of the unchanged pane.
+test_nonterminal_stale_paused_orphaned_run_step_latches_marker() {
+  local dir state fakebin out window key pane_hash sig pid statusf
+  dir=$(make_case nonterminal-stale-orphaned-pause); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-orphaned"
+  printf 'idle, holding for upstream' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/orphaned.meta"
+  statusf="$state/orphaned.status"
+  printf 'paused: awaiting the deploy window\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-orphaned_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, holding for upstream")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Fake tmux: capture-pane/list-windows as usual, plus a display-message
+  # answer reporting a bare shell foreground process - the crewmate has
+  # exited, so fm_backend_agent_alive reads it as `dead`.
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  list-windows)
+    [ -n "${FM_FAKE_TMUX_WINDOW:-}" ] && printf '%s\n' "$FM_FAKE_TMUX_WINDOW"
+    exit 0 ;;
+  capture-pane)
+    [ -n "${FM_FAKE_TMUX_CAPTURE:-}" ] && cat "$FM_FAKE_TMUX_CAPTURE"
+    exit 0 ;;
+  display-message)
+    for a in "$@"; do case "$a" in *pane_current_command*) printf '%s\n' zsh; exit 0 ;; esac; done
+    exit 0 ;;
+esac
+exit 1
+SH
+  chmod +x "$fakebin/tmux"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "watcher exited over several poll cycles for an exited crewmate's declared pause behind an orphaned run-step (should stay absorbed): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an exited crewmate's declared pause behind an orphaned run-step re-surfaced within a few poll cycles instead of staying absorbed"
+  [ ! -s "$state/.wake-queue" ] || fail "an exited crewmate's declared pause behind an orphaned run-step enqueued a wake instead of staying absorbed"
+  [ -e "$state/.paused-$key" ] || fail "the .paused-<key> marker did not latch for an exited crewmate's declared pause behind an orphaned run-step"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a paused absorb must not start the wedge timer even behind an orphaned run-step"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "an exited crewmate's declared pause latches .paused-<key> behind an orphaned run-step and stays absorbed across repeated polls instead of re-nagging every cycle"
+}
+
 # Regression: FM_CREW_STATE_NM_TIMEOUT=0 previously slipped past its sanitizer
 # and reached `timeout` as a literal 0, which GNU coreutils treats as "disable
 # the timeout" - the exact failure mode this outer bound exists to guarantee
@@ -1463,6 +1564,8 @@ test_classifier_primitives
 test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
+test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step
+test_nonterminal_stale_paused_orphaned_run_step_latches_marker
 test_absorb_zero_env_values_sanitized_to_default
 test_absorb_zero_padded_env_values_sanitized_to_default
 test_signal_crew_provably_working_classifier

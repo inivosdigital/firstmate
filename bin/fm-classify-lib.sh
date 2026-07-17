@@ -31,6 +31,15 @@ _FM_CLASSIFY_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd 2>/dev/null)"
 # or no-mistakes install; absent, it points at the real sibling script.
 FM_CREW_STATE_BIN="${FM_CREW_STATE_BIN:-$_FM_CLASSIFY_LIB_DIR/fm-crew-state.sh}"
 
+# crew_absorb_class's orphaned-run-step override (below) needs
+# fm_backend_agent_alive to confirm a crewmate's process is actually gone.
+# Both bin/fm-watch.sh and bin/fm-supervise-daemon.sh already source
+# fm-backend.sh themselves, but a standalone sourcing (as tests do) would not
+# have it, so source it here too - re-sourcing is idempotent (function/default
+# definitions only, no side effects) and safe either way.
+# shellcheck source=bin/fm-backend.sh
+. "$_FM_CLASSIFY_LIB_DIR/fm-backend.sh"
+
 # Captain-relevant status verbs. A status line carrying any of these is work
 # firstmate must see. Lines without these verbs are no-verb signals: the watcher
 # absorbs them only with positive provably-working evidence, while the daemon uses
@@ -354,12 +363,29 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 #             a hung no-mistakes call would be absorbed instead of surfaced.
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
-# that appended paused: but then STARTED a run reports working, never paused.
+# that appended paused: but then STARTED a run reports working, never paused -
+# EXCEPT for the exited-crewmate override below, which only fires once the
+# crewmate's own process is confirmed gone.
+#
+# Exited-crewmate override: a no-mistakes run whose crewmate has since exited
+# (the harness process quit) can be left with an orphaned running/ci run-step
+# that was never cancelled - e.g. a stale in-progress CI poll - so
+# fm-crew-state.sh keeps reporting `working · source: run-step` forever, even
+# though nothing is actually advancing that run anymore. When that happens for
+# a task that declared its own `paused:` status line, the declared pause is
+# the more authoritative signal once the crewmate process itself is gone: a
+# dead crewmate cannot "start a run" to justify overriding it. Confirmed via
+# fm_backend_agent_alive (bin/fm-backend.sh) reading the same meta the
+# secondmate-liveness sweep uses, and acted on ONLY for its confident `dead`
+# verdict - `alive`/`unknown` fall through to the ordinary working
+# classification exactly as before, so a live crewmate that merely appended a
+# stray paused: line mid-run is unaffected.
+#
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src
+  local id=$1 line state src state_dir last meta backend target verdict
   [ -n "$id" ] || { printf 'none'; return; }
   line=$(fm_hard_timeout "$FM_CREW_ABSORB_TIMEOUT" "$FM_CREW_ABSORB_KILL_AFTER" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
@@ -367,7 +393,25 @@ crew_absorb_class() {  # <id>
   if [ "$state" = paused ]; then printf 'paused'; return; fi
   if [ "$state" = working ]; then
     src=${line#*source: }; src=${src%% *}
-    case "$src" in run-step|pane) printf 'working'; return ;; esac
+    case "$src" in
+      run-step)
+        state_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+        if [ -n "$state_dir" ]; then
+          last=$(last_status_line "$state_dir/$id.status")
+          if status_is_paused "$last"; then
+            meta="$state_dir/$id.meta"
+            backend=$(fm_backend_of_meta "$meta")
+            target=$(fm_backend_target_of_meta "$meta")
+            if [ -n "$target" ]; then
+              verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict=unknown
+              [ "$verdict" = dead ] && { printf 'paused'; return; }
+            fi
+          fi
+        fi
+        printf 'working'; return
+        ;;
+      pane) printf 'working'; return ;;
+    esac
   fi
   printf 'none'
 }
