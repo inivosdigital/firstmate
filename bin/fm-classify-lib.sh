@@ -364,28 +364,40 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 # One fm-crew-state.sh read serves BOTH absorb reasons at once. Reading the state
 # authoritatively (not the status log) is what keeps run-step precedence: a crew
 # that appended paused: but then STARTED a run reports working, never paused -
-# EXCEPT for the exited-crewmate override below, which only fires once the
-# crewmate's own process is confirmed gone.
+# EXCEPT for the two run-step overrides below, which fire only for a task whose
+# own last status line is a declared paused:.
+#
+# Parked-at-gate override: fm-crew-state.sh's cross-branch run lookup falls back
+# to a coarse `no-mistakes runs` listing when the primary `axi status` call does
+# not attribute a run to this crew's own branch, and that coarse listing carries
+# no per-step gate detail - so a run genuinely PARKED at a needs-decision/blocked
+# gate can be reported as a plain `working · source: run-step` forever, even
+# though the pipeline cannot move without the captain. status_open_decisions
+# (above) reading this task's own status log is the proof that a gate is
+# genuinely still open: when one is, the declared pause wins outright,
+# regardless of backend liveness, because an alive-but-gated crew is exactly as
+# unable to progress as a dead one.
 #
 # Exited-crewmate override: a no-mistakes run whose crewmate has since exited
-# (the harness process quit) can be left with an orphaned running/ci run-step
-# that was never cancelled - e.g. a stale in-progress CI poll - so
+# (the harness process quit) can separately be left with an orphaned running/ci
+# run-step that was never cancelled - e.g. a stale in-progress CI poll - so
 # fm-crew-state.sh keeps reporting `working · source: run-step` forever, even
-# though nothing is actually advancing that run anymore. When that happens for
-# a task that declared its own `paused:` status line, the declared pause is
-# the more authoritative signal once the crewmate process itself is gone: a
-# dead crewmate cannot "start a run" to justify overriding it. Confirmed via
+# though nothing is actually advancing that run anymore. This is a DIFFERENT
+# case from the gate override above: no decision is open, but the crew that
+# could have resumed the run itself is confirmed gone. Confirmed via
 # fm_backend_agent_alive (bin/fm-backend.sh) reading the same meta the
 # secondmate-liveness sweep uses, and acted on ONLY for its confident `dead`
 # verdict - `alive`/`unknown` fall through to the ordinary working
-# classification exactly as before, so a live crewmate that merely appended a
-# stray paused: line mid-run is unaffected.
+# classification, so a live crewmate whose run-step is genuinely still
+# progressing (ci/running/fixing) with a stray paused: line left over from
+# earlier is unaffected: only a still-open gate or a confirmed-dead crewmate
+# overrides run-step precedence, never a live, ungated, merely-stale pause.
 #
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
 crew_absorb_class() {  # <id>
-  local id=$1 line state src state_dir last meta backend target verdict
+  local id=$1 line state src state_dir last statusf meta backend target verdict
   [ -n "$id" ] || { printf 'none'; return; }
   line=$(fm_hard_timeout "$FM_CREW_ABSORB_TIMEOUT" "$FM_CREW_ABSORB_KILL_AFTER" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
@@ -397,8 +409,12 @@ crew_absorb_class() {  # <id>
       run-step)
         state_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
         if [ -n "$state_dir" ]; then
-          last=$(last_status_line "$state_dir/$id.status")
+          statusf="$state_dir/$id.status"
+          last=$(last_status_line "$statusf")
           if status_is_paused "$last"; then
+            if [ -n "$(status_open_decisions "$statusf")" ]; then
+              printf 'paused'; return
+            fi
             meta="$state_dir/$id.meta"
             backend=$(fm_backend_of_meta "$meta")
             target=$(fm_backend_target_of_meta "$meta")

@@ -309,6 +309,71 @@ test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step() {
   pass "crew_absorb_class: an exited crewmate's declared pause overrides an orphaned run-step verdict; live/unknown liveness keeps run-step precedence"
 }
 
+# Regression (2026-07-19 live incident: carscanner-nmvtis-paid-pull): a no-mistakes
+# run genuinely PARKED at a captain-decision gate (an open needs-decision, e.g. an
+# ask-user finding) can still read `working · source: run-step` from
+# fm-crew-state.sh - its cross-branch run lookup falls back to a coarse listing
+# with no per-step gate detail when the primary attribution misses, so a parked
+# gate looks identical to a genuinely active run. The crew's own last status line
+# correctly declares `paused: ...` for this expected wait, but the ALIVE backend
+# used to block the demotion (the orphaned-crewmate override above requires
+# CONFIRMED DEAD), so the declared pause was silently ignored and the watcher kept
+# re-surfacing an identical stale wake every poll instead of the hour-long pause
+# recheck cadence. A still-open needs-decision/blocked hold is proof the crew
+# cannot progress on its own regardless of whether its process happens to still be
+# resident, so it must license the same demotion the dead-check licenses - with an
+# ALIVE backend and no liveness check involved at all.
+test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive() {
+  local dir fakebin state
+  dir=$(make_case absorb-open-gate-pause); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (background run)'
+  {
+    printf 'needs-decision: run parked at the document gate on one ask-user finding\n'
+    printf 'paused: holding at document gate for captain footer-wording decision - do not treat as a wedge\n'
+  } > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  fm_backend_agent_alive() { printf 'alive'; }
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "an alive crewmate genuinely parked at an open captain-decision gate was not classed paused"
+  crew_is_paused task-a || fail "crew_is_paused did not recognize the open-gate pause verdict"
+
+  fm_backend_agent_alive() { printf 'unknown'; }
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "unknown liveness must not block the open-gate pause override"
+
+  unset -f fm_backend_agent_alive
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a declared pause at a still-open captain-decision gate is honored regardless of backend liveness"
+}
+
+# Disconfirming check for the fix above: a task with NO declared paused: line, and
+# no open decision either, must still read as NOT provably working (surfaces as a
+# possible wedge) exactly as before - the gate override only fires behind
+# status_is_paused, so an ordinary stale working/run-step verdict with no pause
+# declaration is completely untouched by this change.
+test_crew_absorb_class_unpaused_wedge_still_surfaces() {
+  local dir fakebin state
+  dir=$(make_case absorb-unpaused-wedge); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (background run)'
+  printf 'needs-decision: run parked at the document gate on one ask-user finding\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  fm_backend_agent_alive() { printf 'alive'; }
+  [ "$(crew_absorb_class task-a)" = working ] \
+    || fail "a task with an open gate but no declared paused: line was wrongly classed paused"
+  crew_is_provably_working task-a \
+    || fail "a task with an open gate but no declared paused: line lost its provably-working classification"
+
+  unset -f fm_backend_agent_alive
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: an open gate with no declared paused: line keeps ordinary working classification, unaffected by the gate override"
+}
+
 # Behavioral regression, same live incident: drives the real fm-watch.sh subprocess
 # through several poll cycles (FM_POLL=1) with an unchanging pane, an orphaned
 # working/run-step verdict, a declared pause, and a fake tmux reporting the
@@ -1565,6 +1630,8 @@ test_crew_is_provably_working_classifier
 test_status_is_paused_classifier
 test_crew_absorb_class_classifier
 test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step
+test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive
+test_crew_absorb_class_unpaused_wedge_still_surfaces
 test_nonterminal_stale_paused_orphaned_run_step_latches_marker
 test_absorb_zero_env_values_sanitized_to_default
 test_absorb_zero_padded_env_values_sanitized_to_default
