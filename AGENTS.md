@@ -109,6 +109,7 @@ state/               volatile runtime signals; gitignored
   .hash-* .count-* .stale-* .stale-since-* .paused-* .wedge-escalations-* .seen-* .hb-surfaced-* .last-* .heartbeat-streak   watcher internals; never touch
   .watch-triage.log  watcher's absorbed-wake debug log (size-capped); never relied on, safe to delete
   .last-watcher-beat watcher liveness beacon, touched every poll (including while absorbing benign wakes); guard scripts read it
+  .watch-arming   transient re-arm handoff marker refreshed by bin/fm-watch-arm.sh while it brings a fresh watcher up; the turn-end guard reads it to tell a re-arm apart from a lapse (docs/turnend-guard.md "Re-arm handoff"); never touch
   .subsuper-* .supervise-daemon.*   sub-supervisor internals; never touch
 .no-mistakes/        local validation state and evidence; gitignored
 ```

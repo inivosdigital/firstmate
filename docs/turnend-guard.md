@@ -31,11 +31,26 @@ That is the same identity-matched live lock and fresh beacon check used by `bin/
 A stale beacon blocks even if a watcher pid is still live.
 A fresh leftover beacon does not block on the first unhealthy check: a legitimate re-arm (`bin/fm-watch-arm.sh`, backgrounded) needs a brief moment to fork the new watcher and register its lock after the old one released it, so the guard polls `fm_watcher_healthy` on a short interval and only blocks once a bounded deadline passes still unhealthy, exiting 0 the instant a live lock registers.
 That deadline defaults to the same budget `bin/fm-watch-arm.sh` gives a freshly forked watcher to confirm (`FM_ARM_CONFIRM_TIMEOUT`, 10 seconds) and is independently overridable via `FM_TURNEND_ARM_WAIT`.
-A watcher lock that is genuinely missing, dead, or identity-mismatched for the whole window still blocks; it just takes up to that deadline to say so instead of blocking on the first check.
+A watcher lock that is genuinely missing, dead, or identity-mismatched for the whole window still blocks, unless a re-arm is demonstrably in flight (see [Re-arm handoff](#re-arm-handoff)); it just takes up to that deadline to say so instead of blocking on the first check.
 
 `FM_STATE_OVERRIDE` wins over `FM_HOME/state`, and `FM_HOME` wins over repo-root `state/`.
 `FM_GUARD_GRACE` controls the beacon freshness window and defaults to 300 seconds.
 If `jq` is missing or hook stdin is empty, the guard fails open and exits 0 because it cannot safely read loop-guard fields.
+
+## Re-arm handoff
+
+The bounded poll above assumes the new watcher registers its lock within the deadline, but a real handoff can run longer than that.
+Under load the arm's fork and lock-acquire lag, and in away mode the daemon's wake handling (classify, inject, digest) sits between the old watcher's exit and the next start with no lock held.
+In both cases a re-arm is genuinely in flight and a healthy watcher lands moments later, so blocking on the momentary gap is a false positive, observed as a "no live watcher" block whose reported beacon is only seconds old.
+The guard therefore also treats an in-flight re-arm as healthy: while the poll runs it exits 0 the instant it sees one, and it never blocks the turn while one is active.
+Two owners publish that signal, both fail-closed:
+
+- `bin/fm-watch-arm.sh` refreshes `state/.watch-arming` every confirm poll while it forks and confirms a fresh watcher, and clears it the moment a watcher is confirmed or the arm gives up.
+  The guard trusts the marker only while its mtime is within `FM_TURNEND_ARMING_GRACE` (default 4 seconds), so an arm that died mid-handoff stops refreshing it and stops counting within seconds.
+- While `state/.afk` exists the away-mode daemon owns re-arm and holds `state/.supervise-daemon.lock` for its whole life.
+  The guard trusts that lock only when its pid is alive and its recorded identity still matches, so a dead daemon does not suppress the block.
+
+A genuinely blind turn end, with no watcher, no fresh arm marker, and no live away-mode daemon, still blocks after the bounded poll exactly as before.
 
 ## Harness Integrations
 

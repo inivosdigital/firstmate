@@ -598,6 +598,93 @@ test_hook_allows_watcher_that_registers_mid_poll() {
   pass "fm-turnend-guard: allows the stop once a re-arming watcher's lock registers mid-poll (${elapsed_s}s, wait=${poll_wait}s)"
 }
 
+# The regression this task closes: bin/fm-watch-arm.sh refreshes state/.watch-arming
+# for the whole fork-and-confirm handoff, so when the new watcher's lock lands
+# LATER than the guard's ARM_WAIT (a slow handoff under load, or the away-mode
+# daemon's wake-handling gap), the guard must recognize the in-flight re-arm and
+# hold its turn instead of blinding-blocking. Before the fix the guard polled only
+# the lock and blocked the instant ARM_WAIT expired, misreading every long handoff
+# as a supervision lapse. A fresh marker with no live lock and a fresh leftover
+# beacon is exactly that handoff; the guard must exit 0, and promptly (not after
+# waiting out a long deadline), since the marker is proof a watcher is on its way.
+test_hook_allows_stop_while_rearm_marker_is_fresh() {
+  local dir out status start elapsed_s poll_wait=5
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-marker-fresh")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"   # fresh leftover beacon from the exited watcher
+  touch "$dir/state/.watch-arming"        # a re-arm is actively bringing a watcher up
+  start=$SECONDS
+  out=$(FM_TURNEND_ARM_WAIT=$poll_wait run_hook "$dir" false); status=$?
+  elapsed_s=$((SECONDS - start))
+  expect_code 0 "$status" "hook must allow the stop while a re-arm is in flight (fresh state/.watch-arming), not block on the handoff gap"
+  [ -z "$out" ] || fail "hook produced output while a re-arm was in flight: $out"
+  [ "$elapsed_s" -lt "$poll_wait" ] || fail "hook waited the full ${elapsed_s}s deadline instead of returning as soon as it saw the in-flight re-arm"
+  pass "fm-turnend-guard: allows the stop while an in-flight re-arm marker is fresh (${elapsed_s}s, wait=${poll_wait}s)"
+}
+
+# Fail-closed counterpart: a STALE marker (an arm that died mid-handoff and stopped
+# refreshing it) is not proof of anything, so the guard must still block. Otherwise
+# a leftover marker would suppress the guard forever after a crashed re-arm.
+test_hook_blocks_when_rearm_marker_is_stale() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-arm-marker-stale")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  touch -t 202001010000 "$dir/state/.watch-arming"   # a dead arm stopped refreshing it
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block when the in-flight re-arm marker is stale (a dead arm)"
+  assert_contains "$out" "$REQUIRED_REASON" "block reason must contain the exact required instruction"
+  pass "fm-turnend-guard: blocks when the re-arm marker is stale (fail-closed on a dead arm)"
+}
+
+# Away-mode path (the original report): while afk, the daemon owns re-arm and holds
+# state/.supervise-daemon.lock for its life, sitting between the old watcher's exit
+# and the next start with no lock held. A live, identity-matched daemon lock means
+# a re-arm is genuinely in flight, so the guard must hold its turn.
+test_hook_allows_stop_while_afk_daemon_alive() {
+  local dir pid identity out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-daemon-alive")
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  : > "$dir/state/.afk"
+  sleep 60 &
+  pid=$!
+  identity=$(watcher_identity "$dir" "$pid") || {
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    fail "could not identify live daemon holder"
+  }
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf '%s\n' "$pid" > "$dir/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "$identity" > "$dir/state/.supervise-daemon.lock/pid-identity"
+  out=$(run_hook "$dir" false); status=$?
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  expect_code 0 "$status" "hook must allow the stop while afk and a live away-mode daemon owns re-arm"
+  [ -z "$out" ] || fail "hook produced output while a live away-mode daemon owned re-arm: $out"
+  pass "fm-turnend-guard: allows the stop while afk and the away-mode daemon is alive"
+}
+
+# Fail-closed counterpart: afk with a DEAD daemon lock (pid gone) means nobody is
+# re-arming, so the guard must block and force a repair.
+test_hook_blocks_when_afk_daemon_dead() {
+  local dir dead out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-afk-daemon-dead")
+  dead=$(nonexistent_pid)
+  : > "$dir/state/task1.meta"
+  touch "$dir/state/.last-watcher-beat"
+  : > "$dir/state/.afk"
+  mkdir -p "$dir/state/.supervise-daemon.lock"
+  printf '%s\n' "$dead" > "$dir/state/.supervise-daemon.lock/pid"
+  printf '%s\n' "dead daemon identity" > "$dir/state/.supervise-daemon.lock/pid-identity"
+  out=$(run_hook "$dir" false); status=$?
+  expect_code 2 "$status" "hook must block while afk when the away-mode daemon lock names a dead pid"
+  # In away mode the repair reason is the daemon/afk protocol, not the non-afk arm
+  # instruction, so assert the always-present alarm banner rather than REQUIRED_REASON.
+  assert_contains "$out" "TURN WOULD END BLIND" "block banner must read as an alarm"
+  pass "fm-turnend-guard: blocks while afk when the away-mode daemon is dead (fail-closed)"
+}
+
 test_grok_adapter_forces_one_resume_when_unhealthy() {
   local dir fakebin log out status
   dir=$(make_primary_dir "$TMP_ROOT/grok-adapter-block")
@@ -969,6 +1056,10 @@ test_hook_silent_without_jq
 test_hook_silent_without_stdin
 test_hook_runs_fast
 test_hook_allows_watcher_that_registers_mid_poll
+test_hook_allows_stop_while_rearm_marker_is_fresh
+test_hook_blocks_when_rearm_marker_is_stale
+test_hook_allows_stop_while_afk_daemon_alive
+test_hook_blocks_when_afk_daemon_dead
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume
 test_settings_hook_uses_claude_project_dir

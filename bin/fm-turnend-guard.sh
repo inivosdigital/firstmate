@@ -51,6 +51,17 @@ WATCH="$SCRIPT_DIR/fm-watch.sh"
 # genuine supervision lapse (docs/turnend-guard.md "Shared Predicate"). Default
 # to the arm's own confirm budget so the two stay in lockstep.
 ARM_WAIT=${FM_TURNEND_ARM_WAIT:-${FM_ARM_CONFIRM_TIMEOUT:-10}}
+# The bounded poll above assumes the new watcher registers within ARM_WAIT, but a
+# real handoff can run longer than that: under load the arm's fork+lock-acquire
+# lags, and in away mode the daemon's wake handling sits between the old watcher's
+# exit and the next start with no lock held. In BOTH cases a re-arm is genuinely
+# in flight and a healthy watcher lands moments later, so the guard must not read
+# the momentary gap as a lapse. It recognizes an in-flight re-arm and holds its
+# turn while one is active (docs/turnend-guard.md "Re-arm handoff"); this window
+# bounds how fresh that evidence must be, kept short so a DEAD re-arm still blocks
+# within a couple of seconds. bin/fm-watch-arm.sh refreshes its marker far more
+# often than this, so the margin only absorbs scheduling jitter.
+ARMING_GRACE=${FM_TURNEND_ARMING_GRACE:-4}
 
 # shellcheck source=bin/fm-supervision-lib.sh
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
@@ -122,14 +133,41 @@ fi
 fm_supervision_status "$STATE" "$GRACE"
 [ "$FM_SUP_IN_FLIGHT" -gt 0 ] || exit 0
 
+# True while a re-arm is genuinely bringing a watcher up, so the momentary
+# no-live-lock gap is a handoff, not a lapse. Two owners, both fail-closed:
+#   - bin/fm-watch-arm.sh refreshes state/.watch-arming every confirm poll while
+#     it forks and confirms a fresh watcher; a fresh marker means that arm is
+#     alive right now and a lock will register shortly. A dead arm stops
+#     refreshing it, so the marker goes stale within ARMING_GRACE and stops
+#     counting.
+#   - In away mode the daemon (bin/fm-supervise-daemon.sh) owns re-arm and holds
+#     state/.supervise-daemon.lock for its whole life; while it is alive it is
+#     that home's supervisor and will re-arm across its own wake-handling gap. A
+#     dead daemon (lock pid gone or identity-mismatched) does not count.
+rearm_in_flight() {
+  local arming="$STATE/.watch-arming" dlock="$STATE/.supervise-daemon.lock" dpid dident
+  if [ -e "$arming" ] && [ "$(fm_path_age "$arming")" -lt "$ARMING_GRACE" ]; then
+    return 0
+  fi
+  [ -e "$STATE/.afk" ] || return 1
+  dpid=$(cat "$dlock/pid" 2>/dev/null || true)
+  fm_pid_alive "$dpid" || return 1
+  dident=$(cat "$dlock/pid-identity" 2>/dev/null || true)
+  [ -n "$dident" ] || return 1
+  [ "$(fm_pid_identity "$dpid" 2>/dev/null)" = "$dident" ]
+}
+
 # Bounded poll, not an immediate block: give an in-flight re-arm the same
 # handful-of-seconds tolerance bin/fm-guard.sh already grants via beacon grace,
 # expressed correctly for this predicate's live-lock check. A watcher that is
 # truly gone (or never was) still blocks - it just takes up to $ARM_WAIT to say
-# so, mirroring the poll bin/fm-watch-arm.sh:180 runs on itself.
+# so, mirroring the poll bin/fm-watch-arm.sh runs on itself. A re-arm that is
+# demonstrably in flight ends the poll immediately: it will land a watcher, and
+# the next turn's guard confirms it, so blocking this turn is pure noise.
 arm_deadline=$(( $(date +%s) + ARM_WAIT ))
 while :; do
   fm_watcher_healthy "$STATE" "$WATCH" "$GRACE" "$FM_HOME" && exit 0
+  rearm_in_flight && exit 0
   [ "$(date +%s)" -ge "$arm_deadline" ] && break
   sleep 0.2
 done

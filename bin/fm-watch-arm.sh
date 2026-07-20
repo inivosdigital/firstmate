@@ -56,12 +56,27 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCH="$SCRIPT_DIR/fm-watch.sh"
 WATCH_LOCK="$STATE/.watch.lock"
 BEAT="$STATE/.last-watcher-beat"
+# Re-arm heartbeat: while this script is actively forking and confirming a fresh
+# watcher, the old watcher has released its lock and the new one has not yet
+# registered its own, so fm_watcher_healthy is momentarily false through no fault
+# of supervision. Refreshing this marker every confirm poll lets the turn-end
+# guard (bin/fm-turnend-guard.sh) tell that gap apart from a genuine lapse and
+# hold its turn instead of blocking; it is cleared the instant a watcher is
+# confirmed or this arm gives up, so a DEAD arm stops refreshing it and the guard
+# falls back to blocking within its short freshness window. See
+# docs/turnend-guard.md "Re-arm handoff".
+ARMING="$STATE/.watch-arming"
 # "Fresh" reuses the guard's threshold so there is one definition of liveness.
 GRACE=${FM_GUARD_GRACE:-300}
 # How long to wait for a freshly forked watcher to acquire the lock and beat.
 CONFIRM_TIMEOUT=${FM_ARM_CONFIRM_TIMEOUT:-10}
 # Poll interval while attached to an existing healthy watcher.
 ATTACH_POLL=${FM_ARM_ATTACH_POLL:-0.5}
+
+# Mark/unmark an in-progress re-arm for the turn-end guard. touch (not `: >`) so
+# the mtime the guard reads is refreshed reliably, matching the watcher beacon.
+arming_touch() { touch "$ARMING" 2>/dev/null || true; }
+arming_clear() { rm -f "$ARMING" 2>/dev/null || true; }
 
 clear_stale_recorded_watcher_lock() {
   local lock_home lock_path lock_identity
@@ -171,6 +186,7 @@ fi
 child=
 child_out=
 cleanup_child() {
+  arming_clear
   if [ -n "$child" ] && fm_pid_alive "$child"; then
     kill -TERM "$child" 2>/dev/null || true
   fi
@@ -185,6 +201,9 @@ child_out=$(mktemp "$STATE/.watch-arm-output.XXXXXX") || {
   echo "watcher: FAILED - no live watcher with a fresh beacon"
   exit 1
 }
+# Declare the handoff in progress BEFORE the fork, so the guard already sees a
+# re-arm in flight if it fires the instant this background task starts.
+arming_touch
 "$WATCH" >"$child_out" &
 child=$!
 child_done=0
@@ -194,7 +213,12 @@ child_done=0
 # until the child gives up. Only then print the honest line.
 deadline=$(( $(date +%s) + CONFIRM_TIMEOUT ))
 while :; do
+  # Keep declaring the handoff in progress every poll; a watcher confirmed below
+  # clears it, and a killed arm stops refreshing it so the guard falls back to
+  # blocking within its freshness window.
+  arming_touch
   if healthy_watcher; then
+    arming_clear
     if [ "$HEALTHY_PID" = "$child" ]; then
       echo "watcher: started pid=$child (beacon fresh)"
       wait "$child"
@@ -223,6 +247,9 @@ while :; do
     rc=$?
     child_done=1
     if [ "$rc" -eq 0 ] && watch_output_has_wake "$child_out"; then
+      # The forked watcher already woke and exited; this arm is returning that
+      # wake, not bringing a watcher up, so stop declaring a handoff in progress.
+      arming_clear
       print_watch_output "$child_out"
       rm -f "$child_out" 2>/dev/null || true
       exit 0
