@@ -18,3 +18,4 @@ config/cmux-socket-password
 config/critical-services
 config/autodeploy-logs
 config/wedge-alarm
+config/tmp-alert-threshold

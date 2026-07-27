@@ -98,6 +98,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# shellcheck source=bin/fm-tmp-lib.sh
+. "$SCRIPT_DIR/fm-tmp-lib.sh"
 if [ "$#" -lt 1 ] || ! fm_task_id_path_safe "$1"; then
   echo "error: invalid teardown request" >&2
   exit 2
@@ -125,6 +127,7 @@ PR_URL=$(grep '^pr=' "$META" | tail -1 | cut -d= -f2- || true)
 # tasktmp is recorded by fm-spawn for tasks that set up a per-task temp root
 # (/tmp/fm-<id>/); absent for tasks spawned before that change, so tolerate empty.
 TASK_TMP=$(grep '^tasktmp=' "$META" | cut -d= -f2- || true)
+HARNESS=$(grep '^harness=' "$META" | cut -d= -f2- || true)
 ORCA_WORKTREE_ID=$(fm_meta_get "$META" orca_worktree_id)
 ORCA_PATH_MATCH_VERIFIED=0
 
@@ -186,6 +189,24 @@ remove_grok_turnend_auth() {
   case "$token" in ''|*[!A-Za-z0-9._-]*) return 0 ;; esac
   hooks_dir="${GROK_HOME:-$HOME/.grok}/hooks/fm-turn-end.d"
   rm -f "$hooks_dir/$token"
+}
+
+# Remove the harness's own /tmp scratch directory for this task's worktree
+# (docs/configuration.md "/tmp sweep and cleanup"). fm-tmp-lib.sh's
+# fm_tmp_harness_scratch_dir is the single shared implementation of both "which
+# sessions are live" and "where does this harness's scratch live" - the same
+# copy bin/fm-tmp-sweep.sh's periodic sweep uses - so the two paths can never
+# drift into deleting different things for the same task. A harness whose
+# scratch convention has not been empirically verified (anything but claude)
+# is a hard no-op: it reports why instead of guessing a path.
+remove_harness_scratch() {
+  local harness=$1 worktree=$2 dir
+  [ -n "$worktree" ] || return 0
+  dir=$(fm_tmp_harness_scratch_dir "$harness" "$worktree") || {
+    echo "note: no verified /tmp scratch convention for harness '${harness:-unknown}'; leaving any harness scratch for this task in place" >&2
+    return 0
+  }
+  rm -rf "$dir"
 }
 
 validate_pr_poll_cleanup() {
@@ -1120,6 +1141,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" "$WT/.fm-grok-turnend"
   fi
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
+  # Clear the harness scratch before the worktree itself is removed/returned, so a
+  # new task can never lease the same identity while old scratch still sits there.
+  remove_harness_scratch "$HARNESS" "$WT"
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
@@ -1138,6 +1162,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   if [ "$FORCE" != "--force" ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ]; then
     post_lock_cleanup_check=validate_worktree_teardown_safety
   fi
+  # Clear the harness scratch before the pool slot is returned: a new task can
+  # lease the same slot (and therefore the same sanitized scratch path) the
+  # moment treehouse return completes, so this must run first.
+  remove_harness_scratch "$HARNESS" "$WT"
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2
     exit 1
@@ -1149,6 +1177,7 @@ if [ "$BACKEND" != orca ]; then
 fi
 if [ "$KIND" = secondmate ]; then
   [ -n "$HOME_PATH" ] || HOME_PATH=$WT
+  remove_harness_scratch "$HARNESS" "$HOME_PATH"
   remove_firstmate_home "$HOME_PATH" "secondmate home" "$ID"
   remove_secondmate_registry_entry "$ID"
 fi

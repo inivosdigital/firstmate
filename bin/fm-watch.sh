@@ -73,6 +73,8 @@ mkdir -p "$STATE"
 . "$SCRIPT_DIR/fm-transition-lib.sh"
 # shellcheck source=bin/fm-autodeploy-lib.sh
 . "$SCRIPT_DIR/fm-autodeploy-lib.sh"
+# shellcheck source=bin/fm-tmp-alert-lib.sh
+. "$SCRIPT_DIR/fm-tmp-alert-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
 # shellcheck source=bin/fm-x-lib.sh
@@ -588,6 +590,37 @@ autodeploy_scan() {
   return "$found"
 }
 
+# --- Periodic /tmp usage-threshold sweep ------------------------------------
+# The always-on twin of bootstrap's tmp_alert_check, for a breach that crosses
+# config/tmp-alert-threshold between sessions. Unlike autodeploy_scan there is
+# only ever one thing being watched (/tmp itself, not one log per config line),
+# so dedup is a single boolean marker rather than a per-item content hash: once
+# surfaced, stay quiet until usage drops back under threshold, then re-arm.
+# Absent config, no df on PATH, or usage under threshold are all silent.
+_tmp_alert_marker_path() {
+  printf '%s/.tmp-alert-surfaced' "$STATE"
+}
+
+# Sweep config/tmp-alert-threshold. Enqueues a check wake the first heartbeat
+# usage crosses the threshold, stays quiet on every heartbeat after that while
+# still over, and clears the marker once usage drops back under threshold so a
+# later re-breach re-arms. Returns 0 when it enqueued a new breach, 1 otherwise.
+tmp_alert_scan() {
+  local threshold pct mfile
+  mfile=$(_tmp_alert_marker_path)
+  threshold=$(fm_tmp_alert_threshold "$CONFIG/tmp-alert-threshold") || { rm -f "$mfile"; return 1; }
+  fm_tmp_alert_df_available || return 1
+  pct=$(fm_tmp_alert_usage_pct) || return 1
+  if [ "$pct" -ge "$threshold" ]; then
+    [ -e "$mfile" ] && return 1                       # already surfaced, still over threshold
+    fm_wake_append check "tmp-usage" "check: /tmp is ${pct}% full (threshold ${threshold}%)" || return 1
+    touch "$mfile"
+    return 0
+  fi
+  rm -f "$mfile"                                      # back under threshold, re-arm
+  return 1
+}
+
 # Cheap heartbeat fleet-scan (the always-on twin of the daemon's catch-all). 0 if
 # any captain-relevant status has NOT already been surfaced to firstmate (its
 # content differs from the .hb-surfaced-<task> marker). Pure detect, no side
@@ -1063,6 +1096,10 @@ EOF
     # away-mode daemon escalates check wakes) so a deploy failure is caught whether
     # or not the fleet has other work.
     autodeploy_new=1; autodeploy_scan && autodeploy_new=0
+    # Periodic /tmp usage-threshold sweep, same rationale as the autodeploy
+    # sweep above: a breach between sessions is caught here rather than
+    # waiting for the next session start's tmp_alert_check.
+    tmp_alert_new=1; tmp_alert_scan && tmp_alert_new=0
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -1084,6 +1121,10 @@ EOF
       # A new autodeploy failure was enqueued above; surface it now as a check.
       touch "$STATE/.last-heartbeat"
       wake "check: autodeploy failure"
+    elif [ "$tmp_alert_new" = 0 ]; then
+      # A new /tmp usage breach was enqueued above; surface it now as a check.
+      touch "$STATE/.last-heartbeat"
+      wake "check: tmp usage"
     else
       touch "$STATE/.last-heartbeat"
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"

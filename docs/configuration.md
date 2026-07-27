@@ -108,6 +108,76 @@ An absent or empty file is a no-op, and a host without `systemctl` (no systemd) 
 The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same units.
 See [`examples/critical-services`](examples/critical-services) for a copyable config; report a failed unit to the captain in plain language and never restart it, since a unit that failed may be unsafe to restart without knowing why.
 
+## /tmp sweep and cleanup (bin/fm-tmp-sweep.sh)
+
+### Why this exists
+
+Nothing on this machine otherwise cleans `/tmp`.
+A crewmate's harness (Claude Code) writes its own scratch directory per session at `/tmp/claude-<uid>/<sanitized-worktree-path>/<session-uuid>/`, and neither the harness nor firstmate removed it when the task ended.
+
+On 2026-07-27 this machine's NAS mount appeared completely dead: every read, write, and directory listing against `/mnt/nas` hung for 10-25 seconds or more with no error and near-zero CPU time.
+It looked like a server or network failure; it was not.
+The chain, each link measured at the time:
+
+1. `/tmp` is a tmpfs, 7.8GB, and had reached 95% full (7.5GB) with stale build artifacts.
+2. Swap here is zram, not disk (`/proc/swaps` shows `/dev/zram0`). `/sys/block/zram0/mm_stat` showed 7.8GB of data compressed 2.04x into 3.92GB of real physical RAM, pinned in scattered small allocations.
+3. That fragmented memory: `/proc/buddyinfo` showed zero free blocks at order-8, order-9, and order-10 in zone Normal.
+4. The CIFS mount negotiates `rsize=4194304,wsize=4194304`, so every file operation needs an order-10 (4MB) contiguous allocation that no longer existed; operations blocked in the kernel allocator. `dmesg | grep -ic cifs` was `0`, which is why nothing pointed at the real cause.
+
+Deleting the stale `/tmp` content fixed it outright: available memory 2.7GB to 8.0GB, swap in use 7985MB to 2800MB, `stat -f /mnt/nas` from a 12-second timeout to 0.024s, a 3MB NAS write from a 15-second timeout with 0 bytes written to 0.19s at 16MB/s.
+No remount, no reboot, no server-side change.
+The largest single producer was 2.7GB across 197 dead Claude Code scratch directories under `/tmp/claude-<uid>/`, the largest contributor to `/tmp` growth by far.
+
+Two mechanisms close the gap: this periodic sweep for whatever accumulates despite cleanup (crashed sessions, interrupted teardowns, other tools' droppings), and [`bin/fm-teardown.sh`'s harness-scratch removal](#task-teardown-harness-scratch-cleanup) for the common case, a task ending normally.
+A real, correctly-configured run on this machine (2026-07-27, `FM_ROOT_OVERRIDE` pointed at the primary checkout so live-session data was real) found 1445 stale top-level/scratch candidates totalling 142MB still owned entirely by the invoking user, none root-owned, none resembling a live credential or database store (mostly orphaned `tempfile`-style `tmpNNNNNNNN.db`/`.log`/`.txt`/`.patch` debris) - dry-run output was manually reviewed before any real removal ran.
+
+### Safety model
+
+The sweep (`bin/fm-tmp-sweep.sh`) never removes anything without passing every one of these checks, in order; failing any one of them skips the candidate and logs why:
+
+1. **Protected name.** A well-known live-service path, enumerated by hand on this machine (not assumed): `.X11-unix`, `.ICE-unix`, `.font-unix`, `.XIM-unix`, `.Test-unix`, `.X0-lock`, `.X1-lock` (X11/ICE/font sockets and locks), and any name prefixed `systemd-private-` (systemd's `PrivateTmp=` namespaces), `tmux-` (tmux server sockets), `ssh-` (ssh-agent socket directories), `vscode-typescript`, or `.xfsm-ICE-`. A live `chromium-axi` pm2 process was inspected directly (its open file descriptors) to confirm its `/tmp/org.chromium.Chromium.*` directories do not need a hardcoded exception: its actual open reference is to an already-unlinked file that never appears as a sweep candidate, so the generic age-plus-open-handle rule below already covers it.
+2. **Live task tmp root.** Any live task's `/tmp/fm-<id>/` root (`bin/fm-spawn.sh`'s `TASK_TMP`), checked against every `state/*.meta` across every firstmate home on this machine, not just the primary.
+3. **Live task harness scratch.** Any live task's harness scratch directory, same liveness source. The Claude Code sanitizer (every non-alphanumeric byte becomes `-`, applied to the worktree's absolute path) was verified empirically: a live session's own recorded scratch path was compared directly against its `state/*.meta` `worktree=` value run through the same transform, and cross-checked against every other live meta record on the machine.
+4. **Symlink escape.** Nothing outside `/tmp` is ever touched: a candidate that is itself a symlink resolving outside `/tmp`, or whose path resolves outside `/tmp` through any component, is skipped. `find`/`rm` never follow a symlink to descend into something outside the tree they were pointed at in the first place.
+5. **Foreign mountpoint.** A candidate that is itself a distinct filesystem mount point under `/tmp` is skipped, defense in depth alongside `find -xdev` (no submount existed under `/tmp` on this machine at the time of writing, verified via `mount`).
+6. **Age.** A candidate's newest mtime anywhere in its tree (not just the top-level directory's own mtime, since a directory's mtime does not advance when a file deep inside is rewritten in place) must be at least `FM_TMP_SWEEP_AGE_HOURS` (default 48) old.
+7. **Open file handle.** `lsof +D <path>` must show no match anywhere in the tree. `lsof`'s own exit status was found unreliable on this host: it can exit nonzero on a clean match because of unrelated stderr warnings about unstatable tracefs/overlay mounts belonging to OTHER processes, so the sweep counts output lines instead of trusting the exit code (more than the header line means a match). A `timeout`-bounded call that itself times out fails safe (treated as in use). No `lsof` on `PATH` fails safe for the whole run: every candidate is treated as possibly in use and nothing is removed.
+
+Only a candidate that survives all seven checks is removed, and only when run with `--apply`; the default (no flags) is always a dry run that reports what would happen and why, without changing anything.
+Every action, removed, would-remove, or skipped, along with its reason, is both printed and appended to `state/tmp-sweep.log` (path overridable via `FM_TMP_SWEEP_LOG`, primarily for testing), one tab-separated line per action, trimmed to the most recent 5000 lines.
+
+The liveness check (task tmp roots and harness scratch directories) is implemented exactly once, in `bin/fm-tmp-lib.sh`, and shared by this sweep and by `bin/fm-teardown.sh`, so the two paths can never drift into disagreeing about what counts as live.
+
+### Task teardown: harness scratch cleanup
+
+`bin/fm-teardown.sh` already removed a task's own `/tmp/fm-<id>/` root (`TASK_TMP`); it now also removes the harness's own scratch directory for that task, via the same `bin/fm-tmp-lib.sh` liveness/path implementation the periodic sweep uses (`fm_tmp_harness_scratch_dir`), so the common case, a task ending normally, does not have to wait for the next sweep.
+Only Claude Code's scratch convention has been empirically verified; every other harness (`codex`, `opencode`, `pi`, `grok`) is a hard no-op that reports why nothing was removed rather than guessing a path, and gains real cleanup only after its own convention is confirmed the same way Claude Code's was.
+Removal runs before the task's worktree is returned to the pool (`teardown_treehouse_return`, or the orca equivalent `fm_backend_remove_worktree`), never after: a treehouse pool slot can be leased by a brand-new task the moment it is returned, and that new task would sanitize to the same scratch path, so cleanup must land first or a race could delete (or worse, interleave with) a new task's live scratch. For a secondmate teardown, the same removal runs before its home is deleted, keyed on the secondmate's own home path (its `worktree=` equivalent).
+
+### Scheduling
+
+Installed via `bin/fm-tmp-sweep.sh --install`, which delegates to `bin/fm-tmp-sweep-install.sh`: a user-level (`systemctl --user`) systemd timer running `fm-tmp-sweep.sh --apply` once daily with a randomized delay, chosen over the watcher heartbeat (the watcher is per-firstmate-home and task-scoped, while `/tmp` is a whole-machine resource swept once regardless of how many homes exist) and over a system-wide cron/timer (no root required, self-contained to the invoking user, consistent with everything else firstmate installs).
+Install also enables `loginctl enable-linger` for the current user when not already on: without it, a user systemd instance, and therefore this timer, only runs while a login session is open, so a headless reboot with nobody logged in would silently stop the sweep.
+`--install` is machine-scoped: run it once from the primary checkout, never from a secondmate home or a task worktree, since a second install would just duplicate the same sweep against the same `/tmp`.
+`--uninstall` reverses the timer/service but leaves lingering as-is (reported, with the manual `loginctl disable-linger` to undo it).
+
+### Config and state
+
+| Path | Kind | Notes |
+| --- | --- | --- |
+| `state/tmp-sweep.log` | generated | Append-only removal/skip log, tab-separated `<timestamp> <action> <path> <reason>`, capped at 5000 lines. Not inherited/relevant to secondmate homes in the sense of needing a separate sweep: `/tmp` is one whole-machine resource, so only the primary checkout should run `--install`. |
+| `~/.config/systemd/user/fm-tmp-sweep.{service,timer}` | generated | The installed user timer units; outside the repo. |
+
+## /tmp usage watch (config/tmp-alert-threshold)
+
+The threshold twin of [Critical service watch](#critical-service-watch-config-critical-services), same shape: `config/tmp-alert-threshold` (local, gitignored) holds a single integer 0-100, the `/tmp` usage percent (via `df -P /tmp`) at or above which firstmate warns.
+At every session start, `bin/fm-bootstrap.sh`'s `tmp_alert_check` prints `TMP_USAGE_HIGH: /tmp is <pct>% full (threshold <pct>%)` when crossed; `bin/fm-watch.sh`'s `tmp_alert_scan` is the periodic twin for a breach that happens between sessions, enqueuing a check wake the first heartbeat it crosses and staying quiet on every heartbeat after that until usage drops back under threshold (a single boolean marker at `state/.tmp-alert-surfaced`, not a content-dedup marker like the autodeploy watch, since there is only ever one thing being watched).
+An absent or empty file, or a threshold line that fails to parse as an integer 0-100, is a no-op.
+A host without `df` on `PATH` but a configured threshold prints a one-time `TMP_USAGE_INERT` diagnostic instead of silently never alerting.
+The threshold parse and the `df` read are implemented exactly once, in `bin/fm-tmp-alert-lib.sh`, shared by both the bootstrap check and the watcher sweep.
+The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same `/tmp`.
+See [`examples/tmp-alert-threshold`](examples/tmp-alert-threshold) for a copyable config.
+
 ## Upstream drift watch (upstream remote)
 
 For a firstmate maintainer's own working copy, post remote-swap `origin` is the captain's fork and `upstream` is the read-only parent template (`kunchenguid/firstmate`); see [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the inverted layout.

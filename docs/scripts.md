@@ -81,6 +81,10 @@ The shared no-mistakes gate refusal used by `fm-spawn.sh`, `fm-send.sh`, and `fm
 | `fm-pr-merge.sh`         | Record PR metadata, then merge a task's canonical full GitHub URL                    |
 | `fm-promote.sh`          | Promote a scout task in place to a protected ship task                               |
 | `fm-teardown.sh`         | Fail-closed teardown: return landed ship worktrees, require completed scout deliverables, retire secondmate homes |
+| `fm-tmp-lib.sh`          | Shared "which sessions are live" and harness-scratch-path implementation used by the `/tmp` sweep and by teardown |
+| `fm-tmp-sweep.sh`        | Periodic `/tmp` cleanup: dry-run by default, removes only stale non-live entries (docs/configuration.md "/tmp sweep and cleanup") |
+| `fm-tmp-sweep-install.sh` | Install/uninstall the user-level systemd timer that runs `fm-tmp-sweep.sh --apply` daily                          |
+| `fm-tmp-alert-lib.sh`    | Shared `/tmp` usage-threshold parse and `df` read used by bootstrap's and the watcher's `/tmp` usage checks         |
 | `fm-nas-deploy-sync.sh`  | Best-effort fast-forward sync and pm2 restart of a project's live NAS checkout after a landed ship-task teardown |
 | `fm-compose-deploy-sync.sh` | Best-effort mount-gated fast-forward sync, migrate, and Docker Compose (optionally systemd-wrapped) redeploy of a project's live NAS checkout; standalone, not teardown-wired |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |

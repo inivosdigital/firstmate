@@ -1,0 +1,16 @@
+# config/tmp-alert-threshold - the /tmp usage percent at or above which
+# firstmate warns, at every session-start bootstrap (bin/fm-bootstrap.sh's
+# tmp_alert_check) and on the watcher's periodic sweep between sessions
+# (bin/fm-watch.sh's tmp_alert_scan). Copy this into a local, gitignored
+# config/tmp-alert-threshold and replace the value below with your own.
+#
+# A single integer 0-100, read from the first non-empty, non-comment line;
+# blank lines and full-line "#" comments are ignored. Usage is read via
+# `df -P /tmp`. An ABSENT or empty config/tmp-alert-threshold is a no-op, and
+# a threshold line that fails to parse as an integer 0-100 is treated the
+# same way. A host without `df` on PATH but a configured threshold prints a
+# one-time TMP_USAGE_INERT diagnostic instead of silently never alerting.
+#
+# The value below is an illustrative placeholder - pick a threshold that
+# leaves enough headroom for this machine's own /tmp usage pattern.
+80

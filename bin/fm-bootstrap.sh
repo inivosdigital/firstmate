@@ -125,6 +125,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-autodeploy-lib.sh disable=SC1091
 . "$SCRIPT_DIR/fm-autodeploy-lib.sh"
+# shellcheck source=bin/fm-tmp-alert-lib.sh disable=SC1091
+. "$SCRIPT_DIR/fm-tmp-alert-lib.sh"
 
 fleet_sync_origin_backed_project_count() {
   local count proj
@@ -925,6 +927,23 @@ autodeploy_logs_check() {
   done < "$file"
 }
 
+# Detect /tmp usage above config/tmp-alert-threshold (docs/configuration.md
+# "/tmp usage watch"). Read-only: one df read, no state writes. bin/fm-watch.sh's
+# tmp_alert_scan is the periodic twin, for whenever no watcher is armed to catch
+# a breach between sessions. An absent or empty config file is a no-op, matching
+# critical_services_check/autodeploy_logs_check above.
+tmp_alert_check() {
+  local threshold pct
+  threshold=$(fm_tmp_alert_threshold "$CONFIG/tmp-alert-threshold") || return 0
+  if ! fm_tmp_alert_df_available; then
+    echo "TMP_USAGE_INERT: config/tmp-alert-threshold is set but 'df' is not on PATH; /tmp usage checks cannot run"
+    return 0
+  fi
+  pct=$(fm_tmp_alert_usage_pct) || return 0
+  [ "$pct" -ge "$threshold" ] || return 0
+  echo "TMP_USAGE_HIGH: /tmp is ${pct}% full (threshold ${threshold}%)"
+}
+
 if [ "${1:-}" = "install" ]; then
   shift
   [ $# -gt 0 ] || { echo "usage: fm-bootstrap.sh install <tool>..." >&2; exit 1; }
@@ -997,6 +1016,7 @@ if [ "${FM_BOOTSTRAP_VERBOSE_FACTS:-0}" = 1 ] \
 fi
 critical_services_check
 autodeploy_logs_check
+tmp_alert_check
 upstream_drift_report
 if [ "${FM_BOOTSTRAP_DETECT_ONLY:-0}" != 1 ]; then
   secondmate_sync

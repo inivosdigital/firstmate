@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, AUTODEPLOY_INERT, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, AUTODEPLOY_INERT, TMP_USAGE_HIGH, TMP_USAGE_INERT, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -58,6 +58,11 @@ When any diagnostic needs captain attention, report the plain consequence and re
   An absent or empty config file, a missing or transiently unreadable log (a NAS hiccup), or a healthy last line all print nothing.
 - `AUTODEPLOY_INERT: config/autodeploy-logs is set but no timeout mechanism (timeout, gtimeout, or perl) is on PATH; autodeploy-alert checks cannot run` - the host has none of the three mechanisms `fm-autodeploy-lib.sh`'s `fm_autodeploy_read_last_line` needs to bound a log read, so every autodeploy check silently no-ops on both the bootstrap check and the watcher's periodic sweep.
   Tell the captain plainly that autodeploy alerting is disabled on this host until `timeout` (coreutils), `gtimeout` (macOS via Homebrew's coreutils), or `perl` is installed; this is a one-time-per-session capability gap, not a deploy failure.
+- `TMP_USAGE_HIGH: /tmp is <pct>% full (threshold <pct>%)` - `/tmp` usage crossed the threshold in the optional local `config/tmp-alert-threshold` file (`docs/configuration.md` "/tmp usage watch"; `bin/fm-watch.sh`'s `tmp_alert_scan` owns the periodic sweep that catches a breach while no session was open, `bin/fm-bootstrap.sh`'s `tmp_alert_check` is its session-start counterpart).
+  Tell the captain plainly that `/tmp` is running low on room; firstmate does not remove anything itself in response - a full `--apply` run of `bin/fm-tmp-sweep.sh` is the deliberate remediation, not an automatic bootstrap side effect.
+  An absent or empty config file, no `df` on PATH, or usage under threshold all print nothing.
+- `TMP_USAGE_INERT: config/tmp-alert-threshold is set but 'df' is not on PATH; /tmp usage checks cannot run` - the host is missing `df`, so the usage check silently no-ops on both the bootstrap check and the watcher's periodic sweep.
+  Tell the captain plainly that `/tmp` usage alerting is disabled on this host until `df` (coreutils) is installed; this is a one-time-per-session capability gap, not a usage breach.
 - `UPSTREAM_DRIFT: local main is <ahead> ahead / <behind> behind upstream/main, last reconciled <days>d ago (<date>)` - the always-on FYI variant: firstmate's OWN repo tracking how far it has drifted from its read-only upstream template (`kunchenguid/firstmate`, the `upstream` remote after the remote swap).
   It prints every session; record it silently like any capability fact and take no action while the wording stays FYI.
   It only reports - the network fetch that refreshes the ref runs in the locked fleet-sync sweep, and reconciling upstream is never a bootstrap side effect.
