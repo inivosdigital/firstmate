@@ -374,6 +374,54 @@ test_crew_absorb_class_unpaused_wedge_still_surfaces() {
   pass "crew_absorb_class: an open gate with no declared paused: line keeps ordinary working classification, unaffected by the gate override"
 }
 
+# Regression (2026-07-26 live incident: beamanalyzer-steel-shear-ltb PR 46,
+# beamanalyzer-capacity-finder PR 47): a task can finish its no-mistakes run
+# (fm-crew-state.sh reports `done`) and then deliberately idle afterward - the
+# independent review a ship task awaits before merge (AGENTS.md section 7,
+# bin/fm-ultracode-guard.sh). Before this fix, crew_absorb_class's working/paused
+# checks only look at state=working and state=paused; a `done` state fell
+# straight through to `none` regardless of the task's own declared paused: line,
+# so the watcher's pause_state_class (bin/fm-watch.sh) never got a `paused`
+# verdict to latch its per-hash guard on and instead re-surfaced the identical
+# stale hash on every single poll, forever.
+test_crew_absorb_class_honors_declared_pause_after_done() {
+  local dir fakebin state
+  dir=$(make_case absorb-done-pause); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  printf 'paused: awaiting independent review before merge\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "a finished (done) task's own declared pause was not honored (fell through to none)"
+  crew_is_paused task-a || fail "crew_is_paused did not recognize a done task's declared pause"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a done task's own declared pause is honored instead of falling through to none"
+}
+
+# Disconfirming check for the fix above: a done task with NO declared paused:
+# line - the ordinary ready-to-report case - must still classify as none and
+# surface promptly, exactly as before. The done override only fires behind
+# status_is_paused, so a plain done:/failed:/etc. last line is untouched.
+test_crew_absorb_class_done_without_pause_still_surfaces() {
+  local dir fakebin state
+  dir=$(make_case absorb-done-no-pause); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  printf 'done: ready in branch fm/x\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a done task with no declared pause was wrongly classed absorbable"
+  ! crew_is_paused task-a || fail "a done task with no declared pause was wrongly classed paused"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a done task with no declared pause keeps ordinary none classification, unaffected by the done-pause override"
+}
+
 # Behavioral regression, same live incident: drives the real fm-watch.sh subprocess
 # through several poll cycles (FM_POLL=1) with an unchanging pane, an orphaned
 # working/run-step verdict, a declared pause, and a fake tmux reporting the
@@ -433,6 +481,53 @@ SH
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "an exited crewmate's declared pause latches .paused-<key> behind an orphaned run-step and stays absorbed across repeated polls instead of re-nagging every cycle"
+}
+
+# Regression (2026-07-26 live incident: beamanalyzer-steel-shear-ltb PR 46,
+# beamanalyzer-capacity-finder PR 47): a task whose no-mistakes run has already
+# reached `done` (fm-crew-state.sh reports it, no active run-step at all) but
+# whose own last status line declares a `paused:` external wait - the
+# independent review firstmate requires before merge. Primes .stale-<key>
+# already equal to the pane hash, so the very first real poll enters the
+# per-hash guard's non-first-sight branch (bin/fm-watch.sh's Layer-1 stale
+# loop) directly - the exact branch the incident report identifies. Before the
+# fix, crew_absorb_class returned `none` for a done state regardless of the
+# declared pause, so pause_state_class never returned `paused`, and the `*)`
+# arm surfaced this stale hash on literally every poll, forever, exiting the
+# watcher each time. Watch this fail against the pre-fix code: the process
+# should die almost immediately with a "stale: ..." wake instead of staying
+# alive across several poll cycles.
+test_nonterminal_stale_paused_after_done_no_wedge_storm() {
+  local dir state fakebin out window key pane_hash sig pid statusf
+  dir=$(make_case nonterminal-stale-paused-after-done); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-done-paused"
+  printf 'idle, awaiting independent review' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/done-paused.meta"
+  statusf="$state/done-paused.status"
+  printf 'paused: awaiting independent review before merge\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-done-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, awaiting independent review")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (awaiting independent review)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a done task's declared pause re-surfaced instead of staying absorbed across repeated polls (the wedge-storm regression): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a done task's declared pause printed a wake reason instead of staying absorbed"
+  [ ! -s "$state/.wake-queue" ] || fail "a done task's declared pause enqueued a wake instead of staying absorbed"
+  [ -e "$state/.paused-$key" ] || fail "the .paused-<key> marker did not latch for a done task's declared pause"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a done task's declared pause must not start the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a done task's own declared pause latches .paused-<key> and stays absorbed across repeated polls instead of re-nagging every one"
 }
 
 # Regression: FM_CREW_STATE_NM_TIMEOUT=0 previously slipped past its sanitizer
@@ -1632,7 +1727,10 @@ test_crew_absorb_class_classifier
 test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step
 test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive
 test_crew_absorb_class_unpaused_wedge_still_surfaces
+test_crew_absorb_class_honors_declared_pause_after_done
+test_crew_absorb_class_done_without_pause_still_surfaces
 test_nonterminal_stale_paused_orphaned_run_step_latches_marker
+test_nonterminal_stale_paused_after_done_no_wedge_storm
 test_absorb_zero_env_values_sanitized_to_default
 test_absorb_zero_padded_env_values_sanitized_to_default
 test_signal_crew_provably_working_classifier

@@ -393,6 +393,21 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 # earlier is unaffected: only a still-open gate or a confirmed-dead crewmate
 # overrides run-step precedence, never a live, ungated, merely-stale pause.
 #
+# Finished-but-declared-pause override: a task can reach a terminal `done`
+# verdict (its no-mistakes run passed/checks-passed) and still be deliberately
+# idling afterward - most commonly the independent review a ship task awaits
+# before merge (AGENTS.md section 7, bin/fm-ultracode-guard.sh). Unlike the two
+# run-step overrides above, this needs no gate/liveness check: a `done` crew
+# state already means nothing is running, so a declared pause on top of it is
+# never contradicted by an active pipeline the way a stray pause under
+# `working` might be. Without this, a done task's own paused: line is invisible
+# here and falls straight to `none`, so the watcher's pause_state_class
+# (bin/fm-watch.sh) never latches a `paused` verdict and its non-paused
+# fallback re-surfaces the identical stale hash on every single poll forever. A
+# done task with NO declared pause is unaffected: status_is_paused is false for
+# a plain done:/failed:/etc. last line, so it still falls through to `none` and
+# surfaces immediately, exactly as before.
+#
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -428,6 +443,13 @@ crew_absorb_class() {  # <id>
         ;;
       pane) printf 'working'; return ;;
     esac
+  fi
+  if [ "$state" = "done" ]; then
+    state_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+    if [ -n "$state_dir" ]; then
+      last=$(last_status_line "$state_dir/$id.status")
+      status_is_paused "$last" && { printf 'paused'; return; }
+    fi
   fi
   printf 'none'
 }
