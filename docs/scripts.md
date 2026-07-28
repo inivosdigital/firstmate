@@ -11,6 +11,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-sessionstart-nudge.sh` | Print the native session-start hook nudge when the primary has not already run the digest |
 | `fm-operational-input.sh` | Construct and parse the canonical cross-language operational-input protocol |
 | `fm-bootstrap.sh`        | Detect toolchain and fleet problems, run the locked session-start sweeps, and install approved tools |
+| `fm-herdr-session-cleanup.sh` | Retire stale restored-shell Herdr presentation children at locked session start |
 | `fm-fleet-sync.sh`       | Refresh project clones with safe fast-forwards, self-heals, `STUCK:` reports, branch pruning, and bounded recovery from an orphaned `.git/packed-refs.lock` |
 | `fm-fleet-snapshot.sh`   | Print the read-only structured fleet snapshot JSON (schema `fm-fleet-snapshot.v1`)   |
 | `fm-fleet-view.sh`       | Render the fleet snapshot as a human Markdown view                                   |
@@ -18,6 +19,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and secondmate homes from origin          |
 | `fm-lint.sh`             | Single owner of firstmate's shell-lint definition (file set, config, pinned ShellCheck version) that CI and the no-mistakes gate both run |
 | `fm-install-shellcheck.sh` | Install CI's pinned, verified ShellCheck build into a destination directory        |
+| `fm-doc-audience-check.sh` | Validate the tracked documentation audience inventory, README setup routing, local links, and owner pointers |
 | `fm-backlog-handoff.sh`  | Validate and delegate queued backlog-item moves into a secondmate home               |
 | `fm-decision-hold.sh`    | Create, verify, complete, and resolve durable captain-held decisions                 |
 | `fm-brief.sh`            | Scaffold ship, scout, secondmate-charter, Herdr-lab, and Light-verify briefs         |
@@ -53,6 +55,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `backends/tmux.sh`       | Verified tmux session-provider adapter                                               |
 | `backends/herdr.sh`      | Experimental herdr session-provider adapter                                          |
 | `backends/herdr-eventwait.py` | Raw AF_UNIX subscriber for herdr's native `pane.agent_status_changed` stream (herdr push-escalation wire transport) |
+| `backends/herdr-workspace-move.py` | Raw AF_UNIX wire transport for one verified Herdr `workspace.move` presentation-ordering request |
 | `backends/zellij.sh`     | Experimental zellij session-provider adapter                                         |
 | `backends/orca.sh`       | Experimental Orca backend adapter owning both worktree and terminal                  |
 | `backends/cmux.sh`       | Experimental cmux session-provider adapter                                           |
@@ -83,6 +86,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-wake-lib.sh`         | Shared durable wake queue, portable locks, and watcher identity/health helpers       |
 | `fm-classify-lib.sh`     | Shared captain-relevant and declared-external-wait wake classification vocabulary    |
 | `fm-transition-lib.sh`   | Shared, backend-neutral agent-state transition shape and push-escalation supervision policy |
+| `fm-push-transition-lib.sh` | Narrow watcher-only owner of push-transition escalation, sourced instead of the whole watcher |
 | `fm-send.sh`             | Send one verified literal line or supported key through the target's recorded backend |
 | `fm-tmux-lib.sh`         | Shared tmux pane primitives for busy detection, composer capture, and verified submit |
 | `fm-peek.sh`             | Print a bounded tail of a crewmate endpoint                                          |
@@ -99,6 +103,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-tmp-sweep.sh`        | Periodic `/tmp` cleanup: dry-run by default, removes only stale non-live entries (docs/configuration.md "/tmp sweep and cleanup") |
 | `fm-tmp-sweep-install.sh` | Install/uninstall the user-level systemd timer that runs `fm-tmp-sweep.sh --apply` daily                          |
 | `fm-tmp-alert-lib.sh`    | Shared `/tmp` usage-threshold parse and `df` read used by bootstrap's and the watcher's `/tmp` usage checks         |
+| `fm-autodeploy-lib.sh`   | Shared autodeploy-log failure-line predicate used by bootstrap's and the watcher's periodic autodeploy checks |
 | `fm-nas-deploy-sync.sh`  | Best-effort fast-forward sync and pm2 restart of a project's live NAS checkout after a landed ship-task teardown |
 | `fm-compose-deploy-sync.sh` | Best-effort mount-gated fast-forward sync, migrate, and Docker Compose (optionally systemd-wrapped) redeploy of a project's live NAS checkout; standalone, not teardown-wired |
 | `fm-harness.sh`          | Detect the running harness and resolve crew or secondmate harness, model, and effort |
