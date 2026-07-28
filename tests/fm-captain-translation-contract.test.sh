@@ -42,7 +42,7 @@ test_section_9_owns_positive_translation_contract() {
 test_scout_remains_allowed_house_vocabulary() {
   local contract
   contract=$(section_9)
-  assert_contains "$contract" "Scout and second mate are accepted Firstmate nautical house vocabulary and do not need translation" \
+  assert_contains "$contract" "Scout and secondmate are accepted Firstmate nautical house vocabulary and do not need translation" \
     "section 9 does not preserve scout as allowed Firstmate vocabulary"
   assert_not_contains "$contract" "scout -> investigation" \
     "section 9 must not map scout to investigation"
