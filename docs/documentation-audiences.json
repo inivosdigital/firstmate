@@ -172,6 +172,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/verify-trivial/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": "AGENTS.md",
       "audience": "agent-runtime"
     },
@@ -228,7 +232,19 @@
       "audience": "maintainer-architecture"
     },
     {
+      "path": "docs/examples/autodeploy-logs",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/crew-dispatch.json",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/critical-services",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/tmp-alert-threshold",
       "audience": "operator-example"
     },
     {

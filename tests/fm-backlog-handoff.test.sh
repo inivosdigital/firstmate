@@ -12,7 +12,7 @@ set -u
 # The move is delegated to `tasks-axi mv`, so this suite exercises the real
 # binary. Skip cleanly when it is absent or too old for atomic multi-ID moves
 # (matching tests/fm-secondmate-lifecycle-e2e.test.sh's handoff phase).
-# shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-tasks-axi-lib.sh"
 fm_tasks_axi_compatible || { echo "skip: tasks-axi not found or too old (required by the delegated handoff path)"; exit 0; }
 

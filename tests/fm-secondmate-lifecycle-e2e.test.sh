@@ -162,7 +162,7 @@ phase_handoff() {
   # The move is delegated to `tasks-axi mv`; skip cleanly when it is absent or
   # too old for atomic multi-ID moves (the downstream recovery and teardown
   # phases do not depend on this phase).
-  # shellcheck source=bin/fm-tasks-axi-lib.sh disable=SC1091
+  # shellcheck source=/dev/null
   . "$ROOT/bin/fm-tasks-axi-lib.sh"
   if ! fm_tasks_axi_compatible; then
     echo "skip: tasks-axi not found or too old (backlog handoff delegates to it)"

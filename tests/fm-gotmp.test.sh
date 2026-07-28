@@ -20,7 +20,7 @@ export FM_GATE_REFUSE_BYPASS=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
-# shellcheck source=bin/fm-tmp-lib.sh
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-tmp-lib.sh"
 
 fail() {

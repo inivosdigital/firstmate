@@ -322,14 +322,17 @@ test_crew_absorb_class_honors_declared_pause_over_orphaned_run_step() {
   printf 'paused: awaiting the deploy window\n' > "$state/task-a.status"
   fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'dead'; }
   [ "$(crew_absorb_class task-a)" = paused ] \
     || fail "an exited crewmate's orphaned run-step working verdict was not overridden by its own declared pause"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'alive'; }
   [ "$(crew_absorb_class task-a)" = working ] \
     || fail "a live crewmate's run-step was wrongly overridden by a stray paused: line"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'unknown'; }
   [ "$(crew_absorb_class task-a)" = working ] \
     || fail "an unconfirmed (unknown) liveness read wrongly licensed the paused override"
@@ -365,11 +368,13 @@ test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive() {
   } > "$state/task-a.status"
   fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'alive'; }
   [ "$(crew_absorb_class task-a)" = paused ] \
     || fail "an alive crewmate genuinely parked at an open captain-decision gate was not classed paused"
   crew_is_paused task-a || fail "crew_is_paused did not recognize the open-gate pause verdict"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'unknown'; }
   [ "$(crew_absorb_class task-a)" = paused ] \
     || fail "unknown liveness must not block the open-gate pause override"
@@ -393,6 +398,7 @@ test_crew_absorb_class_unpaused_wedge_still_surfaces() {
   printf 'needs-decision: run parked at the document gate on one ask-user finding\n' > "$state/task-a.status"
   fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
 
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
   fm_backend_agent_alive() { printf 'alive'; }
   [ "$(crew_absorb_class task-a)" = working ] \
     || fail "a task with an open gate but no declared paused: line was wrongly classed paused"
