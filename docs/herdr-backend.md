@@ -254,6 +254,28 @@ Recovery reconciles only the recorded exact id.
 On stop, the daemon receives termination while `state/.afk` still exists so its final flush can run, the recorded terminal is closed, and the AFK flag is removed last.
 A fresh entry clears stale transient escalation caches, while durable queue and task records remain authoritative.
 
+## Incident (2026-07-14): Pi-on-Herdr away escalation stayed non-injectable for 4555 seconds
+
+A guarded reproduction (Herdr 0.7.3, Pi 0.80.7, `bin/fm-herdr-lab.sh`, a live synthetic child pane, the real daemon and wake queue) backdated the oldest-escalation sidecar by 4555 seconds to reproduce the observed interval without a wall-clock wait.
+The alarm recorded `fm away-mode inject WEDGED: 4556s undelivered`, the notifier fired exactly once, the buffer stayed intact, and Pi captured zero injected prompts.
+
+Causal probes against the exact recorded supervisor target ruled out target resolution, busy detection, submit acknowledgement, and shutdown ordering as the cause:
+
+```text
+target_exists=yes
+busy_state=idle
+composer_state=unknown
+```
+
+The plain Pi capture showed a blank content row between two horizontal separators, with real pending text occupying that same middle row under the ANSI capture; native `agent get` stayed idle regardless, so native agent state alone could not distinguish an empty Pi composer from an unsubmitted Pi draft.
+Root cause: `fm_backend_herdr_composer_state`'s structural classifier recognized only bordered composers and bare `❯`/`›` prompt rows, while Pi renders a separator-only composer, so the affirmative-empty pre-injection guard rejected the unrecognized structure and every escalation queued behind it.
+
+**Fix.** The classifier now accepts content between the bottom-most complete pair of Pi separator rows only when Herdr's native identity reports exactly `pi` with status `idle`, `done`, or `blocked`; a working Pi, a pending middle row, a missing or non-Pi identity, an incomplete pair, or an over-tall candidate still reads `pending` or `unknown`, so dead shells and ambiguous panes remain non-injectable.
+Making the Pi composer injectable also exposed a terminal-control hazard: Herdr consumed a leading ASCII control byte, so Pi received escalation text without its away marker until the marker switched to a bare leading U+2063 INVISIBLE SEPARATOR (see "Composer and injection safety" above), which has no normal keyboard keystroke and survived a real post-fix Pi capture byte-exact.
+
+**Evidence and regression coverage.** The guarded post-fix reproduction (`FM_AFK_PI_HERDR_E2E=1 HERDR_LAB_HELPER=bin/fm-herdr-lab.sh tests/fm-afk-pi-herdr-return-e2e.test.sh`) confirmed a pending Pi composer refuses injection and raises one observable fallback, and an idle Pi accepts one marked escalation and clears the wedge with no duplicate alert.
+`tests/fm-backend-herdr.test.sh` pins the exact idle and pending Pi captures plus working, non-Pi, unreadable, and over-tall refusal.
+
 ## Destructive lab safety
 
 Never use ambient `herdr server stop` for Firstmate verification.
