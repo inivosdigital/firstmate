@@ -69,6 +69,7 @@ Each task owns one cmux workspace with one surface.
 The caller-facing label remains `fm-<id>`, while the visible workspace title is `fm-<home-label>-<id>`.
 The home label is `firstmate` or `2ndmate-<id>` plus a stable short hash of the resolved Firstmate root.
 cmux does not enforce title uniqueness, so create, recovery, list, and cleanup paths all validate this scoped title.
+Verified live: two workspaces created with an identical title both succeeded and listed simultaneously with distinct ids, and two surfaces renamed to an identical tab title within one workspace also both succeeded.
 Relocating the Firstmate installation changes the hash and leaves old titles unmatched, consistent with recorded worktree paths also becoming stale.
 
 ```text
@@ -94,6 +95,8 @@ Literal send and Enter are separate calls.
 Enter, Escape, and Ctrl-C are supported.
 The composer verifier locates the last bordered composer row and delegates the content decision to `bin/fm-composer-lib.sh`.
 A bare shell prompt is `unknown`, and a slash-popup placeholder remains `pending`, so only Enter is retried and text is never retyped.
+This structural border-row classification is adapted from herdr's own post-incident classifier (`fm_backend_herdr_composer_state`, [`herdr-backend.md`](herdr-backend.md)) rather than a raw content-diff approach, because it defends against the same class of incident herdr hit on 2026-07-03: a slash-command popup's first Enter can close the popup and fill an argument-hint placeholder into the composer instead of submitting, which a plain diff would misread as submitted.
+`tests/fm-backend-cmux.test.sh`'s `test_send_text_submit_popup_autocomplete_requires_second_enter` pins this exact regression shape.
 cmux exposes no native generic agent busy signal, so supervision uses the shared capture/hash and busy-regex path.
 
 A task workspace's last surface cannot be closed directly.
