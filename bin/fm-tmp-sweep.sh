@@ -36,6 +36,10 @@
 #                            discovery (bin/fm-tmp-lib.sh); defaults to this
 #                            script's own repo root, exactly like every other
 #                            bin/*.sh entrypoint.
+#   FM_TMP_SWEEP_ROOT        the directory swept instead of the real /tmp
+#                            (default /tmp). Exists purely so tests can point a
+#                            real, unmodified run of this script at a fixture
+#                            tree instead of touching the machine's actual /tmp.
 #
 # What never gets touched, no matter how old: entries outside /tmp; anything
 # a symlink under /tmp resolves to outside /tmp; the well-known live-service
@@ -43,10 +47,17 @@
 # and locks, systemd's PrivateTmp namespaces, ssh-agent and tmux socket
 # directories, editor-server sockets); any live task's /tmp/fm-<id> root
 # (bin/fm-spawn.sh's TASK_TMP, across every firstmate home on this machine,
-# not just this one - bin/fm-tmp-lib.sh's fm_tmp_live_tasks); any live task's
-# harness scratch directory (bin/fm-tmp-lib.sh's fm_tmp_harness_scratch_dir,
-# same source); anything modified more recently than the age threshold;
-# anything with an open file handle anywhere in its tree at sweep time.
+# not just this one - bin/fm-tmp-lib.sh's fm_tmp_live_tasks); the harness
+# scratch directory of any live task's worktree, AND of every firstmate home's
+# own top-level session (the primary checkout and each secondmate, neither of
+# which is itself a spawned task - bin/fm-tmp-lib.sh's
+# fm_tmp_harness_scratch_dir, same source); anything modified more recently
+# than the age threshold; anything with an open file handle anywhere in its
+# tree at sweep time. NOT protected by liveness: a Claude Code session this
+# machine is running that firstmate did not itself spawn (a no-mistakes
+# pipeline worktree, an ad-hoc session) - firstmate has no record of those at
+# all, so they rely on the age threshold alone; see docs/configuration.md
+# "/tmp sweep and cleanup" for that residual risk.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -54,7 +65,7 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 # shellcheck source=bin/fm-tmp-lib.sh
 . "$SCRIPT_DIR/fm-tmp-lib.sh"
 
-TMP_ROOT=/tmp
+TMP_ROOT="${FM_TMP_SWEEP_ROOT:-/tmp}"
 AGE_HOURS="${FM_TMP_SWEEP_AGE_HOURS:-48}"
 AGE_SECS=$(( AGE_HOURS * 3600 ))
 LSOF_TIMEOUT="${FM_TMP_SWEEP_LSOF_TIMEOUT:-20}"
@@ -79,7 +90,20 @@ esac
 
 mkdir -p "$(dirname "$LOG_FILE")"
 if [ -f "$LOG_FILE" ] && [ "$(wc -l < "$LOG_FILE" 2>/dev/null || echo 0)" -gt "$LOG_MAX_LINES" ]; then
-  tail -n "$LOG_MAX_LINES" "$LOG_FILE" > "$LOG_FILE.trim" && mv "$LOG_FILE.trim" "$LOG_FILE"
+  # A unique per-invocation temp name, not a fixed "$LOG_FILE.trim": two
+  # overlapping invocations (a manual --apply landing mid-timer, say) both
+  # rotating against the same fixed name raced here, and under set -eu the
+  # loser's failed mv crashed it outright and the winner's mv had already
+  # replaced the log with an empty file. mktemp's suffix makes each
+  # invocation's trim file distinct, so the race is now at worst "last mv
+  # wins, losing only the other invocation's newest few lines" - never a
+  # crash, never a full wipe.
+  log_trim=$(mktemp "${LOG_FILE}.trim.XXXXXX")
+  if tail -n "$LOG_MAX_LINES" "$LOG_FILE" > "$log_trim"; then
+    mv "$log_trim" "$LOG_FILE"
+  else
+    rm -f "$log_trim"
+  fi
 fi
 
 RUN_TS=$(date -Is)

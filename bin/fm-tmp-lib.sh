@@ -39,9 +39,28 @@ fm_tmp_live_homes() {
 # existing convention for this field) rather than pulling in fm-backend.sh's
 # much larger fm_meta_get for a single field that is written exactly once, at
 # spawn, and never appended.
+#
+# Also synthesizes one "<SYNTHETIC_HOME_ID><TAB><home>" entry per home, for
+# the home's OWN top-level session: the primary checkout is never spawned by
+# fm-spawn.sh, and neither is a secondmate's own top-level instance, so
+# neither ever gets a state/*.meta recording its own worktree. Without this,
+# the running session most worth protecting - the one supervising every other
+# live task - would be "live" only by writing to its own scratch inside the
+# age window, which a multi-day away-mode stretch can lapse (docs/
+# configuration.md "/tmp sweep and cleanup"). The id half is a fixed sentinel,
+# not a genuinely empty field: IFS-whitespace splitting (tab counts, same as
+# space/newline) strips a LEADING empty field entirely rather than preserving
+# it, so "<TAB><home>" silently misparses as id="<home>", wt="" downstream -
+# a real bug caught only by testing the actual `read` call, not by reading the
+# code. `.` is the first byte of the sentinel deliberately: fm_task_id_path_safe
+# (bin/fm-pr-lib.sh) rejects any id starting with `.`, so this can never
+# collide with, or falsely protect, a real spawned task's /tmp/fm-<id> root.
+FM_TMP_SYNTHETIC_HOME_ID=".fm-tmp-home"
 fm_tmp_live_tasks() {
   local main_home=$1 home meta id wt
   while IFS= read -r home; do
+    [ -d "$home" ] || continue
+    printf '%s\t%s\n' "$FM_TMP_SYNTHETIC_HOME_ID" "$home"
     [ -d "$home/state" ] || continue
     for meta in "$home/state"/*.meta; do
       [ -f "$meta" ] || continue

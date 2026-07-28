@@ -1064,6 +1064,109 @@ SH
   pass "bootstrap surfaces failed autodeploy logs and stays silent otherwise"
 }
 
+# --- /tmp usage-threshold diagnostic (TMP_USAGE_HIGH/TMP_USAGE_INERT) ---------
+
+# Fake df for the /tmp usage-threshold check. FM_FAKE_DF_PCT controls the
+# reported Capacity column (bare integer, no %); `df -P /tmp` is the only
+# invocation bin/fm-tmp-alert-lib.sh's fm_tmp_alert_usage_pct makes, and it
+# reads column 5 of line 2, matching real `df -P` output shape.
+add_fake_df() {
+  local fakebin=$1
+  cat > "$fakebin/df" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'Filesystem     1024-blocks    Used Available Capacity Mounted on'
+printf 'tmpfs             8130560   975667   7154893      %s%% /tmp\n' "${FM_FAKE_DF_PCT:-0}"
+SH
+  chmod +x "$fakebin/df"
+}
+
+setup_tmp_alert_case() {
+  local case_dir=$1 fakebin
+  mkdir -p "$case_dir/home/config"
+  printf '%s\n' manual > "$case_dir/home/config/backlog-backend"
+  fakebin=$(make_fake_toolchain "$case_dir")
+  add_fake_df "$fakebin"
+  printf '%s\n' "$fakebin"
+}
+
+run_tmp_alert_bootstrap() {
+  local home=$1 fakebin=$2 pct=$3
+  PATH="$fakebin:$BASE_PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 FM_FAKE_DF_PCT="$pct" \
+    "$ROOT/bin/fm-bootstrap.sh"
+}
+
+test_tmp_alert_check() {
+  local case_dir home fakebin out bash_env
+
+  # Usage above the configured threshold surfaces TMP_USAGE_HIGH.
+  case_dir="$TMP_ROOT/tmp-alert-high"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  printf '%s\n' 80 > "$home/config/tmp-alert-threshold"
+  out=$(run_tmp_alert_bootstrap "$home" "$fakebin" 85)
+  [ "$out" = "TMP_USAGE_HIGH: /tmp is 85% full (threshold 80%)" ] \
+    || fail "usage above threshold: got: $out"
+
+  # Usage exactly at the threshold also fires (the check is >=, not >).
+  case_dir="$TMP_ROOT/tmp-alert-exact"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  printf '%s\n' 80 > "$home/config/tmp-alert-threshold"
+  out=$(run_tmp_alert_bootstrap "$home" "$fakebin" 80)
+  [ "$out" = "TMP_USAGE_HIGH: /tmp is 80% full (threshold 80%)" ] \
+    || fail "usage exactly at threshold should fire: got: $out"
+
+  # Usage below the threshold stays silent.
+  case_dir="$TMP_ROOT/tmp-alert-healthy"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  printf '%s\n' 80 > "$home/config/tmp-alert-threshold"
+  out=$(run_tmp_alert_bootstrap "$home" "$fakebin" 50)
+  [ -z "$out" ] || fail "usage below threshold should be silent, got: $out"
+
+  # An absent config file is a no-op even with df present and /tmp nearly full.
+  case_dir="$TMP_ROOT/tmp-alert-absent"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  out=$(run_tmp_alert_bootstrap "$home" "$fakebin" 99)
+  [ -z "$out" ] || fail "absent config should be a no-op, got: $out"
+
+  # A threshold line that fails to parse (non-integer, or out of 0-100) is a no-op.
+  case_dir="$TMP_ROOT/tmp-alert-malformed"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  printf '%s\n' 'not-a-number' > "$home/config/tmp-alert-threshold"
+  out=$(run_tmp_alert_bootstrap "$home" "$fakebin" 99)
+  [ -z "$out" ] || fail "malformed threshold should be a no-op, got: $out"
+
+  # Without df on PATH but a configured threshold, print TMP_USAGE_INERT rather
+  # than silently never alerting. Shadow `command -v df`, mirroring the
+  # no-systemctl and no-timeout-mechanism cases above, so this is deterministic
+  # on any host regardless of whether a real df is on BASE_PATH.
+  case_dir="$TMP_ROOT/tmp-alert-no-df"
+  home="$case_dir/home"
+  fakebin=$(setup_tmp_alert_case "$case_dir")
+  rm -f "$fakebin/df"
+  printf '%s\n' 80 > "$home/config/tmp-alert-threshold"
+  bash_env="$case_dir/no-df.bash"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "${1:-}" = -v ] && [ "${2:-}" = df ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+SH
+  out=$(PATH="$fakebin:$BASE_PATH" BASH_ENV="$bash_env" FM_HOME="$home" FM_ROOT_OVERRIDE="$home" \
+    FM_FAKE_TREEHOUSE_LEASE_HELP=1 \
+    "$ROOT/bin/fm-bootstrap.sh")
+  [ "$out" = "TMP_USAGE_INERT: config/tmp-alert-threshold is set but 'df' is not on PATH; /tmp usage checks cannot run" ] \
+    || fail "no df on PATH should surface TMP_USAGE_INERT: got: $out"
+
+  pass "bootstrap surfaces /tmp usage-threshold breaches and stays silent otherwise"
+}
+
 # --- UPSTREAM_DRIFT diagnostic -------------------------------------------------
 # The always-on drift report reads firstmate's OWN repo (FM_ROOT) and needs a real
 # git repo with a `main` branch, an `upstream` remote, and a refs/remotes/upstream/main
@@ -1337,3 +1440,4 @@ test_crew_dispatch_active_rules_are_verbose_bootstrap_info
 test_crew_dispatch_validation
 test_critical_services_check
 test_autodeploy_logs_check
+test_tmp_alert_check

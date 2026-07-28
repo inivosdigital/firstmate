@@ -1143,6 +1143,12 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   [ -z "$T_ORCA" ] || fm_backend_kill "$BACKEND" "$T" "$(meta_value "$META" zellij_tab_id)" "fm-$ID" 2>/dev/null || true
   # Clear the harness scratch before the worktree itself is removed/returned, so a
   # new task can never lease the same identity while old scratch still sits there.
+  # Tradeoff, accepted deliberately: fm_backend_remove_worktree can still fail after
+  # this runs (set -eu then aborts teardown), leaving the scratch gone for a task
+  # this teardown did not actually finish. No git-tracked work is lost either way -
+  # the unlanded-work gate above already ran - only the crewmate's own session
+  # scratch. The alternative (remove scratch only after a confirmed removal) reopens
+  # the more likely same-identity-reuse race this ordering exists to avoid.
   remove_harness_scratch "$HARNESS" "$WT"
   fm_backend_remove_worktree "$BACKEND" "$ORCA_WORKTREE_ID"
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
@@ -1164,7 +1170,14 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   fi
   # Clear the harness scratch before the pool slot is returned: a new task can
   # lease the same slot (and therefore the same sanitized scratch path) the
-  # moment treehouse return completes, so this must run first.
+  # moment treehouse return completes, so this must run first. Tradeoff,
+  # accepted deliberately: treehouse return can still fail after this runs
+  # (e.g. an index lock not provably stale, see the header comment above),
+  # leaving the scratch gone for a task this teardown did not actually
+  # finish. No git-tracked work is lost either way - the unlanded-work gate
+  # above already ran - only the crewmate's own session scratch. The
+  # alternative (remove scratch only after a confirmed return) reopens the
+  # more likely same-slot-reuse race this ordering exists to avoid.
   remove_harness_scratch "$HARNESS" "$WT"
   teardown_treehouse_return "$WT" "$PROJ" "worktree" "$post_lock_cleanup_check" || {
     echo "error: treehouse return failed for worktree $WT; teardown aborted" >&2

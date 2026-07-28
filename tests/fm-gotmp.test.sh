@@ -20,6 +20,8 @@ export FM_GATE_REFUSE_BYPASS=1
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SPAWN="$ROOT/bin/fm-spawn.sh"
 TEARDOWN="$ROOT/bin/fm-teardown.sh"
+# shellcheck source=bin/fm-tmp-lib.sh
+. "$ROOT/bin/fm-tmp-lib.sh"
 
 fail() {
   printf 'not ok - %s\n' "$1" >&2
@@ -65,6 +67,10 @@ make_fake_root() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-tmp-lib.sh + its own fm-ff-lib.sh dependency: teardown sources it
+  # unconditionally for remove_harness_scratch's live-session lookup.
+  ln -s "$ROOT/bin/fm-tmp-lib.sh" "$fake/bin/fm-tmp-lib.sh"
+  ln -s "$ROOT/bin/fm-ff-lib.sh" "$fake/bin/fm-ff-lib.sh"
   # fm-guard.sh: stub (teardown calls it with `|| true`).
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
@@ -156,6 +162,49 @@ test_teardown_removes_tasktmp_dir() {
   pass "fm-teardown removes the dir pointed to by tasktmp= in meta"
 }
 
+test_remove_harness_scratch_uses_verified_claude_convention() {
+  # Structural + direct-unit hybrid, the same shape test_spawn_contract_and_
+  # mkdir_pattern above uses for fm-spawn.sh: fm-teardown.sh has no main()
+  # guard (its bottom half is unconditional top-level script, not a callable
+  # entry point), so it cannot be sourced for a clean function-only test the
+  # way fm-tmp-lib.sh's own functions are. First assert the real call sites
+  # are actually wired (grep on the literal source line, at all three removal
+  # paths: orca, treehouse-pool, and secondmate retirement). Then pull the
+  # real remove_harness_scratch function body verbatim out of the file and
+  # exercise it directly - not a re-typed copy, the actual code - against a
+  # real directory under /tmp/claude-<uid>/ (remove_harness_scratch has no
+  # FM_TMP_SWEEP_ROOT-style test seam, so this really touches that path,
+  # exactly like production; the id keeps it unique and cleanup runs even on
+  # failure).
+  local call_sites
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source strings
+  call_sites=$(grep -c 'remove_harness_scratch "\$HARNESS" "\$WT"' "$TEARDOWN")
+  [ "$call_sites" -eq 2 ] \
+    || fail "expected 2 remove_harness_scratch \"\$HARNESS\" \"\$WT\" call sites (orca + treehouse-pool), found $call_sites"
+  # shellcheck disable=SC2016  # single quotes are deliberate: literal source string
+  grep -F 'remove_harness_scratch "$HARNESS" "$HOME_PATH"' "$TEARDOWN" >/dev/null \
+    || fail "fm-teardown missing the secondmate-retirement remove_harness_scratch call site"
+
+  local fn_body worktree scratch
+  fn_body=$(sed -n '/^remove_harness_scratch() {/,/^}/p' "$TEARDOWN")
+  [ -n "$fn_body" ] || fail "could not extract remove_harness_scratch's body from fm-teardown.sh"
+  worktree="$TMP_ROOT/rhs-worktree-z7"
+  scratch=$(fm_tmp_harness_scratch_dir claude "$worktree")
+  mkdir -p "$scratch"
+  printf 'session\n' > "$scratch/session.json"
+  # shellcheck disable=SC1090  # dynamically extracted from the real file above, not a literal path
+  eval "$fn_body"
+  if ! remove_harness_scratch claude "$worktree" 2>/dev/null; then
+    rm -rf "$scratch"
+    fail "remove_harness_scratch returned non-zero for a real, verified-harness scratch dir"
+  fi
+  if [ -e "$scratch" ]; then
+    rm -rf "$scratch"
+    fail "remove_harness_scratch did not remove the claude scratch dir it computed ($scratch still exists)"
+  fi
+  pass "remove_harness_scratch is wired at all three removal call sites and actually removes a claude scratch dir"
+}
+
 test_teardown_skips_gracefully_without_tasktmp() {
   # Backward compat: a meta from a pre-fix task has no tasktmp= line. Teardown must
   # not error and must not remove anything.
@@ -172,6 +221,10 @@ test_teardown_skips_gracefully_without_tasktmp() {
   ln -s "$ROOT/bin/fm-gate-refuse-lib.sh" "$fake/bin/fm-gate-refuse-lib.sh"
   # fm-pr-lib.sh: teardown uses its canonical task-ID validator for poll cleanup.
   ln -s "$ROOT/bin/fm-pr-lib.sh" "$fake/bin/fm-pr-lib.sh"
+  # fm-tmp-lib.sh + its own fm-ff-lib.sh dependency: teardown sources it
+  # unconditionally for remove_harness_scratch's live-session lookup.
+  ln -s "$ROOT/bin/fm-tmp-lib.sh" "$fake/bin/fm-tmp-lib.sh"
+  ln -s "$ROOT/bin/fm-ff-lib.sh" "$fake/bin/fm-ff-lib.sh"
   cat > "$fake/bin/fm-guard.sh" <<'SH'
 #!/usr/bin/env bash
 exit 0
@@ -221,5 +274,6 @@ test_teardown_skips_gracefully_when_dir_missing() {
 
 test_spawn_contract_and_mkdir_pattern
 test_teardown_removes_tasktmp_dir
+test_remove_harness_scratch_uses_verified_claude_convention
 test_teardown_skips_gracefully_without_tasktmp
 test_teardown_skips_gracefully_when_dir_missing

@@ -1717,6 +1717,162 @@ test_autodeploy_failure_surfaced_on_heartbeat() {
   pass "a configured autodeploy status log's failure surfaces as a check wake on the watcher's periodic sweep"
 }
 
+# --- Periodic /tmp usage-threshold sweep (tmp_alert_scan) -------------------
+# The always-on twin of bootstrap's tmp_alert_check (tests/fm-bootstrap.test.sh),
+# for a breach that crosses config/tmp-alert-threshold between sessions. Unlike
+# autodeploy_scan there is only one thing watched (/tmp itself), so dedup is a
+# single boolean marker (.tmp-alert-surfaced) rather than a per-log content hash.
+
+# Fake df for tmp_alert_scan. FM_FAKE_DF_PCT controls the reported Capacity
+# column (bare integer, no %); fm_tmp_alert_usage_pct's only invocation is
+# `df -P /tmp`, reading column 5 of line 2, matching real `df -P` output shape.
+add_fake_df() {
+  local fakebin=$1
+  cat > "$fakebin/df" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' 'Filesystem     1024-blocks    Used Available Capacity Mounted on'
+printf 'tmpfs             8130560   975667   7154893      %s%% /tmp\n' "${FM_FAKE_DF_PCT:-0}"
+SH
+  chmod +x "$fakebin/df"
+}
+
+# Run tmp_alert_scan once against <state>/<config> by sourcing fm-watch.sh in a
+# subshell, same hermetic trick as run_autodeploy_scan. Echoes "rc=<exit>".
+run_tmp_alert_scan() {  # <state> <config> <fakebin> <pct>
+  PATH="$3:$PATH" FM_STATE_OVERRIDE="$1" FM_CONFIG_OVERRIDE="$2" FM_FAKE_DF_PCT="$4" \
+    bash -c '. "$1"; tmp_alert_scan; printf "rc=%s\n" "$?"' _ "$WATCH" 2>/dev/null
+}
+
+tmp_alert_marker() {  # <state>
+  printf '%s/.tmp-alert-surfaced' "$1"
+}
+
+test_tmp_alert_absent_config_is_noop() {
+  local dir state config fakebin rc
+  dir=$(make_case tmp-alert-absent); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"   # config dir present, but no tmp-alert-threshold file in it
+  add_fake_df "$fakebin"
+  rc=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 95)
+  [ "$rc" = "rc=1" ] || fail "absent config/tmp-alert-threshold was not a no-op (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "absent threshold config enqueued a wake"
+  pass "an absent config/tmp-alert-threshold is a silent no-op even near-full"
+}
+
+test_tmp_alert_breach_enqueues_check_wake() {
+  local dir state config fakebin rc
+  dir=$(make_case tmp-alert-breach); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  rc=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 85)
+  [ "$rc" = "rc=0" ] || fail "usage over threshold was not actionable (got $rc)"
+  grep "$(printf '\tcheck\t')" "$state/.wake-queue" >/dev/null || fail "no check wake enqueued for the breach"
+  grep -F "tmp-usage" "$state/.wake-queue" >/dev/null || fail "check wake was not keyed tmp-usage"
+  grep -F "/tmp is 85% full (threshold 80%)" "$state/.wake-queue" >/dev/null || fail "check wake did not carry the usage/threshold numbers"
+  [ -e "$(tmp_alert_marker "$state")" ] || fail "breach was not recorded surfaced"
+  pass "usage at or above the configured threshold enqueues a check wake and records it surfaced"
+}
+
+test_tmp_alert_exactly_at_threshold_breaches() {
+  local dir state config fakebin rc
+  dir=$(make_case tmp-alert-exact); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  rc=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 80)
+  [ "$rc" = "rc=0" ] || fail "usage exactly at threshold was not actionable (got $rc)"
+  pass "usage exactly at the configured threshold breaches (>=, not >)"
+}
+
+test_tmp_alert_healthy_is_silent_and_rearms() {
+  local dir state config fakebin marker rc
+  dir=$(make_case tmp-alert-healthy); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  marker=$(tmp_alert_marker "$state")
+  mkdir -p "$state"
+  : > "$marker"   # stale prior alarm
+  rc=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 40)
+  [ "$rc" = "rc=1" ] || fail "usage below threshold was treated as actionable (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "usage below threshold enqueued a wake"
+  [ ! -e "$marker" ] || fail "a healthy reading did not clear the surfaced marker (alarm would never re-arm)"
+  pass "usage below the configured threshold is silent and clears any prior surfaced marker"
+}
+
+test_tmp_alert_persistent_breach_dedupes() {
+  local dir state config fakebin rc1 rc2 count
+  dir=$(make_case tmp-alert-dedupe); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  rc1=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 90)
+  rc2=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 91)   # still over, reading drifts
+  [ "$rc1" = "rc=0" ] || fail "first scan of a new breach was not actionable (got $rc1)"
+  [ "$rc2" = "rc=1" ] || fail "an unchanged persistent breach re-surfaced despite a drifting reading (got $rc2)"
+  count=$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${count:-0}" = "1" ] || fail "persistent breach enqueued ${count:-0} check wakes, expected exactly 1"
+  pass "a persistent breach surfaces once despite each run's drifting usage reading"
+}
+
+test_tmp_alert_recurrence_after_clear_resurfaces() {
+  local dir state config fakebin rc_high rc_ok rc_again count
+  dir=$(make_case tmp-alert-recur); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  rc_high=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 90)
+  rc_ok=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 50)
+  rc_again=$(run_tmp_alert_scan "$state" "$config" "$fakebin" 92)
+  [ "$rc_high" = "rc=0" ] || fail "initial breach not actionable (got $rc_high)"
+  [ "$rc_ok" = "rc=1" ] || fail "healthy recovery not silent (got $rc_ok)"
+  [ "$rc_again" = "rc=0" ] || fail "a breach recurring after a healthy reading did not re-surface (got $rc_again)"
+  count=$(grep -c "$(printf '\tcheck\t')" "$state/.wake-queue" 2>/dev/null || true)
+  [ "${count:-0}" = "2" ] || fail "expected 2 check wakes across breach/clear/breach, got ${count:-0}"
+  pass "a breach recurring after a healthy reading re-surfaces once the alarm re-armed"
+}
+
+test_tmp_alert_no_df_on_path_is_silent() {
+  local dir state config fakebin rc bash_env
+  dir=$(make_case tmp-alert-no-df); state="$dir/state"; config="$dir/config"; fakebin="$dir/fakebin"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  # No add_fake_df: simulate df genuinely absent from PATH via a command()
+  # override (BASH_ENV), the same technique tests/fm-bootstrap.test.sh uses for
+  # its no-df/no-systemctl/no-timeout-mechanism cases, since a real df usually
+  # exists elsewhere on PATH.
+  bash_env="$dir/no-df-env.sh"
+  cat > "$bash_env" <<'SH'
+command() {
+  if [ "$1" = -v ] && [ "$2" = df ]; then return 1; fi
+  builtin command "$@"
+}
+SH
+  rc=$(PATH="$fakebin:$PATH" BASH_ENV="$bash_env" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" \
+    bash -c '. "$1"; tmp_alert_scan; printf "rc=%s\n" "$?"' _ "$WATCH" 2>/dev/null)
+  [ "$rc" = "rc=1" ] || fail "a missing df on PATH was not skipped silently (got $rc)"
+  [ ! -s "$state/.wake-queue" ] || fail "a missing df enqueued a wake"
+  pass "df missing from PATH is skipped silently, not alarmed"
+}
+
+test_tmp_alert_breach_surfaced_on_heartbeat() {
+  local dir state fakebin config out drain_out pid
+  dir=$(make_case tmp-alert-heartbeat); state="$dir/state"; fakebin="$dir/fakebin"
+  config="$dir/config"; out="$dir/watch.out"; drain_out="$dir/drain.out"
+  mkdir -p "$config"
+  printf '80\n' > "$config/tmp-alert-threshold"
+  add_fake_df "$fakebin"
+  PATH="$fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_CONFIG_OVERRIDE="$config" FM_FAKE_DF_PCT=90 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=1 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "watcher did not surface a /tmp usage breach on the periodic sweep"
+  grep -F "check: tmp usage" "$out" >/dev/null || fail "watcher did not exit with a check wake for the /tmp usage breach: $(cat "$out")"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$drain_out" 2>/dev/null || fail "drain after tmp-usage heartbeat failed"
+  grep "$(printf '\tcheck\t')" "$drain_out" >/dev/null || fail "tmp-usage check wake was not queued"
+  grep -F "/tmp is 90% full" "$drain_out" >/dev/null || fail "drained check wake did not carry the usage percentage"
+  pass "a /tmp usage breach surfaces as a check wake on the watcher's periodic sweep"
+}
+
 test_signal_reason_is_actionable_classifier
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
@@ -1770,3 +1926,11 @@ test_autodeploy_unreadable_log_is_silent
 test_autodeploy_timed_out_log_is_silent
 test_autodeploy_comments_blanks_and_whitespace
 test_autodeploy_failure_surfaced_on_heartbeat
+test_tmp_alert_absent_config_is_noop
+test_tmp_alert_breach_enqueues_check_wake
+test_tmp_alert_exactly_at_threshold_breaches
+test_tmp_alert_healthy_is_silent_and_rearms
+test_tmp_alert_persistent_breach_dedupes
+test_tmp_alert_recurrence_after_clear_resurfaces
+test_tmp_alert_no_df_on_path_is_silent
+test_tmp_alert_breach_surfaced_on_heartbeat
