@@ -35,5 +35,8 @@
       "why": "The deliverable's entire value is the quality of the argued judgment call; this is low-volume, high-stakes work, so the cost delta of the top model is bounded and well spent."
     }
   ],
-  "default": { "harness": "codex", "model": "gpt-5.5", "effort": "medium" }
+  "default": [
+    { "harness": "codex", "model": "gpt-5.5", "effort": "medium" },
+    { "harness": "pi", "model": "anthropic/claude-sonnet-5", "effort": "medium" }
+  ]
 }

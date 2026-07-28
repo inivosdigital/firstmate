@@ -12,9 +12,11 @@ PROJECT="$ROOT/.agents/skills/project-management/SKILL.md"
 HARNESS="$ROOT/.agents/skills/harness-adapters/SKILL.md"
 CODING="$ROOT/.agents/skills/firstmate-coding-guidelines/SKILL.md"
 RECOVERY="$ROOT/.agents/skills/stuck-crewmate-recovery/SKILL.md"
+SECONDMATE="$ROOT/.agents/skills/secondmate-provisioning/SKILL.md"
 CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
+BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -101,6 +103,45 @@ test_generic_effort_fallback_respects_precedence() {
   pass "generic effort fallback applies only below captain and standing configuration"
 }
 
+test_script_owned_quota_array_dispatch_contract() {
+  local phrase
+  for phrase in \
+    '`bin/fm-dispatch-select.sh` owns selector mechanics' \
+    '`bin/fm-dispatch-select.sh` owns `quota-balanced` selection determinism and degrades to the first array element whenever quota data is unusable; quota trouble must never block dispatch.' \
+    'When the resolved profile sets `ultracode`, run `bin/fm-ultracode-guard.sh flag <id> <ultracode_role>`' \
+    'flags ultracode `independent-review` via `bin/fm-ultracode-guard.sh flag <id> independent-review`'; do
+    assert_grep "$phrase" "$AGENTS" "script-owned array-dispatch contract lost '$phrase'"
+  done
+  assert_no_grep 'Firstmate alone resolves a matched profile array' "$AGENTS" \
+    "AGENTS.md regained upstream's incompatible agent-owned quota comparison design"
+
+  for phrase in \
+    '| claude | Open the current interactive session' \
+    '| codex | Open the current interactive session' \
+    '| opencode | Run `opencode models [provider]`' \
+    '| pi / pi-signed | Run the selected executable as `<executable> --list-models [search]`' \
+    '| grok | Run `grok models`' \
+    "For an unfamiliar harness or model namespace, establish support and provider identity from that harness's authoritative CLI help, model listing, or current documentation rather than guessing" \
+    'If those sources do not establish the relationship needed for dispatch, fail loudly and report the unresolved candidate.'; do
+    assert_grep "$phrase" "$HARNESS" "model discovery guidance lost '$phrase'"
+  done
+  assert_grep 'not as a permanent namespace or provider mapping' "$HARNESS" \
+    "model discovery guidance permits a fixed provider table"
+
+  assert_grep '`AGENTS.md` section 4 keeps only the dispatch procedure and points here.' "$CONFIG" \
+    "configuration docs do not point to the script-owned selector"
+  assert_grep '`select` is optional and currently supports `quota-balanced`.' "$CONFIG" \
+    "configuration docs lost the quota-balanced select field"
+  assert_grep 'and `bin/fm-dispatch-select.sh` does the same for whatever profile it resolves' "$CONFIG" \
+    "configuration docs lost the script-owned ultracode passthrough validation"
+
+  assert_grep 'quota-axi is required because' "$BOOTSTRAP" \
+    "bootstrap docs lost the quota-axi dependency pointer"
+  assert_grep 'where upstream moved to agent judgment; treat' "$BOOTSTRAP" \
+    "bootstrap docs lost the intentional-divergence note recording the kept script-owned selector"
+  pass "firstmate keeps a script-owned quota-balanced selector with ultracode passthrough validation, an intentional divergence from upstream's agent-owned design"
+}
+
 test_shared_authoring_requirements_are_owned() {
   assert_grep "review every affected supported primary harness and runtime backend" "$CODING" \
     "coding guidance lost the supported compatibility matrix review"
@@ -109,6 +150,46 @@ test_shared_authoring_requirements_are_owned() {
   assert_grep "critical safety, routing, startup, and supervision infrastructure" "$CODING" \
     "coding guidance lost the critical infrastructure scope"
   pass "firstmate-coding-guidelines owns compatibility review and deterministic enforcement"
+}
+
+test_secondmate_registry_contract_stays_concise() {
+  local guidance routing_section schema_line
+  routing_section=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Charter and seed$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
+  guidance=$(awk '
+    /^## Routing table$/ { found = 1 }
+    found && /^## Backlog handoff$/ { exit }
+    found { print }
+  ' "$SECONDMATE")
+  schema_line="- <id> - <one-sentence charter summary> (home: <absolute-home-path>; scope: <natural-language responsibility>; projects: <project-a>, <project-b>; added <date>)"
+  assert_contains "$routing_section" "$schema_line" \
+    "secondmate routing table lost the parser-compatible single-line schema"
+  assert_contains "$routing_section" "Each registry entry stays concise and single-line" \
+    "secondmate routing table no longer requires concise single-line entries"
+  assert_contains "$routing_section" "genuinely domain-specific hard rules" \
+    "secondmate routing table no longer limits extra prose to domain-specific hard rules"
+  assert_contains "$routing_section" "The home-seeded \`data/charter.md\` is the sole owner of boilerplate idle-by-default behavior, the normal delegation lifecycle, and standard escalation contracts" \
+    "secondmate routing table lost the explicit charter ownership pointer"
+  assert_contains "$routing_section" "no extra registry pointer field is needed" \
+    "secondmate routing table no longer explains why the existing home field is the charter pointer"
+  for phrase in \
+    "go idle and wait silently" \
+    "Act only on tasks" \
+    "never spawn a survey" \
+    "run normal firstmate bootstrap" \
+    "escalation back to the main firstmate status file" \
+    "requests-from-main-firstmate contract" \
+    "waits for routed tasks, never self-initiating a survey or audit" \
+    "marked supervisor requests return through status" \
+    "unmarked captain messages stay conversational"; do
+    if printf '%s\n' "$guidance" | grep -F "$phrase" >/dev/null; then
+      fail "secondmate provisioning guidance restated charter boilerplate: $phrase"
+    fi
+  done
+  pass "secondmate registry guidance keeps concise routes and points to the charter"
 }
 
 test_state_startup_and_ordinary_recovery_placement() {
@@ -130,9 +211,9 @@ test_state_startup_and_ordinary_recovery_placement() {
 }
 
 test_compressed_agents_owner_map() {
-  assert_grep '`docs/configuration.md` is the single owner of the operational-home layout' "$AGENTS" \
+  assert_grep '`docs/configuration.md` is the single owner of the top-level operational-home layout' "$AGENTS" \
     "AGENTS.md lost the state-layout owner pointer"
-  assert_grep 'header is the single owner of composed commands, ordering, digest contents' "$AGENTS" \
+  assert_grep 'header is the single owner of composed commands, ordering, and digest contents' "$AGENTS" \
     "AGENTS.md lost the session-start owner pointer"
   assert_grep '`docs/configuration.md` owns dispatch-profile and runtime-backend schemas' "$AGENTS" \
     "AGENTS.md lost the dispatch-schema owner pointer"
@@ -149,6 +230,33 @@ test_compressed_agents_owner_map() {
   assert_grep '`docs/configuration.md` owns activation, generated state, cadence, wire protocol' "$AGENTS" \
     "AGENTS.md lost the X-mode mechanics owner pointer"
   pass "compressed AGENTS.md records the approved one-owner map"
+}
+
+test_intake_reuses_evidence_and_parallelizes_safe_work() {
+  for phrase in \
+    'consult existing reports and established evidence' \
+    'remaining bounded research inside it' \
+    'unresolved uncertainty could materially change whether or what to build' \
+    'relay it without a design-only scout' \
+    'ask one concise implementation question when useful' \
+    'Never both present a likely-enough solution' \
+    'overlap as a risk signal rather than an automatic reason to wait' \
+    'independently implemented and validated' \
+    'selected delivery path can reconcile ordinary rebases or conflicts' \
+    'Serialize only for a true semantic dependency' \
+    'shared mutable external state' \
+    'incompatible concurrent migration' \
+    'same-file editing alone is insufficient' \
+    'genuine blockers remain durable'; do
+    assert_grep "$phrase" "$AGENTS" "intake contract lost '$phrase'"
+  done
+  assert_grep 'dispatch isolated work immediately with no concurrency cap' "$AGENTS" \
+    "intake contract lost unbounded safe parallel dispatch"
+  assert_grep 'captain explicitly requests a separate knowledge or design deliverable' "$AGENTS" \
+    "intake contract lost captain-requested separate scouts"
+  assert_grep 'When implementation is separately authorized, promote the existing scout' "$AGENTS" \
+    "intake contract lost genuine scout promotion"
+  pass "intake reuses evidence, reserves scouts for uncertainty, and parallelizes safe work"
 }
 
 test_compressed_agents_retains_authority_and_supervision_safety() {
@@ -184,7 +292,10 @@ test_new_skill_metadata_and_triggers
 test_diagnostic_owner_covers_causal_procedure
 test_project_management_owner_covers_guarded_operations
 test_generic_effort_fallback_respects_precedence
+test_script_owned_quota_array_dispatch_contract
 test_shared_authoring_requirements_are_owned
+test_secondmate_registry_contract_stays_concise
 test_state_startup_and_ordinary_recovery_placement
 test_compressed_agents_owner_map
+test_intake_reuses_evidence_and_parallelizes_safe_work
 test_compressed_agents_retains_authority_and_supervision_safety
