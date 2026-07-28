@@ -17,6 +17,7 @@ CONFIG="$ROOT/docs/configuration.md"
 AGENTS="$ROOT/AGENTS.md"
 BRIEF="$ROOT/bin/fm-brief.sh"
 BOOTSTRAP="$ROOT/bin/fm-bootstrap.sh"
+ARCH="$ROOT/docs/architecture.md"
 
 test_new_skill_metadata_and_triggers() {
   local skill name count
@@ -139,6 +140,11 @@ test_script_owned_quota_array_dispatch_contract() {
     "bootstrap docs lost the quota-axi dependency pointer"
   assert_grep 'where upstream moved to agent judgment; treat' "$BOOTSTRAP" \
     "bootstrap docs lost the intentional-divergence note recording the kept script-owned selector"
+
+  assert_grep '`bin/fm-dispatch-select.sh` owns `quota-balanced` array selection determinism and degrades to the first array element whenever quota data is unusable.' "$ARCH" \
+    "architecture docs do not point to the script-owned quota-balanced selector"
+  assert_no_grep 'resolves profile arrays itself from current quota output' "$ARCH" \
+    "architecture docs regained upstream's incompatible agent-owned quota-array-resolution design"
   pass "firstmate keeps a script-owned quota-balanced selector with ultracode passthrough validation, an intentional divergence from upstream's agent-owned design"
 }
 

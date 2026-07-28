@@ -2,7 +2,7 @@
 name: bootstrap-diagnostics
 description: >-
   Agent-only handling playbook for session-start bootstrap diagnostics.
-  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, AUTODEPLOY_INERT, TMP_USAGE_HIGH, TMP_USAGE_INERT, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
+  Use whenever the session-start digest's bootstrap section prints an actionable diagnostic line - MISSING, MISSING_MANUAL, BACKEND_INVALID, NEEDS_GH_AUTH, TANGLE, CREW_DISPATCH invalid, FLEET_SYNC, PR_CHECK_MIGRATION, SECONDMATE_SYNC, SECONDMATE_LIVENESS, NUDGE_SECONDMATES, CONFIG_REREAD, FMX, SERVICE_FAILED, AUTODEPLOY_FAILED, AUTODEPLOY_INERT, TMP_USAGE_HIGH, TMP_USAGE_INERT, or UPSTREAM_DRIFT - or when a standalone bin/fm-bootstrap.sh run prints one of those lines.
   A silent bootstrap section, or a BOOTSTRAP_INFO fact, means no skill load.
 user-invocable: false
 metadata:
@@ -48,6 +48,9 @@ When any diagnostic needs captain attention, report the plain consequence and re
   Investigate the reason because that secondmate is not guaranteed live.
 - `NUDGE_SECONDMATES: secondmate <id>: send failed: <reason>` - the secondmate sweep fast-forwarded a running secondmate home and its loaded instruction surface (`AGENTS.md`, `bin/`, or `.agents/skills/`) changed, but the deterministic `fm-send.sh fm-<id>` re-read nudge failed.
   Inspect the reason, keep the pending marker under `state/.secondmate-nudge-pending/` intact, and rerun session start after the endpoint or metadata issue is fixed so bootstrap can retry the exact same marked send.
+- `CONFIG_REREAD: secondmate <id>: send failed: <reason>` - the primary already pushed changed inherited config (`config/*`) into a live secondmate's own home, but could not confirm the secondmate was notified to re-read the exact new bytes this cycle.
+  The reason names the failed step: preparing the secondmate's state directory or per-home inheritance lock, a full source-side retry queue (`state/.fm-inherited-config-reread-retry/<id>/`, capped at 16 pending entries), or a write, publish, or `fm-send.sh fm-<id>` delivery failure inside `fm-config-inherit-lib.sh`.
+  The pushed file is already correct on the secondmate's disk, and a matching pending instruction (staged at the destination under its own `state/`, or retried from the source-side queue here) survives so bootstrap retries the same notification on its next run; investigate only if the same secondmate keeps failing, since until it clears that secondmate may still be acting on the file's prior content.
 - `FMX: X mode on ...` / `FMX: X mode off ...` - bootstrap confirmed or removed the local X-mode poll artifacts (`docs/configuration.md` "X mode (.env)").
   Only when a running watcher needs the cadence transition applied immediately, restart the home-scoped watcher through the emitted harness supervision protocol; bootstrap deliberately never restarts the watcher itself.
 - `SERVICE_FAILED: <unit> - failed since <timestamp>` - a systemd unit named in the optional local `config/critical-services` file is in the failed state (`docs/configuration.md` "Critical service watch"); a pure read-only detection (`systemctl is-failed`, no root), so a read-only session still surfaces it.
