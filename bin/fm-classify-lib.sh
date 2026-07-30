@@ -387,8 +387,13 @@ fm_hard_timeout() {
 # poll loop - and therefore its liveness beacon - can never block on this read
 # past a fixed ceiling, even if some future call site inside fm-crew-state.sh
 # forgets to route a no-mistakes call through its own bound.
-FM_CREW_ABSORB_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_TIMEOUT:-45}" 45)
-FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFTER:-5}" 5)
+# Named so the bounds survive being unset after this library was sourced: every
+# consumer below reads them with these as the fallback, so a caller that clears
+# the override still gets the sanitized default instead of tripping `set -u`.
+FM_CREW_ABSORB_TIMEOUT_DEFAULT=45
+FM_CREW_ABSORB_KILL_AFTER_DEFAULT=5
+FM_CREW_ABSORB_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_TIMEOUT:-$FM_CREW_ABSORB_TIMEOUT_DEFAULT}" "$FM_CREW_ABSORB_TIMEOUT_DEFAULT")
+FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFTER:-$FM_CREW_ABSORB_KILL_AFTER_DEFAULT}" "$FM_CREW_ABSORB_KILL_AFTER_DEFAULT")
 
 # Classify WHY an idle/stale crew MIGHT be safely absorbed instead of surfaced,
 # from bin/fm-crew-state.sh's one authoritative current-state line
@@ -456,7 +461,9 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 crew_absorb_class() {  # <id>
   local id=$1 line state src state_dir last statusf meta backend target verdict
   [ -n "$id" ] || { printf 'none'; return; }
-  line=$(fm_hard_timeout "$FM_CREW_ABSORB_TIMEOUT" "$FM_CREW_ABSORB_KILL_AFTER" "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
+  line=$(fm_hard_timeout "${FM_CREW_ABSORB_TIMEOUT:-$FM_CREW_ABSORB_TIMEOUT_DEFAULT}" \
+         "${FM_CREW_ABSORB_KILL_AFTER:-$FM_CREW_ABSORB_KILL_AFTER_DEFAULT}" \
+         "$FM_CREW_STATE_BIN" "$id" 2>/dev/null) || true
   case "$line" in state:*) ;; *) printf 'none'; return ;; esac
   state=${line#state: }; state=${state%% *}
   if [ "$state" = paused ]; then printf 'paused'; return; fi
@@ -512,6 +519,127 @@ crew_is_provably_working() {  # <id>
 # escalating a possible wedge.
 crew_is_paused() {  # <id>
   [ "$(crew_absorb_class "$1")" = paused ]
+}
+
+# --- run-aware wedge deferral -----------------------------------------------
+#
+# How long an attributed run may show NO structural progress before its stale
+# pane escalates as a possible wedge. This is the wedge threshold for a
+# validating crew, replacing the pane-idleness one (FM_STALE_ESCALATE_SECS,
+# default 240s) that a backgrounded run makes meaningless.
+#
+# Why it is this much larger: a crew that handed off to a no-mistakes run is
+# idle BY DESIGN - it is waiting to be notified - so its pane tells us nothing,
+# and single pipeline steps legitimately run for tens of minutes (measured on
+# this repo's own recorded runs: review 25.8min, lint 33.8min, test 38.9min).
+# A 240s pane timer therefore fires many times inside one healthy step, which is
+# exactly the false alarm this exists to stop. The default clears the longest
+# step observed here with better than 2x headroom.
+#
+# It is a CEILING, not a suppression: a run that has not moved for the whole
+# window still escalates, and the marker below is re-stamped on escalation so it
+# keeps re-escalating once per window rather than falling silent.
+FM_RUN_WEDGE_SECS_DEFAULT=5400
+
+# 0 (defer the wedge alarm) if crew <id> has an attributed validation run whose
+# idle pane is EXPECTED - one that is structurally advancing, or one that has
+# finished successfully and is awaiting merge; 1 (escalate now) otherwise. The
+# ONE owner of this policy: bin/fm-watch.sh's wedge_timer_check and
+# bin/fm-supervise-daemon.sh's housekeeping stale recheck both gate their
+# "possible wedge" escalation on this single call, so the always-on and away-mode
+# supervisors cannot drift apart.
+#
+# What it catches and what it does not, stated plainly:
+#   - A run moving through steps, or landing pipeline fix commits, renews its
+#     token and never escalates. That is the reported false alarm, gone.
+#   - A finished run awaiting merge (done / checks green / PR ready) defers too,
+#     including after its worker exited: that worker is done by design and the
+#     merge poll watches for the landing. It still re-surfaces once per window
+#     rather than every FM_STALE_ESCALATE_SECS, so an unmerged PR cannot rot.
+#   - A run frozen on one step with no new commits for FM_RUN_WEDGE_SECS DOES
+#     escalate. That is the genuinely wedged pipeline, still surfaced.
+#   - A run PARKED at a gate, or failed, never defers: those need firstmate.
+#   - A crew with no attributed run is untouched: this returns 1 immediately and
+#     the caller's existing pane timer applies exactly as before.
+#   - A confidently dead agent escalates immediately while a run is still
+#     supposed to be advancing, so a crashed harness is not hidden behind a long
+#     ceiling merely because a run-step was left running.
+#   - A legitimately unbounded external wait (a ci step monitoring a slow PR)
+#     will eventually escalate once per window. It errs toward one extra alarm
+#     rather than toward silence, which is the direction this must fail in.
+# Every failure mode here - an unreadable token, a timed-out read, a missing
+# state dir - returns 1 and escalates, so nothing new can silence a wedge.
+#
+# NOT a pure read: it runs fm-crew-state.sh under the same hard bound as
+# crew_absorb_class, so it can never hang a supervisor's poll loop. Callers run
+# it only when a wedge is about to fire (once per window per stale task), never
+# per wake.
+crew_run_progress_defers_wedge() {  # <id> [<state-dir>]
+  local id=$1 state_dir=${2:-${STATE:-${FM_STATE_OVERRIDE:-}}}
+  local out token phase marker rec_epoch='' rec_token='' now ceiling meta backend target verdict
+  [ -n "$id" ] || return 1
+  [ -n "$state_dir" ] || return 1
+
+  out=$(fm_hard_timeout "${FM_CREW_ABSORB_TIMEOUT:-$FM_CREW_ABSORB_TIMEOUT_DEFAULT}" \
+        "${FM_CREW_ABSORB_KILL_AFTER:-$FM_CREW_ABSORB_KILL_AFTER_DEFAULT}" \
+        "$FM_CREW_STATE_BIN" --run-progress "$id" 2>/dev/null) || return 1
+  # Fail closed on anything that is not an explicit progress token, including an
+  # older reader that does not know the flag and echoes a state line instead.
+  case "$out" in progress:*) token=${out#progress: } ;; *) return 1 ;; esac
+  token=${token%%$'\n'*}
+  [ -n "$token" ] && [ "$token" != none ] || return 1
+  phase=${token%%/*}
+  token=${token#*/}
+  [ -n "$token" ] && [ "$token" != "$phase" ] || return 1
+
+  # Only two phases make an idle pane expected. Everything else - a run parked at
+  # a gate waiting on firstmate, a failed run, an unreadable verdict - is exactly
+  # what the alarm is for, so it escalates.
+  #   working: the pipeline is advancing behind an idle pane (below).
+  #   done:    a terminal-SUCCESS run awaiting merge. The worker is finished and
+  #            idle by design, and the merge poll is what watches for the landing,
+  #            so re-nagging its pane every FM_STALE_ESCALATE_SECS is pure noise
+  #            for as long as the PR stays open.
+  case "$phase" in working|done) ;; *) return 1 ;; esac
+
+  # A confirmed-dead agent means nothing is driving this run, whatever its
+  # run-step still claims; escalate at the caller's own cadence instead of
+  # deferring. alive/unknown fall through, so an ambiguous read never suppresses.
+  # NOT applied to a finished run: a worker that reported done and exited is in
+  # its expected end state, and treating that as a dead-agent wedge is precisely
+  # the every-few-minutes false alarm this case exists to stop.
+  if [ "$phase" != 'done' ]; then
+    meta="$state_dir/$id.meta"
+    backend=$(fm_backend_of_meta "$meta")
+    target=$(fm_backend_target_of_meta "$meta")
+    if [ -n "$target" ]; then
+      verdict=$(fm_backend_agent_alive "$backend" "$target" 2>/dev/null) || verdict=unknown
+      [ "$verdict" = dead ] && return 1
+    fi
+  fi
+
+  marker="$state_dir/.run-progress-$id"
+  now=$(date +%s)
+  [ -f "$marker" ] && IFS=$'\t' read -r rec_epoch rec_token < "$marker"
+  case "$rec_epoch" in ''|*[!0-9]*) rec_epoch='' ;; esac
+  # First sighting, or the run moved: stamp progress as of NOW and defer.
+  if [ -z "$rec_epoch" ] || [ "$rec_token" != "$token" ]; then
+    printf '%s\t%s\n' "$now" "$token" > "$marker"
+    return 0
+  fi
+  # 0 is a legitimate ceiling (escalate at the caller's own threshold, no
+  # deferral); only an unparseable value falls back to the default.
+  case "${FM_RUN_WEDGE_SECS:-}" in
+    ''|*[!0-9]*) ceiling=$FM_RUN_WEDGE_SECS_DEFAULT ;;
+    *) ceiling=$FM_RUN_WEDGE_SECS ;;
+  esac
+  if [ $(( now - rec_epoch )) -ge "$ceiling" ]; then
+    # Re-stamp so the NEXT escalation is a full window away rather than every
+    # poll from here on - a wedged run must nag once per window, not constantly.
+    printf '%s\t%s\n' "$now" "$token" > "$marker"
+    return 1
+  fi
+  return 0
 }
 
 # 0 (benign/absorb) if EVERY task referenced by a no-verb "signal:" wake is provably

@@ -292,6 +292,9 @@ A second, related collision vector is fixed host ports: prefer not publishing a 
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset):
    firstmate then leaves your idle pane alone and rechecks it on a long cadence instead of
    treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Append \`$PAUSED_VERB: {why}\` whenever you hand off to a long-running background job and sit
+   waiting to be notified: your pane goes idle by design, and without that line firstmate can
+   read the idle pane as a possible wedge.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs to a human (product choices, destructive actions),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will reply with the decision.
@@ -411,6 +414,9 @@ $RULE1
    known external wait you expect to clear on its own (an upstream release, a rate-limit reset,
    a scheduled window): firstmate then leaves your idle pane alone and rechecks it on a long
    cadence instead of treating it as a possible wedge. Use \`blocked:\` when you are stuck and need help.
+   Append \`$PAUSED_VERB: {why}\` whenever you hand off to a long-running background job (a validation
+   run you are waiting on, a long build) and sit waiting to be notified: your pane goes idle by
+   design, and without that line firstmate can read the idle pane as a possible wedge.
 5. If you hit the same obstacle twice, append \`blocked: {why}\` and stop; firstmate will help.
 6. If a decision belongs above the implementation worker (product choices, destructive actions, ask-user findings),
    append \`needs-decision: {summary of options}\` and stop. Firstmate will apply the configured authority and reply with the decision.

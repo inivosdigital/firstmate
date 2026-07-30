@@ -537,6 +537,7 @@ FM_CAPTAIN_RE='done:|needs-decision:|blocked:|failed:|PR ready|checks green|read
 FM_CLASSIFY_PAUSED_VERB=paused     # leading status verb for a declared external wait; excluded from FM_CAPTAIN_RE and distinct from blocked
 FM_STALE_ESCALATE_SECS=240         # idle seconds before a provably-working stale pane escalates; stale panes whose crew is not provably working surface immediately unless they declare the pause verb
 FM_PAUSE_RESURFACE_SECS=3600       # seconds before an idle declared external wait re-surfaces for a recheck in the watcher or away-mode daemon
+FM_RUN_WEDGE_SECS=5400             # seconds an attributed validation run may show no structural progress before its idle pane escalates as a possible wedge, replacing FM_STALE_ESCALATE_SECS for a crew waiting on a background run or on its finished run's pull request to land; 0 disables the deferral
 FM_WEDGE_DEMAND_INSPECT_COUNT=3    # consecutive provably-working stale escalations on the same unchanged pane before demand-deep-inspection is added
 FM_TIER_TRIVIAL_MAX_LINES=30       # fm-tier-guard.sh: changed-line count a trivial (haiku/low) task may reach before escalation fires
 FM_TIER_TRIVIAL_MAX_FILES=2        # fm-tier-guard.sh: changed-file count a trivial (haiku/low) task may reach before escalation fires

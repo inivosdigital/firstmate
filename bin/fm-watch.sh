@@ -273,6 +273,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
     *)
       age=$(( $(date +%s) - since ))
       if [ "$age" -ge "$STALE_ESCALATE_SECS" ]; then
+        # An attributed validation run that is still structurally advancing is
+        # positive evidence of health, and it outranks pane idleness: a crew that
+        # handed off to a backgrounded run is idle by design. Defer the alarm and
+        # restart the pane timer so this is rechecked a window later. The shared
+        # owner (crew_run_progress_defers_wedge, bin/fm-classify-lib.sh) still
+        # escalates a run that has stopped moving, so a wedge is delayed at worst,
+        # never dropped.
+        if crew_run_progress_defers_wedge "$(window_to_task "$win" "$STATE")" "$STATE"; then
+          date +%s > "$since_file"
+          triage_log "absorbed $label (validation run advancing, wedge deferred): $win"
+          return
+        fi
         n=$(( $(cat "$escalation_file" 2>/dev/null || echo 0) + 1 ))
         echo "$n" > "$escalation_file"
         reason="stale: $win (idle ${age}s, possible wedge, escalation $n)"

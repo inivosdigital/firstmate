@@ -373,6 +373,42 @@ test_light_verify_rejected_for_secondmate() {
   pass "fm-brief.sh: --light-verify is rejected for secondmate charters"
 }
 
+# A worker that hands off to a backgrounded job (a validation run, a long build)
+# goes idle BY DESIGN while it waits to be notified. Firstmate's supervisors can
+# read that idle pane as a possible wedge, so the generated status protocol has to
+# tell the worker to declare the wait, in both work-brief scaffolds and under a
+# configured pause verb.
+test_background_handoff_declares_a_pause() {
+  local home id brief
+  home="$TMP_ROOT/background-handoff-home"
+  mkdir -p "$home/data"
+
+  id="brief-bg-handoff-ship"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'Append `paused: {why}` whenever you hand off to a long-running background job' "$brief" \
+    "ship brief did not instruct declaring a pause on a background handoff"
+  assert_grep 'read the idle pane as a possible wedge' "$brief" \
+    "ship brief did not explain why an undeclared background handoff is a problem"
+
+  id="brief-bg-handoff-scout"
+  FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'Append `paused: {why}` whenever you hand off to a long-running background job' "$brief" \
+    "scout brief did not instruct declaring a pause on a background handoff"
+
+  id="brief-bg-handoff-verb"
+  FM_HOME="$home" FM_CLASSIFY_PAUSED_VERB=awaiting \
+    "$ROOT/bin/fm-brief.sh" "$id" firstmate >/dev/null 2>&1
+  brief="$home/data/$id/brief.md"
+  # shellcheck disable=SC2016 # Literal backticks and braces must remain unexpanded.
+  assert_grep 'Append `awaiting: {why}` whenever you hand off to a long-running background job' "$brief" \
+    "the background-handoff instruction ignored the configured pause verb"
+  pass "fm-brief.sh: the status protocol requires declaring a pause on a background handoff"
+}
+
 test_pause_verb_override_renders_all_brief_scaffolds() {
   local home kind id brief
   home="$TMP_ROOT/pause-verb-home"
@@ -464,6 +500,7 @@ test_light_verify_absent_by_default
 test_light_verify_skips_document_for_nomistakes_mode_only
 test_light_verify_rejected_for_secondmate
 test_secondmate_marked_request_reporting_contract
+test_background_handoff_declares_a_pause
 test_pause_verb_override_renders_all_brief_scaffolds
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

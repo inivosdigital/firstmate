@@ -974,6 +974,77 @@ test_afk_nonterminal_working_merged_keeps_wedge_aging() {
   pass "AFK nonterminal working:+merged keeps wedge aging and re-escalates at bound"
 }
 
+# --- run-aware wedge deferral, away-mode side --------------------------------
+#
+# The away-mode daemon had the SAME defect as the always-on watcher: housekeeping
+# escalated a pending stale marker as a possible wedge purely on a pane re-peek,
+# with no awareness that the crew was idle by design while its validation run
+# advanced in the background. Both now gate that escalation on the one shared
+# policy in bin/fm-classify-lib.sh (crew_run_progress_defers_wedge), so these two
+# tests are the away-mode half of the same contract asserted for the watcher in
+# fm-watch-triage.test.sh - same function, same two outcomes.
+
+# Stage a stale marker already aged past the escalate bound for <task>/<win>.
+# Callers pass the bare window name as FM_FAKE_TMUX_WINDOW so the crewmate's
+# endpoint is present in the fake tmux inventory, which is the realistic case
+# here: a crew waiting on a background run is alive, just idle. A window that is
+# genuinely gone reads as a dead agent and escalates regardless of the run.
+stage_aged_stale_marker() {  # <state> <task> <win> <pane>
+  local state=$1 task=$2 win=$3 pane=$4
+  printf 'idle - waiting to be notified by the validation run\n' > "$pane"
+  printf 'window=%s\nkind=ship\n' "$win" > "$state/$task.meta"
+  printf 'working: handed off to the validation run\n' > "$state/$task.status"
+  echo $(( $(date +%s) - 500 )) > "$state/.subsuper-stale-$(_stale_key "$task")"
+}
+
+test_housekeeping_defers_wedge_while_validation_run_advances() {
+  local dir state fakebin pane win prev
+  dir=$(make_supercase housekeeping-run-advancing)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"; win="sess:fm-advancing"
+  stage_aged_stale_marker "$state" advancing "$win" "$pane"
+  prev=$FM_CREW_STATE_BIN
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/review:completed,test:running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="${win#*:}" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+
+  [ ! -s "$state/.subsuper-escalations" ] \
+    || fail "away mode wedge-escalated an advancing validation run: $(cat "$state/.subsuper-escalations")"
+  [ -e "$state/.subsuper-stale-advancing" ] \
+    || fail "the deferred stale marker was dropped instead of rechecked a window later"
+  [ -s "$state/.run-progress-advancing" ] \
+    || fail "away mode did not record a run-progress marker"
+  FM_CREW_STATE_BIN=$prev
+  unset FM_FAKE_RUN_PROGRESS
+  pass "away-mode housekeeping defers the wedge while an attributed validation run is advancing"
+}
+
+test_housekeeping_still_escalates_a_frozen_validation_run() {
+  local dir state fakebin pane win prev
+  dir=$(make_supercase housekeeping-run-frozen)
+  state="$dir/state"; fakebin="$dir/fakebin"; pane="$dir/pane.txt"; win="sess:fm-frozen"
+  stage_aged_stale_marker "$state" frozen "$win" "$pane"
+  # Identical step, identical head, no structural movement for longer than the
+  # run-wedge window: genuinely wedged, so away mode must still escalate.
+  printf '%s\t%s\n' "$(( $(date +%s) - 6000 ))" '01RUN/abc1234/test:running' \
+    > "$state/.run-progress-frozen"
+  prev=$FM_CREW_STATE_BIN
+  FM_CREW_STATE_BIN=$(make_fake_crew_state "$fakebin")
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/test:running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="${win#*:}" FM_FAKE_TMUX_CAPTURE="$pane" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 housekeeping "$state"
+
+  [ -s "$state/.subsuper-escalations" ] \
+    || fail "away mode never escalated a validation run that stopped advancing"
+  grep -q 'possible wedge' "$state/.subsuper-escalations" \
+    || fail "frozen-run escalation was not a possible-wedge: $(cat "$state/.subsuper-escalations")"
+  FM_CREW_STATE_BIN=$prev
+  unset FM_FAKE_RUN_PROGRESS
+  pass "away-mode housekeeping still wedge-escalates a validation run that stopped advancing"
+}
+
 test_afk_genuine_done_still_terminal_stale() {
   local dir state out
   dir=$(make_supercase afk-genuine-done-stale)
@@ -1818,6 +1889,8 @@ test_classify_signal_dedup_against_scan
 test_classify_stale_dedup_against_signal
 test_afk_nonterminal_working_merged_keeps_wedge_aging
 test_afk_genuine_done_still_terminal_stale
+test_housekeeping_defers_wedge_while_validation_run_advances
+test_housekeeping_still_escalates_a_frozen_validation_run
 test_pane_input_pending_bordered_idle_not_pending
 test_pane_input_pending_bordered_with_text_is_pending
 test_submit_ack_confirms_on_bordered_empty_composer

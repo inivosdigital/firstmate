@@ -47,6 +47,19 @@
 #      attributed to this crew, a dead endpoint also reports unknown · none rather
 #      than trusting a stale status log.
 #
+# `--run-progress <id>` swaps the output for the run's PHASE and PROGRESS TOKEN:
+#
+#   progress: <phase>/<run-id>/<run-head>/<step:status,...>   an attributed run
+#   progress: <phase>/coarse/<status>/<worktree-head>         coarse runs-list fallback
+#   progress: none                                            no run attributed to this crew
+#
+# <phase> is the same reconciled state this script would report normally
+# (working, done, parked, failed), so a caller can tell an advancing run from a
+# finished one awaiting merge from one stopped at a gate, without a second read.
+# The token after it is meaningful only by EQUALITY across two reads: unchanged
+# means the run has not structurally moved. See the token builder below for
+# exactly which fields it carries and why duration_ms is deliberately excluded.
+#
 # Read-only and side-effect free. Always exits 0 on a successful read regardless
 # of state; exit 2 only on a usage error (no id).
 set -u
@@ -63,8 +76,21 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 # shellcheck source=bin/fm-classify-lib.sh
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
+# --run-progress switches the output to the run PROGRESS TOKEN instead of the
+# current-state line: one opaque-but-stable string that changes if and only if
+# this crew's attributed run made STRUCTURAL progress. It exists because pane
+# idleness cannot distinguish a validating crew that is advancing from one whose
+# pipeline has frozen - both render an idle pane for many minutes - so the shared
+# wedge policy (crew_run_progress_defers_wedge, bin/fm-classify-lib.sh) needs a
+# progress signal, and run attribution/parsing lives here rather than being
+# duplicated into the classifier.
+PROGRESS_MODE=0
+if [ "${1:-}" = --run-progress ]; then
+  PROGRESS_MODE=1
+  shift
+fi
 ID=${1:-}
-[ -n "$ID" ] || { echo "usage: fm-crew-state.sh <id>" >&2; exit 2; }
+[ -n "$ID" ] || { echo "usage: fm-crew-state.sh [--run-progress] <id>" >&2; exit 2; }
 
 META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
@@ -78,7 +104,25 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
+#
+# Under --run-progress this emits `<phase>/<token>` instead, where <phase> is
+# this same reconciled state ($1) and <token> is the run progress token built
+# below. Routing progress through the ONE emit point means the phase is always
+# fm-crew-state's own verdict for that read - working, done, parked, failed -
+# rather than a second interpretation of the run that could disagree with it.
+# Any emit reached with no token means there is no attributed run to measure
+# progress against (a missing meta, a torn-down worktree, the pane/log fallback),
+# which reports `none` and lets the caller escalate on its own terms.
+PROGRESS_TOKEN=""
 emit() {  # <state> <source> [detail]
+  if [ "$PROGRESS_MODE" = 1 ]; then
+    if [ -n "$PROGRESS_TOKEN" ]; then
+      printf 'progress: %s/%s\n' "$1" "$PROGRESS_TOKEN"
+    else
+      printf 'progress: none\n'
+    fi
+    exit 0
+  fi
   local line="state: $1${SEP}source: $2"
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
@@ -472,6 +516,51 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       fi
     fi
   fi
+fi
+
+# --- run progress token (--run-progress only) -------------------------------
+#
+# The token deliberately carries ONLY fields whose change means the pipeline
+# structurally moved: the run id, the run head, and each step's name:status
+# pair. duration_ms and per-step findings counts are excluded on purpose. If a
+# running step's duration ticks upward between reads (it is recorded only on
+# completion in every run observed here, but that is no-mistakes' choice to
+# change, not ours), a duration-bearing token would differ on EVERY read, the
+# wedge deferral would renew forever, and a genuinely frozen pipeline would be
+# silenced permanently - a silent safety failure. Excluding it means the token
+# can only be renewed by real structural progress, so the worst case is an extra
+# alarm rather than a missed wedge.
+#
+# Steps rows are the TOON table body ("  <step>,<status>,<findings>,<duration>");
+# rows that do not parse are simply left out, which can only make the token
+# coarser (more likely to look frozen), never falsely fresh.
+nm_step_pairs() {
+  printf '%s\n' "$RUN_OUT" \
+    | sed -n 's/^[[:space:]]*\([A-Za-z0-9_-][A-Za-z0-9_-]*\),\([A-Za-z0-9_-][A-Za-z0-9_-]*\),[0-9][0-9]*,[0-9][0-9]*[[:space:]]*$/\1:\2/p' \
+    | tr '\n' ',' | sed 's/,$//'
+}
+
+if [ "$PROGRESS_MODE" = 1 ]; then
+  # No attributed run: report `none` here rather than falling through to the
+  # pane/log fallback, whose backend reads buy nothing for a progress read.
+  [ "$HAVE_RUN" = 1 ] || emit unknown none
+  WT_HEAD=$(git -C "$WT" rev-parse --short HEAD 2>/dev/null || true)
+  if [ "$RUN_SOURCE" = coarse ]; then
+    # The coarse runs-list fallback carries no step detail at all, so the only
+    # progress it can witness is a new commit. A long coarse-attributed step
+    # therefore reads as frozen and eventually alarms - correct, since we have
+    # no evidence it is advancing.
+    PROGRESS_TOKEN="coarse/${COARSE_STATUS}/${WT_HEAD:-nohead}"
+  else
+    RUN_ID=$(strip_quotes "$(nm_field id)")
+    RUN_HEAD=$(strip_quotes "$(nm_field head)")
+    [ -n "$RUN_HEAD" ] || RUN_HEAD=$WT_HEAD
+    STEP_PAIRS=$(nm_step_pairs)
+    [ -n "$STEP_PAIRS" ] || STEP_PAIRS="status:$(strip_quotes "$(nm_field status)")"
+    PROGRESS_TOKEN="${RUN_ID:-norun}/${RUN_HEAD:-nohead}/${STEP_PAIRS}"
+  fi
+  # Fall through: the run-step interpretation below decides the phase, and its
+  # emit renders `<phase>/<token>`.
 fi
 
 # --- run-step authoritative path -------------------------------------------

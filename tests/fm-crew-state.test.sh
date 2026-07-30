@@ -143,6 +143,10 @@ run_crew_state() {  # <case-dir> <id>
   PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
 }
 
+run_crew_progress() {  # <case-dir> <id>
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" --run-progress "$2"
+}
+
 new_case() {  # <name> -> echoes case dir with an empty state/
   local d="$TMP_ROOT/$1"
   mkdir -p "$d/state"
@@ -332,6 +336,121 @@ run:
     push,completed,0,0
     ci,fixing,0,0
 EOF
+}
+
+# One long-running step whose only moving part is its elapsed duration.
+run_one_long_step() {  # <branch> <duration_ms>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[2]{step,status,findings,duration_ms}:
+    intent,completed,0,3
+    test,running,0,$2
+EOF
+}
+
+# --- run progress token (--run-progress) ------------------------------------
+# The token feeds the shared run-aware wedge policy (crew_run_progress_defers_wedge,
+# bin/fm-classify-lib.sh). It is read purely by EQUALITY across two reads: an
+# unchanged token means the pipeline has not structurally moved, which is what
+# finally licenses treating a long-idle pane as a wedge.
+
+test_run_progress_changes_when_the_run_advances() {
+  reset_fakes
+  local d out1 out2
+  d=$(new_case progress-steps)
+  make_repo_on_branch "$d/wt" fm/feat-p
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-p.meta" "window=fm:fm-feat-p" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-p)"
+  out1=$(run_crew_progress "$d" feat-p)
+  assert_contains "$out1" "progress: " "--run-progress did not emit a token"
+  assert_contains "$out1" "review:running" "token did not carry the active step"
+  # The pipeline moves on. The token MUST change, or a healthy multi-step run
+  # would look frozen and eventually raise the false wedge alarm this exists to
+  # prevent.
+  FM_FAKE_AXI_STATUS="$(run_fixing_ci_running fm/feat-p)"
+  out2=$(run_crew_progress "$d" feat-p)
+  [ "$out1" != "$out2" ] || fail "progress token unchanged after the run advanced a step: $out1"
+  pass "--run-progress token changes when the run advances a step"
+}
+
+test_run_progress_ignores_a_ticking_duration() {
+  reset_fakes
+  local d out1 out2
+  d=$(new_case progress-duration)
+  make_repo_on_branch "$d/wt" fm/feat-d
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_one_long_step fm/feat-d 120000)"
+  out1=$(run_crew_progress "$d" feat-d)
+  # The SAME run, same step, only its elapsed duration further along. If the
+  # token tracked duration_ms it would differ on every single read, the wedge
+  # deferral would renew forever, and a genuinely frozen pipeline would never be
+  # reported again - a silent safety failure. So this must NOT change.
+  FM_FAKE_AXI_STATUS="$(run_one_long_step fm/feat-d 480000)"
+  out2=$(run_crew_progress "$d" feat-d)
+  [ "$out1" = "$out2" ] || fail "progress token changed on a ticking duration alone ($out1 vs $out2)"
+  assert_contains "$out1" "test:running" "token did not carry the active step"
+  pass "--run-progress excludes a ticking duration, so only structural progress renews the token"
+}
+
+# A run that succeeded and is only waiting for the PR to land. The phase must
+# read `done`, because that is what tells the shared wedge policy this worker is
+# finished and idle by design rather than an in-flight run that stopped moving.
+run_checks_passed() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: ci
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: "https://github.com/o/r/pull/3"
+  findings: none
+  steps[3]{step,status,findings,duration_ms}:
+    push,completed,0,2065
+    pr,completed,0,92656
+    ci,running,0,120000
+outcome: checks-passed
+EOF
+}
+
+test_run_progress_phase_separates_finished_from_advancing() {
+  reset_fakes
+  local d out
+  d=$(new_case progress-phase)
+  make_repo_on_branch "$d/wt" fm/feat-ph
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ph.meta" "window=fm:fm-feat-ph" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_running fm/feat-ph)"
+  out=$(run_crew_progress "$d" feat-ph)
+  case "$out" in "progress: working/"*) ;; *) fail "an in-flight run did not report the working phase: $out" ;; esac
+  FM_FAKE_AXI_STATUS="$(run_checks_passed fm/feat-ph)"
+  out=$(run_crew_progress "$d" feat-ph)
+  case "$out" in "progress: done/"*) ;; *) fail "a checks-green run awaiting merge did not report the done phase: $out" ;; esac
+  pass "--run-progress phase separates a finished run awaiting merge from an in-flight one"
+}
+
+test_run_progress_reports_none_without_an_attributed_run() {
+  reset_fakes
+  local d out
+  d=$(new_case progress-no-run)
+  make_repo_on_branch "$d/wt" fm/feat-n
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-n.meta" "window=fm:fm-feat-n" "worktree=$d/wt" "kind=ship"
+  # No run attributed to this crew at all (pre-validation).
+  out=$(run_crew_progress "$d" feat-n)
+  [ "$out" = "progress: none" ] || fail "expected 'progress: none' with no attributed run, got: $out"
+  # A torn-down crew reports the same, rather than a token that could be
+  # mistaken for a live run.
+  out=$(run_crew_progress "$d" no-such-task)
+  [ "$out" = "progress: none" ] || fail "expected 'progress: none' for an unknown task, got: $out"
+  pass "--run-progress reports none for a crew with no attributed run"
 }
 
 # ---------------------------------------------------------------------------
@@ -1383,5 +1502,9 @@ test_historical_same_branch_rewritten_head_not_current
 test_active_run_descendant_fix_head_remains_current
 test_local_advanced_past_run_head_invalidates
 test_missing_run_head_falls_back_to_current_state
+test_run_progress_changes_when_the_run_advances
+test_run_progress_ignores_a_ticking_duration
+test_run_progress_phase_separates_finished_from_advancing
+test_run_progress_reports_none_without_an_attributed_run
 
 echo "all fm-crew-state tests passed"

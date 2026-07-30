@@ -994,8 +994,18 @@ housekeeping() {  # <state>
     case "$?" in
       0) rm -f "$marker" ;;
       2) rm -f "$marker" ;;
-      *) escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
-         stale_marker_remove "$win" "$state" ;;
+      *) # Same run-aware wedge policy the always-on watcher applies, from the
+         # one shared owner in bin/fm-classify-lib.sh rather than a second copy:
+         # a crew whose validation run is still structurally advancing is idle by
+         # design, so refresh the marker and recheck a window later instead of
+         # escalating. A run that has stopped moving still escalates below.
+         if crew_run_progress_defers_wedge "$task" "$state"; then
+           _now > "$marker"
+           log "stale ${age}s deferred: validation run advancing for $task"
+         else
+           escalate_add "$state" "stale persisted ${age}s (possible wedge): $win"
+           stale_marker_remove "$win" "$state"
+         fi ;;
     esac
   done
 

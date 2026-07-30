@@ -100,11 +100,25 @@ SH
 # A per-id override FM_FAKE_CREW_STATE_<sanitized-id> wins; otherwise the shared
 # FM_FAKE_CREW_STATE; otherwise an unknown verdict (NOT provably working), the
 # safe default so a test that forgets to set one surfaces rather than absorbs.
+#
+# `--run-progress <id>` returns the run PROGRESS TOKEN the run-aware wedge policy
+# reads (crew_run_progress_defers_wedge, bin/fm-classify-lib.sh), from
+# FM_FAKE_RUN_PROGRESS[_<sanitized-id>]. Its default is `none` - no attributed
+# run - which makes that policy escalate exactly as the pane timer alone did, so
+# a test that does not opt in keeps its original wedge behavior.
 make_fake_crew_state() {  # <fakebin>
   local fakebin=$1
   cat > "$fakebin/fm-crew-state.sh" <<'SH'
 #!/usr/bin/env bash
 set -u
+if [ "${1:-}" = --run-progress ]; then
+  shift
+  key=$(printf '%s' "${1:-}" | tr -c 'A-Za-z0-9' '_')
+  var="FM_FAKE_RUN_PROGRESS_$key"
+  val=${!var:-${FM_FAKE_RUN_PROGRESS:-}}
+  printf 'progress: %s\n' "${val:-none}"
+  exit 0
+fi
 id=${1:-}
 key=$(printf '%s' "$id" | tr -c 'A-Za-z0-9' '_')
 var="FM_FAKE_CREW_STATE_$key"

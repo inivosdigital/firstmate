@@ -8,7 +8,9 @@
 # provably-working no-verb wakes absorbed (no exit, no queue entry, suppressor
 # advanced, beacon fresh), stopped-crew no-verb wakes surfaced (queue + exit),
 # provably-working stale panes absorbed-then-escalated past the threshold,
-# terminal-looking stale status lines overridden by an active run, the heartbeat
+# terminal-looking stale status lines overridden by an active run, wedge alarms
+# deferred while an attributed validation run is advancing or is finished and
+# awaiting merge (and still raised once it stops moving), the heartbeat
 # backstop fail-safe, and afk coherence (no double-triage while the away-mode
 # daemon owns supervision).
 #
@@ -1698,6 +1700,322 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 
 # --- periodic autodeploy-log sweep (config/autodeploy-logs) ------------------
 
+# --- run-aware wedge deferral (bin/fm-classify-lib.sh) ------------------------
+#
+# THE regression: a crewmate that hands off to a backgrounded no-mistakes run is
+# idle BY DESIGN - it is waiting to be notified - but wedge_timer_check escalated
+# on pane idleness alone and never re-read the run. Reproduced live as five
+# consecutive "possible wedge" escalations about four minutes apart while the run
+# was demonstrably healthy and moving (review,fixing with the head advancing ->
+# test,running -> document,running -> lint,running), each one costing firstmate a
+# full turn on a deep inspection of a run that was fine.
+#
+# The same alarm fired for a second idle-by-design case: a run that already
+# succeeded and is only waiting for its PR to land, which re-escalated every few
+# minutes for as long as the PR stayed open even though the merge poll is what
+# watches for the landing.
+#
+# The fix makes both outrank pane idleness, WITHOUT becoming a blanket
+# suppression: the token must actually change. A run frozen on one step with no
+# new commits for the whole run-wedge window still escalates, and a run parked at
+# a gate or failed never defers at all.
+
+test_run_progress_defers_wedge_while_advancing() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-advancing); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "backend=tmux"
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'alive'; }
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/intent:completed,review:fixing'
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "first sighting of an attributed run did not defer the wedge"
+  [ -s "$state/.run-progress-task" ] || fail "no progress marker was recorded on first sighting"
+  # Unchanged token, but only moments old: still well inside the window.
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "an unchanged token inside the window escalated early"
+  # The pipeline advances a step: the token is renewed and the window restarts.
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/intent:completed,review:completed,test:running'
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "an advancing run did not defer the wedge"
+  grep -Fq 'test:running' "$state/.run-progress-task" \
+    || fail "progress marker did not record the advanced token"
+  unset -f fm_backend_agent_alive
+  export FM_CREW_STATE_BIN="$prev"
+  unset FM_FAKE_RUN_PROGRESS
+  pass "crew_run_progress_defers_wedge: an advancing validation run defers the wedge alarm"
+}
+
+test_run_progress_escalates_a_frozen_run() {
+  local dir state fakebin prev marker stamped
+  dir=$(make_case run-progress-frozen); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "backend=tmux"
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'alive'; }
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/test:running'
+  marker="$state/.run-progress-task"
+  # Same step, same head, no structural movement at all for longer than the
+  # run-wedge window: a genuinely wedged pipeline, which must still surface.
+  printf '%s\t%s\n' "$(( $(date +%s) - 6000 ))" '01RUN/abc1234/test:running' > "$marker"
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a run frozen past the window was deferred instead of escalated"
+  stamped=$(cut -f1 "$marker")
+  [ "$(( $(date +%s) - stamped ))" -lt 60 ] \
+    || fail "escalation did not re-stamp the progress marker"
+  # Re-stamped, so it nags once per window rather than on every poll from here.
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "the escalated run re-escalated immediately instead of waiting a window"
+  unset -f fm_backend_agent_alive
+  export FM_CREW_STATE_BIN="$prev"
+  unset FM_FAKE_RUN_PROGRESS
+  pass "crew_run_progress_defers_wedge: a frozen run still escalates, then once per window"
+}
+
+test_run_progress_escalates_without_an_attributed_run() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-no-run); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  # No FM_FAKE_RUN_PROGRESS: the reader reports `none`, the pre-validation case.
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a crew with no attributed run deferred the wedge"
+  [ ! -e "$state/.run-progress-task" ] \
+    || fail "a crew with no attributed run wrote a progress marker"
+  export FM_CREW_STATE_BIN="$prev"
+  pass "crew_run_progress_defers_wedge: no attributed run escalates exactly as the pane timer alone did"
+}
+
+# The second reported false alarm: a task whose run reconciles to terminal
+# success awaiting merge. That worker is FINISHED and idle by design - usually
+# exited outright - and the merge poll is what watches for the landing, yet its
+# pane kept wedge-escalating every few minutes for as long as the PR stayed open.
+# Note the endpoint is deliberately gone here: the dead-agent escalation that
+# guards an in-flight run must NOT fire for a run that already succeeded.
+test_run_progress_defers_a_finished_run_awaiting_merge() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-awaiting-merge); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "backend=tmux"
+  # Deliberately dead: the worker reported its result and exited, which is its
+  # expected end state, so the dead-agent escalation must not fire here.
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'dead'; }
+  export FM_FAKE_RUN_PROGRESS='done/01RUN/abc1234/lint:completed,push:completed,pr:completed,ci:running'
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "a finished run awaiting merge did not defer the wedge alarm"
+  crew_run_progress_defers_wedge task "$state" \
+    || fail "a finished run awaiting merge re-escalated on the very next poll"
+  # Bounded, not silenced: an unmerged PR still re-surfaces once per window.
+  printf '%s\t%s\n' "$(( $(date +%s) - 6000 ))" \
+    '01RUN/abc1234/lint:completed,push:completed,pr:completed,ci:running' \
+    > "$state/.run-progress-task"
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a finished run awaiting merge was silenced forever instead of rechecked once per window"
+  unset -f fm_backend_agent_alive
+  export FM_CREW_STATE_BIN="$prev"
+  unset FM_FAKE_RUN_PROGRESS
+  pass "crew_run_progress_defers_wedge: a finished run awaiting merge defers even with its worker exited, and still rechecks once per window"
+}
+
+# Disconfirming counterpart: only a terminal-SUCCESS run is idle by design. A run
+# parked at a gate is waiting on firstmate and a failed run needs reporting, so
+# neither may buy quiet from this policy.
+test_run_progress_never_defers_a_parked_or_failed_run() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-parked); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "backend=tmux"
+  # Alive on purpose, so the refusal below is attributable to the phase alone.
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'alive'; }
+  export FM_FAKE_RUN_PROGRESS='parked/01RUN/abc1234/review:awaiting_approval'
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a run parked at a gate deferred the wedge instead of surfacing for firstmate"
+  export FM_FAKE_RUN_PROGRESS='failed/01RUN/abc1234/test:failed'
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a failed run deferred the wedge instead of surfacing"
+  unset -f fm_backend_agent_alive
+  export FM_CREW_STATE_BIN="$prev"
+  unset FM_FAKE_RUN_PROGRESS
+  pass "crew_run_progress_defers_wedge: a parked or failed run never defers, only advancing and finished-awaiting-merge do"
+}
+
+test_run_progress_escalates_a_confirmed_dead_agent() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-dead-agent); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  fm_write_meta "$state/task.meta" "window=sess:fm-task" "backend=tmux"
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/test:running'
+  # The endpoint is gone, so nothing is driving this run whatever its run-step
+  # still claims. A left-behind running step must not buy a crashed crewmate a
+  # long quiet window - that would trade one false alarm for a genuinely missed
+  # one.
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'dead'; }
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a confirmed-dead agent deferred the wedge on the strength of a stale run-step"
+  [ ! -e "$state/.run-progress-task" ] \
+    || fail "a confirmed-dead agent's run stamped a progress marker instead of escalating"
+  unset -f fm_backend_agent_alive
+  export FM_CREW_STATE_BIN="$prev"
+  unset FM_FAKE_RUN_PROGRESS
+  pass "crew_run_progress_defers_wedge: a confirmed-dead agent escalates even with an attributed run"
+}
+
+test_run_progress_fails_closed_on_an_unreadable_token() {
+  local dir state fakebin prev
+  dir=$(make_case run-progress-failclosed); state="$dir/state"; fakebin="$dir/fakebin"
+  prev=$FM_CREW_STATE_BIN
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  # A reader that does not understand --run-progress and echoes a state line, and
+  # then one that says nothing at all. Neither is evidence of an advancing run, so
+  # both must escalate rather than silently suppressing the alarm.
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'state: working · source: run-step · validating (running)\n'
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "a state line from an older reader was accepted as progress evidence"
+  cat > "$fakebin/fm-crew-state.sh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/fm-crew-state.sh"
+  crew_run_progress_defers_wedge task "$state" \
+    && fail "an unreadable progress read was accepted as progress evidence"
+  export FM_CREW_STATE_BIN="$prev"
+  pass "crew_run_progress_defers_wedge: an unrecognized or unreadable read escalates (fail-closed)"
+}
+
+# The always-on watcher and the away-mode daemon must apply this policy from ONE
+# implementation, not two that can drift. Structural proof to back the behavioral
+# tests here and in fm-daemon.test.sh: exactly one definition, both callers.
+test_run_wedge_policy_has_a_single_owner() {
+  local defs
+  defs=$(grep -lE '^crew_run_progress_defers_wedge\(\)' "$ROOT"/bin/*.sh | tr '\n' ' ')
+  [ "$defs" = "$ROOT/bin/fm-classify-lib.sh " ] \
+    || fail "expected exactly one definition, in bin/fm-classify-lib.sh; found: $defs"
+  grep -q 'crew_run_progress_defers_wedge' "$ROOT/bin/fm-watch.sh" \
+    || fail "the always-on watcher does not consult the shared run-wedge policy"
+  grep -q 'crew_run_progress_defers_wedge' "$ROOT/bin/fm-supervise-daemon.sh" \
+    || fail "the away-mode daemon does not consult the shared run-wedge policy"
+  pass "the run-aware wedge policy has one owner, used by both the watcher and the away-mode daemon"
+}
+
+# Behavioral: a real fm-watch.sh subprocess, pane idle far past the wedge
+# threshold, with an attributed run that is advancing. Pre-fix this escalated.
+test_watcher_defers_wedge_while_validation_run_advances() {
+  local dir state fakebin out capture_file window key pane_hash sig pid since
+  dir=$(make_case watch-wedge-advancing); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-advancing"
+  printf 'no-mistakes axi run: validating...\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/advancing.meta"
+  printf 'working: handed off to the validation run\n' > "$state/advancing.status"
+  sig=$(seen_sig "$state/advancing.status"); printf '%s' "$sig" > "$state/.seen-advancing_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/review:completed,test:running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "an advancing validation run was wedge-escalated on pane idleness alone: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "an advancing validation run printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "an advancing validation run enqueued a wedge wake"
+  since=$(cat "$state/.stale-since-$key" 2>/dev/null || true)
+  case "$since" in ''|*[!0-9]*) reap "$pid"; fail "the deferred wedge did not restart the pane timer" ;; esac
+  [ "$(( $(date +%s) - since ))" -lt 240 ] \
+    || { reap "$pid"; fail "the deferred wedge left the pane timer already past its threshold"; }
+  [ -s "$state/.run-progress-advancing" ] || { reap "$pid"; fail "no run-progress marker was recorded"; }
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_RUN_PROGRESS
+  pass "the watcher defers the wedge alarm while an attributed validation run is advancing"
+}
+
+# The live second case, end to end: the run finished successfully and the PR is
+# open and unmerged, so the worker sits idle (here, gone entirely) while the
+# merge poll watches for the landing. Its pane was re-escalating as a possible
+# wedge every FM_STALE_ESCALATE_SECS for as long as the PR stayed open.
+test_watcher_defers_wedge_for_a_finished_run_awaiting_merge() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case watch-wedge-awaiting-merge); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-merging"
+  printf 'no-mistakes axi run: monitoring CI until merge...\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/merging.meta"
+  # A non-captain-relevant last line: this is the path that re-nagged, because a
+  # terminal-looking log line takes the separate already-surfaced branch instead.
+  printf 'working: handed off to the validation run\n' > "$state/merging.status"
+  sig=$(seen_sig "$state/merging.status"); printf '%s' "$sig" > "$state/.seen-merging_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: monitoring CI until merge...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+  export FM_FAKE_RUN_PROGRESS='done/01RUN/abc1234/pr:completed,ci:running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a finished run awaiting merge was wedge-escalated on pane idleness: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a finished run awaiting merge printed a wake reason: $(cat "$out")"
+  [ ! -s "$state/.wake-queue" ] || fail "a finished run awaiting merge enqueued a wedge wake"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE FM_FAKE_RUN_PROGRESS
+  pass "the watcher defers the wedge alarm for a finished run awaiting merge"
+}
+
+# The disconfirming counterpart: identical setup, but the run has not moved for
+# longer than the run-wedge window. The alarm must still fire.
+test_watcher_still_escalates_a_frozen_validation_run() {
+  local dir state fakebin out capture_file window key pane_hash sig pid
+  dir=$(make_case watch-wedge-frozen); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-frozen"
+  printf 'no-mistakes axi run: validating...\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\n' "$window" > "$state/frozen.meta"
+  printf 'working: handed off to the validation run\n' > "$state/frozen.status"
+  sig=$(seen_sig "$state/frozen.status"); printf '%s' "$sig" > "$state/.seen-frozen_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "no-mistakes axi run: validating...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  printf '%s\t%s\n' "$(( $(date +%s) - 6000 ))" '01RUN/abc1234/test:running' \
+    > "$state/.run-progress-frozen"
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  export FM_FAKE_RUN_PROGRESS='working/01RUN/abc1234/test:running'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || { reap "$pid"; fail "a frozen validation run was never wedge-escalated"; }
+  grep -F "stale: $window" "$out" >/dev/null || fail "frozen-run escalation did not print a stale wake"
+  grep -F "possible wedge" "$out" >/dev/null || fail "frozen-run escalation did not flag a possible wedge"
+  unset FM_FAKE_CREW_STATE FM_FAKE_RUN_PROGRESS
+  pass "the watcher still wedge-escalates a validation run that has stopped advancing"
+}
+
 # Run autodeploy_scan once against <state>/<config> by sourcing fm-watch.sh in a
 # subshell - its source guard returns before the runtime lock/loop, so only the
 # functions load. Echoes "rc=<exit>"; the durable wake queue and per-log surfaced
@@ -2076,6 +2394,17 @@ test_heartbeat_backstop_surfaces_unsurfaced_status
 test_beacon_stays_fresh_while_absorbing
 test_afk_present_reverts_watcher_to_one_shot
 test_afk_paused_changed_pane_hands_off_plain_stale
+test_run_progress_defers_wedge_while_advancing
+test_run_progress_escalates_a_frozen_run
+test_run_progress_escalates_without_an_attributed_run
+test_run_progress_defers_a_finished_run_awaiting_merge
+test_run_progress_never_defers_a_parked_or_failed_run
+test_run_progress_escalates_a_confirmed_dead_agent
+test_run_progress_fails_closed_on_an_unreadable_token
+test_run_wedge_policy_has_a_single_owner
+test_watcher_defers_wedge_while_validation_run_advances
+test_watcher_defers_wedge_for_a_finished_run_awaiting_merge
+test_watcher_still_escalates_a_frozen_validation_run
 test_autodeploy_absent_config_is_noop
 test_autodeploy_failure_enqueues_labelled_check
 test_autodeploy_healthy_is_silent_and_rearms
