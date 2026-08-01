@@ -84,10 +84,17 @@ run_spawn() {
   local home=$1 wt=$2 fakebin=$3 launchlog=$4
   shift 4
   : > "$launchlog"
+  # This suite's subject is the harness/model/effort launch shape, asserted byte
+  # for byte. FM_SPAWN_MEMORY_CAP=off keeps the per-spawn memory ceiling's
+  # wrapper prefix out of those strings, so each expectation stays about the one
+  # thing it is guarding - and so these assertions double as the proof that a
+  # spawn with the ceiling off is byte-identical to the pre-ceiling launch.
+  # tests/fm-memcap.test.sh owns the wrapped shape.
   FM_ROOT_OVERRIDE='' FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" \
+    FM_SPAWN_MEMORY_CAP=off \
     FM_FAKE_LAUNCH_LOG="$launchlog" GROK_HOME="$home/grok-home" PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
 }

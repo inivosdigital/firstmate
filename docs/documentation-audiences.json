@@ -244,6 +244,10 @@
       "audience": "operator-example"
     },
     {
+      "path": "docs/examples/spawn-memory-cap",
+      "audience": "operator-example"
+    },
+    {
       "path": "docs/examples/tmp-alert-threshold",
       "audience": "operator-example"
     },
@@ -317,6 +321,10 @@
     },
     {
       "path": "docs/verification/runtime-backends.md",
+      "audience": "maintainer-verification"
+    },
+    {
+      "path": "docs/verification/spawn-memory-cap.md",
       "audience": "maintainer-verification"
     },
     {

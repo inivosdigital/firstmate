@@ -21,3 +21,4 @@ config/autodeploy-logs
 config/wedge-alarm
 config/tmp-alert-threshold
 config/herdr-presentation-spaces
+config/spawn-memory-cap

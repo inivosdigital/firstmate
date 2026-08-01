@@ -116,6 +116,13 @@
 # files below), and record it in meta as compose_project=<name>, so two
 # worktrees of the same project never collide on Compose's default
 # project-naming (fm-brief.sh documents how a crewmate consumes it).
+# Every launch is wrapped in bin/fm-memcap.sh, which runs the agent inside its own
+# memory-capped systemd user scope so a runaway agent dies in its own box instead of
+# stalling the whole machine in reclaim. The ceiling defaults per kind and is
+# overridable via config/spawn-memory-cap or FM_SPAWN_MEMORY_CAP
+# (bin/fm-memcap-lib.sh owns the policy, docs/configuration.md the schema); the
+# requested value is recorded as meta memcap=<spec|off>. A host that cannot provide
+# a scope launches unwrapped, so this never turns into a spawn failure.
 # claude launches (crewmate, scout, and secondmate) carry
 # CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 so they auto-compact the way the primary
 # interactive session already does via its own .claude/settings.local.json, which a
@@ -150,6 +157,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-memcap-lib.sh
+. "$SCRIPT_DIR/fm-memcap-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -1511,6 +1520,20 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
+# Per-spawn memory ceiling (bin/fm-memcap-lib.sh owns the policy and the config
+# schema; docs/configuration.md is the captain-facing owner). Resolved here, not
+# in the pane, because the config lives in this home and the kind is known only
+# here. The wrapper itself decides whether this host can honor the ceiling, so
+# the value recorded below is what this spawn ASKED for; the pane says so on
+# stderr when the host cannot provide it. A missing or non-executable wrapper
+# (an old checkout, a partial sync) drops the ceiling rather than typing a
+# command the pane shell cannot run.
+MEMCAP=$(fm_memcap_resolve "$CONFIG/spawn-memory-cap" "$KIND")
+if [ "$MEMCAP" != off ] && [ ! -x "$FM_ROOT/bin/fm-memcap.sh" ]; then
+  echo "warning: $FM_ROOT/bin/fm-memcap.sh is missing or not executable; launching $ID without a memory ceiling" >&2
+  MEMCAP=off
+fi
+
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 {
@@ -1524,6 +1547,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
+  echo "memcap=$MEMCAP"
   [ "$KIND" = secondmate ] || echo "compose_project=$COMPOSE_PROJECT"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;
@@ -1574,6 +1598,20 @@ LAUNCH=${LAUNCH//__OPINPUT__/$sq_opinput}
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_HOME=$sq_home $LAUNCH"
+fi
+# Wrap last, so every environment prefix above stays in front of the agent and
+# the wrapper re-exports it (bin/fm-memcap.sh). Wrapping the launch STRING, and
+# not the backend's own send path, keeps all five backends untouched: each one
+# already receives this command as text, and a backend that instead exec'd an
+# argv would already be broken by the environment prefixes these templates have
+# always carried.
+# Known ceiling: a RAW launch command (the unverified-adapter escape hatch) that
+# uses a shell operator - `a && b`, `a | b` - caps only the part before it, since
+# the pane shell binds the operator, not the wrapper. Nothing breaks and both
+# parts still run; the cap is just narrower than asked for. Every launch_template
+# above is a single command, so this affects only the escape hatch.
+if [ "$MEMCAP" != off ]; then
+  LAUNCH="$(shell_quote "$FM_ROOT/bin/fm-memcap.sh") --max $(shell_quote "$MEMCAP") --label $(shell_quote "firstmate $ID") -- $LAUNCH"
 fi
 # Export GOTMPDIR into the crewmate's pane shell so the agent and every child
 # process (go build, go test, ...) inherit it. Sent before the launch command so

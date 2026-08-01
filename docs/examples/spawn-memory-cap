@@ -1,0 +1,33 @@
+# config/spawn-memory-cap - the memory ceiling every crewmate, scout, and
+# secondmate this home launches runs under (bin/fm-spawn.sh wraps each launch in
+# bin/fm-memcap.sh, which puts the agent in its own systemd user scope). Copy
+# this into a local, gitignored config/spawn-memory-cap and replace the value
+# below with your own.
+#
+# A single value, read from the first non-empty, non-comment line; blank lines
+# and full-line "#" comments are ignored. It is either:
+#
+#   <n>[K|M|G|T]   an absolute ceiling, systemd's 1024-based suffixes (e.g. 6G)
+#   <n>%           a percentage of this host's RAM, 1-100 (e.g. 40%)
+#   off            no ceiling at all - the pre-existing behavior
+#
+# An ABSENT file does NOT mean "no cap": it means the built-in default, which is
+# 40% of RAM for a ship task and 25% for a scout or a secondmate. That split is
+# deliberate - a ship task builds and runs test suites inside its ceiling, while
+# a scout reads code and a secondmate supervises. A value that cannot be parsed
+# warns and falls back to that same default rather than silently removing the
+# protection the typo was asking for.
+#
+# One value covers every kind here on purpose; per-kind tuning lives in the
+# built-in defaults, which already scale with the size of the machine.
+# FM_SPAWN_MEMORY_CAP overrides this file for a single spawn.
+#
+# A host that cannot create a systemd user scope (no systemd, no user manager,
+# or a delegated cgroup without the memory controller) still spawns, unwrapped,
+# and says so in the pane. Containment is never allowed to become a spawn
+# failure, so setting a value here is a request, not a guarantee.
+#
+# The value below is an illustrative placeholder - pick a ceiling that leaves
+# room for the heaviest legitimate thing your agents run (a full test suite, a
+# production build) while staying well under what would starve this machine.
+40%

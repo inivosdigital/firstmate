@@ -191,6 +191,29 @@ The threshold parse and the `df` read are implemented exactly once, in `bin/fm-t
 The file is not inherited by secondmate homes, whose same-machine bootstrap would only re-check the same `/tmp`.
 See [`examples/tmp-alert-threshold`](examples/tmp-alert-threshold) for a copyable config.
 
+## Agent memory ceiling (config/spawn-memory-cap)
+
+Every direct report `bin/fm-spawn.sh` launches - crewmate, scout, or secondmate - runs inside its own memory-capped systemd user scope, so one runaway agent dies in its own box instead of stalling the whole machine in reclaim.
+`bin/fm-spawn.sh` resolves the ceiling and wraps the launch command in [`bin/fm-memcap.sh`](../bin/fm-memcap.sh), which is the only thing that talks to `systemd-run`; [`bin/fm-memcap-lib.sh`](../bin/fm-memcap-lib.sh) owns the policy and the spec grammar.
+The requested value is recorded as `memcap=<spec|off>` in `state/<id>.meta`.
+
+`config/spawn-memory-cap` (local, gitignored) holds one value on its first non-empty, non-comment line: an absolute size with systemd's 1024-based `K`/`M`/`G`/`T` suffixes, a `1`-`100` percentage of this host's RAM, or `off`.
+`FM_SPAWN_MEMORY_CAP` overrides the file for a single spawn.
+An absent file does not mean no cap: it means the built-in default, which keys off the spawn kind that is already resolved and already recorded at spawn time - 40% of RAM for a ship task, 25% for a scout or a secondmate.
+A ship task builds and runs test suites inside its ceiling; a scout reads code and a secondmate supervises, and a secondmate's own crewmates land in sibling scopes rather than nested inside its own, so neither needs build-sized headroom.
+Percentages, not byte counts, so the default means the same thing on a small host and a large one.
+A value that cannot be parsed warns and falls back to that default rather than silently dropping the protection the typo asked for.
+See [`examples/spawn-memory-cap`](examples/spawn-memory-cap) for a copyable config.
+
+The ceiling is `MemoryMax` plus `MemorySwapMax=0`, and deliberately not `MemoryHigh`.
+`MemoryHigh` looks like free back-pressure before the hard kill, but it only throttles, and an agent's growth is overwhelmingly anonymous memory, which without swap is not reclaimable at all - so the throttle parks the process in uninterruptible sleep instead of ending it.
+`MemorySwapMax=0` is what keeps the ceiling honest: cgroup v2 accounts swap separately from `memory.max`, so with swap available a capped agent can hold its ceiling in RAM and keep growing into swap, which on a zram host is RAM again.
+[`verification/spawn-memory-cap.md`](verification/spawn-memory-cap.md) holds the measurements behind both choices.
+
+Containment never becomes a spawn failure.
+A host with no `systemd-run`, no user manager, or a delegated cgroup without the `memory` controller launches the agent unwrapped and says so on the pane's stderr, and a checkout missing `bin/fm-memcap.sh` drops the ceiling with a warning rather than typing a command the pane shell cannot run.
+Two consequences are worth knowing: a ceiling kill takes the agent but leaves its pane and shell alive, which firstmate reads exactly like any other agent crash (the kernel's own `Memory cgroup out of memory` line in `dmesg` is what distinguishes them); and a process the agent hands to an already-running daemon, such as a `pm2` app, is a child of that daemon and stays outside the scope.
+
 ## Upstream drift watch (upstream remote)
 
 For a firstmate maintainer's own working copy, post remote-swap `origin` is the captain's fork and `upstream` is the read-only parent template (`kunchenguid/firstmate`); see [`CONTRIBUTING.md`](../CONTRIBUTING.md) for the inverted layout.
