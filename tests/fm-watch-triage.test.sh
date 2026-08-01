@@ -460,6 +460,81 @@ test_crew_absorb_class_done_without_pause_still_surfaces() {
   pass "crew_absorb_class: a done task with no declared pause keeps ordinary none classification, unaffected by the done-pause override"
 }
 
+# Regression (2026-07-31 live incident: scaffold-returns-readme-currency,
+# falsework-cos-deliver-to-a-human): a no-mistakes run genuinely PARKED at a
+# gate (fm-crew-state.sh's own `state: parked`, not the run-step fallback the
+# gate override above handles) fell straight through to `none` because neither
+# the working nor the done branch matches `state: parked` at all. The task's
+# own last status line correctly declares `paused: ...` and it has a still-open
+# keyed decision, but crew_absorb_class ignored both, so the watcher's
+# pause_state_class never latched a `paused` verdict and re-surfaced the
+# identical stale hash on every single poll for as long as the captain's
+# decision was outstanding. Fixed with the same two-signal bar as the run-step
+# gate override (declared pause AND an open keyed decision), not the
+# single-signal done bar - see the "Parked-state override" comment above
+# crew_absorb_class for why.
+test_crew_absorb_class_honors_declared_pause_at_parked_gate() {
+  local dir fakebin state
+  dir=$(make_case absorb-parked-gate); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: authority decision)'
+  {
+    printf 'needs-decision: run parked at the review gate on one ask-user finding\n'
+    printf 'paused: parked at the review gate awaiting the captain decision\n'
+  } > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "a parked run with a declared pause and an open keyed decision was not classed paused"
+  crew_is_paused task-a || fail "crew_is_paused did not recognize the parked-gate pause verdict"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a parked run with a declared pause and an open keyed decision is honored as paused"
+}
+
+# Disconfirming check for the fix above: a parked run with NEITHER a declared
+# pause NOR an open decision - the genuinely wedged case the alarm exists to
+# catch - must still classify as none and surface immediately, exactly as
+# before. The override only fires behind BOTH signals together.
+test_crew_absorb_class_parked_without_pause_or_decision_still_surfaces() {
+  local dir fakebin state
+  dir=$(make_case absorb-parked-no-signal); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)'
+  printf 'working: implementing the fix\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a parked run with no declared pause and no open decision was wrongly classed absorbable"
+  ! crew_is_paused task-a || fail "a parked run with no declared pause and no open decision was wrongly classed paused"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a parked run with neither signal keeps ordinary none classification and still surfaces"
+}
+
+# Disconfirming check for only ONE of the two required signals: a parked run
+# with an open decision but NO declared paused: line must still surface - the
+# override requires both, so a worker that opens a decision without appending
+# its own pause line is unaffected (matches the run-step gate override's own
+# single-signal disconfirming test above).
+test_crew_absorb_class_parked_with_only_open_decision_still_surfaces() {
+  local dir fakebin state
+  dir=$(make_case absorb-parked-decision-only); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s)'
+  printf 'needs-decision: run parked at the review gate on one ask-user finding\n' > "$state/task-a.status"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a parked run with an open decision but no declared pause was wrongly classed absorbable"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a parked run with an open decision but no declared pause keeps ordinary none classification"
+}
+
 # Behavioral regression, same live incident: drives the real fm-watch.sh subprocess
 # through several poll cycles (FM_POLL=1) with an unchanging pane, an orphaned
 # working/run-step verdict, a declared pause, and a fake tmux reporting the
@@ -566,6 +641,54 @@ test_nonterminal_stale_paused_after_done_no_wedge_storm() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a done task's own declared pause latches .paused-<key> and stays absorbed across repeated polls instead of re-nagging every one"
+}
+
+# Regression (2026-07-31 live incident: scaffold-returns-readme-currency,
+# falsework-cos-deliver-to-a-human): a task whose no-mistakes run is genuinely
+# PARKED at a gate (fm-crew-state.sh reports `state: parked`), with its own
+# last status line declaring a `paused:` external wait and a still-open keyed
+# decision. Primes .stale-<key> to the pane hash so the very first real poll
+# enters the per-hash guard's non-first-sight branch directly. Before the fix,
+# crew_absorb_class returned `none` for a parked state regardless of the
+# declared pause and open decision, so pause_state_class never returned
+# `paused`, and the watcher re-surfaced this stale hash on literally every
+# poll, forever, exiting the watcher each time. Confirms the library fix
+# actually latches through fm-watch.sh's own pause_state_class, not just in
+# isolation.
+test_nonterminal_stale_paused_at_parked_gate_no_wedge_storm() {
+  local dir state fakebin out window key pane_hash sig pid statusf
+  dir=$(make_case nonterminal-stale-paused-at-parked-gate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-parked-gate"
+  printf 'idle, parked at the review gate' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nbackend=tmux\n' "$window" > "$state/parked-gate.meta"
+  statusf="$state/parked-gate.status"
+  {
+    printf 'needs-decision: run parked at the review gate on one ask-user finding\n'
+    printf 'paused: parked at the review gate awaiting the captain decision\n'
+  } > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-parked-gate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  pane_hash=$(hash_text "idle, parked at the review gate")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '%s' "$pane_hash" > "$state/.stale-$key"
+  printf '1\n' > "$state/.count-$key"
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review: 1 finding(s) (ask-user: authority decision)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a parked task's declared pause at an open gate re-surfaced instead of staying absorbed across repeated polls (the wedge-storm regression): $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a parked task's declared pause at an open gate printed a wake reason instead of staying absorbed"
+  [ ! -s "$state/.wake-queue" ] || fail "a parked task's declared pause at an open gate enqueued a wake instead of staying absorbed"
+  [ -e "$state/.paused-$key" ] || fail "the .paused-<key> marker did not latch for a parked task's declared pause at an open gate"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a parked task's declared pause at an open gate must not start the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a parked task's own declared pause at a still-open gate latches .paused-<key> and stays absorbed across repeated polls instead of re-nagging every one"
 }
 
 # Regression: FM_CREW_STATE_NM_TIMEOUT=0 previously slipped past its sanitizer
@@ -2361,8 +2484,12 @@ test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive
 test_crew_absorb_class_unpaused_wedge_still_surfaces
 test_crew_absorb_class_honors_declared_pause_after_done
 test_crew_absorb_class_done_without_pause_still_surfaces
+test_crew_absorb_class_honors_declared_pause_at_parked_gate
+test_crew_absorb_class_parked_without_pause_or_decision_still_surfaces
+test_crew_absorb_class_parked_with_only_open_decision_still_surfaces
 test_nonterminal_stale_paused_orphaned_run_step_latches_marker
 test_nonterminal_stale_paused_after_done_no_wedge_storm
+test_nonterminal_stale_paused_at_parked_gate_no_wedge_storm
 test_absorb_zero_env_values_sanitized_to_default
 test_absorb_zero_padded_env_values_sanitized_to_default
 test_signal_crew_provably_working_classifier

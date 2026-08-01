@@ -403,8 +403,9 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 #             (e.g. waiting on CI);
 #   paused  - the crew's authoritative current state is a declared external-wait
 #             pause (paused:), which is EXPECTED to idle;
-#   none    - neither, so the wake must surface (a stopped/finished/parked/failed/
-#             torn-down/unknown crew, or an unreadable verdict) - INCLUDING a
+#   none    - neither, so the wake must surface (a stopped/finished/failed/torn-down/
+#             unknown crew, a parked crew missing the declared-pause-plus-open-decision
+#             pair, or an unreadable verdict) - INCLUDING a
 #             fm-crew-state.sh read that hit the hard timeout above: a timed-out
 #             read must never read as working, or a genuinely wedged crew behind
 #             a hung no-mistakes call would be absorbed instead of surfaced.
@@ -455,6 +456,27 @@ FM_CREW_ABSORB_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_ABSORB_KILL_AFT
 # a plain done:/failed:/etc. last line, so it still falls through to `none` and
 # surfaces immediately, exactly as before.
 #
+# Parked-state override: a run genuinely PARKED at a gate (fm-crew-state.sh's
+# own `state: parked`, not the run-step fallback above) still fell straight to
+# `none` because neither the working nor the done branch matches it, so the
+# watcher re-surfaced the identical stale hash on every poll for as long as the
+# captain's decision was outstanding (regression: scaffold-returns-readme-currency,
+# falsework-cos-deliver-to-a-human). Fixed with the SAME two-signal bar as the
+# run-step gate override above, not the single-signal done bar: require BOTH a
+# declared paused: line AND a still-open keyed decision. A parked state means
+# the pipeline is stopped by construction, but that alone does not prove the
+# wait is a deliberate, expected one - a worker can be parked because it is
+# genuinely wedged with no decision pending, and the open decision is the
+# machine-checked proof the wait is real rather than inferred from prose. Two
+# signals were considered: the open decision alone (broader - covers a worker
+# that parks correctly but forgets to append a pause line), or both signals
+# together (narrower - matches the existing run-step override exactly). Chosen:
+# both signals, because the whole point of this classifier is catching a
+# genuinely stuck worker, and a bare open-decision-only bar would make a wedged
+# parked run with a stray leftover decision indistinguishable from a healthy
+# one. A parked run with NEITHER signal - or only one - is unaffected: it falls
+# through to `none` and surfaces immediately, exactly as before.
+#
 # NOT a pure read: fm-crew-state.sh may make a bounded no-mistakes call, so callers
 # run it only on no-verb signal and first-sighting stale paths, never every wake.
 # FM_CREW_STATE_BIN lets tests stub the verdict.
@@ -498,6 +520,16 @@ crew_absorb_class() {  # <id>
     if [ -n "$state_dir" ]; then
       last=$(last_status_line "$state_dir/$id.status")
       status_is_paused "$last" && { printf 'paused'; return; }
+    fi
+  fi
+  if [ "$state" = "parked" ]; then
+    state_dir=${STATE:-${FM_STATE_OVERRIDE:-}}
+    if [ -n "$state_dir" ]; then
+      statusf="$state_dir/$id.status"
+      last=$(last_status_line "$statusf")
+      if status_is_paused "$last" && [ -n "$(status_open_decisions "$statusf")" ]; then
+        printf 'paused'; return
+      fi
     fi
   fi
   printf 'none'
