@@ -18,6 +18,19 @@
 # The probe is what makes a non-systemd host, a session with no user manager, a
 # delegated cgroup without the memory controller, and a systemd too old for one
 # of these properties all degrade the same way instead of breaking the launch.
+# The one gap in that: the probe and the real launch are two separate
+# systemd-run calls, and the real one is exec'd, so a failure landing in the gap
+# between them (a user-manager restart, DBus pressure, a fork failure) replaces
+# the caller with no unwrapped retry. Closing it means forking, which costs the
+# tty and the single-process shape below, so it is written down rather than
+# fixed. It is the one remaining way this layer can take a launch down.
+# The probe deliberately runs `true` rather than allocating what an agent
+# actually needs. Allocating the measured 384 MiB minimum costs 3092 ms per
+# spawn against 21 ms for `true`, and it is a 384 MiB spike at the exact moment
+# the host is starting an agent - the pressure this whole layer exists to avoid.
+# The floor in bin/fm-memcap-lib.sh answers the same question ("is this ceiling
+# big enough to run an agent") for free, so the probe is left to answer only the
+# question it is cheap at: can this host create the scope at all.
 # Exec, not fork: `systemd-run --scope` registers the transient unit and then
 # execs, so the wrapped command keeps the caller's tty and adds no process layer.
 # MemorySwapMax=0 is deliberate. cgroup v2 accounts swap separately from
@@ -63,6 +76,23 @@ done
 
 [ -n "$MAX" ] || { echo "error: --max is required" >&2; exit 2; }
 
+# Apply the same floor bin/fm-spawn.sh applies, so a ceiling that reaches this
+# wrapper by any other route cannot be smaller than an agent needs either.
+# bin/fm-memcap-lib.sh owns the number, the comparison, and the warning text; a
+# checkout without it skips the floor rather than failing the launch.
+# Parameter expansion rather than dirname(1): this runs with whatever PATH the
+# pane has, and under `set -e` a dirname that is not on it would abort the
+# launch - the one thing this script exists to never do.
+case "$0" in
+  */*) LIB="${0%/*}/fm-memcap-lib.sh" ;;
+  *) LIB="./fm-memcap-lib.sh" ;;
+esac
+if [ -r "$LIB" ]; then
+  # shellcheck source=bin/fm-memcap-lib.sh
+  . "$LIB"
+  MAX=$(fm_memcap_apply_floor "$MAX" 'fm-memcap.sh --max')
+fi
+
 # env(1)-style leading assignments. A word only counts when its name is a real
 # shell identifier, so a command whose own first argument happens to contain '='
 # is never mistaken for an assignment.
@@ -97,11 +127,18 @@ SCOPE_ARGS=(--user --scope --quiet --collect
 # would otherwise stall the launch forever, so bound it when timeout(1) exists.
 probe_scope() {
   command -v systemd-run >/dev/null 2>&1 || return 1
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "${FM_MEMCAP_PROBE_TIMEOUT:-10}" systemd-run "${SCOPE_ARGS[@]}" -- true >/dev/null 2>&1
-  else
-    systemd-run "${SCOPE_ARGS[@]}" -- true >/dev/null 2>&1
-  fi
+  # The redirect is on a braced group, not a subshell. Bash announces a
+  # signal-killed foreground child on the stderr of the shell that REAPED it, so
+  # only a redirect taking effect in that same shell suppresses the raw
+  # job-control line; forking a subshell leaves the parent to announce it. This
+  # keeps the message below as the pane's only output when a probe is killed.
+  {
+    if command -v timeout >/dev/null 2>&1; then
+      timeout "${FM_MEMCAP_PROBE_TIMEOUT:-10}" systemd-run "${SCOPE_ARGS[@]}" -- true
+    else
+      systemd-run "${SCOPE_ARGS[@]}" -- true
+    fi
+  } >/dev/null 2>&1
 }
 
 if probe_scope; then

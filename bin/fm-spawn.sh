@@ -119,10 +119,11 @@
 # Every launch is wrapped in bin/fm-memcap.sh, which runs the agent inside its own
 # memory-capped systemd user scope so a runaway agent dies in its own box instead of
 # stalling the whole machine in reclaim. The ceiling defaults per kind and is
-# overridable via config/spawn-memory-cap or FM_SPAWN_MEMORY_CAP
-# (bin/fm-memcap-lib.sh owns the policy, docs/configuration.md the schema); the
-# requested value is recorded as meta memcap=<spec|off>. A host that cannot provide
-# a scope launches unwrapped, so this never turns into a spawn failure.
+# overridable via config/spawn-memory-cap or FM_SPAWN_MEMORY_CAP, and is never
+# allowed below the floor an agent needs to start (bin/fm-memcap-lib.sh owns the
+# policy, docs/configuration.md the schema); it is recorded as meta
+# memcap=<spec|off|unavailable>. A host that cannot provide a scope launches
+# unwrapped, so this never turns into a spawn failure.
 # claude launches (crewmate, scout, and secondmate) carry
 # CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 so they auto-compact the way the primary
 # interactive session already does via its own .claude/settings.local.json, which a
@@ -1520,18 +1521,26 @@ $("$FM_ROOT/bin/fm-project-mode.sh" "$PROJ_NAME")
 EOF
 fi
 
-# Per-spawn memory ceiling (bin/fm-memcap-lib.sh owns the policy and the config
-# schema; docs/configuration.md is the captain-facing owner). Resolved here, not
-# in the pane, because the config lives in this home and the kind is known only
-# here. The wrapper itself decides whether this host can honor the ceiling, so
-# the value recorded below is what this spawn ASKED for; the pane says so on
-# stderr when the host cannot provide it. A missing or non-executable wrapper
-# (an old checkout, a partial sync) drops the ceiling rather than typing a
-# command the pane shell cannot run.
+# Per-spawn memory ceiling (bin/fm-memcap-lib.sh owns the policy, the floor, and
+# the config schema; docs/configuration.md is the captain-facing owner).
+# Resolved here, not in the pane, because the config lives in this home and the
+# kind is known only here. The wrapper itself decides whether this host can
+# honor the ceiling, so a recorded spec is what this spawn ASKED for; the pane
+# says so on stderr when the host cannot provide it.
+# The guard below covers an absent wrapper, a wrapper that is not executable,
+# a dangling symlink, and a zero-byte file. It does not, and cannot cheaply,
+# detect a file that is executable and non-empty but is not this script.
 MEMCAP=$(fm_memcap_resolve "$CONFIG/spawn-memory-cap" "$KIND")
-if [ "$MEMCAP" != off ] && [ ! -x "$FM_ROOT/bin/fm-memcap.sh" ]; then
-  echo "warning: $FM_ROOT/bin/fm-memcap.sh is missing or not executable; launching $ID without a memory ceiling" >&2
+# What is RECORDED, which is not always what was asked for: `off` means a
+# deliberate choice to run with no ceiling, and `unavailable` means this
+# checkout could not provide one. Collapsing those two into `off` would let a
+# broken checkout read back as a captain's decision.
+MEMCAP_RECORDED=$MEMCAP
+if [ "$MEMCAP" != off ] &&
+   { [ ! -x "$FM_ROOT/bin/fm-memcap.sh" ] || [ ! -s "$FM_ROOT/bin/fm-memcap.sh" ]; }; then
+  echo "warning: $FM_ROOT/bin/fm-memcap.sh is missing, empty, or not executable; launching $ID without a memory ceiling" >&2
   MEMCAP=off
+  MEMCAP_RECORDED=unavailable
 fi
 
 META_WINDOW=$T
@@ -1547,7 +1556,7 @@ META_WINDOW=$T
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"
-  echo "memcap=$MEMCAP"
+  echo "memcap=$MEMCAP_RECORDED"
   [ "$KIND" = secondmate ] || echo "compose_project=$COMPOSE_PROJECT"
   # backend= is written only for a non-default (non-tmux) backend, so the
   # default path's meta stays byte-identical (absent backend= means tmux;

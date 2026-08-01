@@ -194,8 +194,8 @@ See [`examples/tmp-alert-threshold`](examples/tmp-alert-threshold) for a copyabl
 ## Agent memory ceiling (config/spawn-memory-cap)
 
 Every direct report `bin/fm-spawn.sh` launches - crewmate, scout, or secondmate - runs inside its own memory-capped systemd user scope, so one runaway agent dies in its own box instead of stalling the whole machine in reclaim.
-`bin/fm-spawn.sh` resolves the ceiling and wraps the launch command in [`bin/fm-memcap.sh`](../bin/fm-memcap.sh), which is the only thing that talks to `systemd-run`; [`bin/fm-memcap-lib.sh`](../bin/fm-memcap-lib.sh) owns the policy and the spec grammar.
-The requested value is recorded as `memcap=<spec|off>` in `state/<id>.meta`.
+`bin/fm-spawn.sh` resolves the ceiling and wraps the launch command in [`bin/fm-memcap.sh`](../bin/fm-memcap.sh), which is the only thing that talks to `systemd-run`; [`bin/fm-memcap-lib.sh`](../bin/fm-memcap-lib.sh) owns the policy, the floor, and the spec grammar.
+The value is recorded as `memcap=<spec|off|unavailable>` in `state/<id>.meta`, where a spec is what this spawn asked for after the floor was applied, `off` is a deliberate choice to run with no ceiling, and `unavailable` means this checkout could not provide one.
 
 `config/spawn-memory-cap` (local, gitignored) holds one value on its first non-empty, non-comment line: an absolute size with systemd's 1024-based `K`/`M`/`G`/`T` suffixes, a `1`-`100` percentage of this host's RAM, or `off`.
 `FM_SPAWN_MEMORY_CAP` overrides the file for a single spawn.
@@ -204,6 +204,14 @@ A ship task builds and runs test suites inside its ceiling; a scout reads code a
 Percentages, not byte counts, so the default means the same thing on a small host and a large one.
 A value that cannot be parsed warns and falls back to that default rather than silently dropping the protection the typo asked for.
 See [`examples/spawn-memory-cap`](examples/spawn-memory-cap) for a copyable config.
+
+No ceiling is ever applied below **1 GiB**, whatever its source.
+A ceiling smaller than an agent needs to start does not contain a runaway, it kills every launch in the home at once, and the pane shows only `Killed` with nothing to distinguish it from an ordinary crash.
+`40M` is one keystroke from the `40%` the example ships, and the file is inherited by secondmate homes, so a single typo would otherwise propagate.
+Anything resolving below the floor is raised to it and warned about on stderr, naming both the value rejected and the value used instead.
+The check happens after a percentage has been resolved against this host, which is the case nobody configures and nobody would otherwise be warned about: 25% is generous here and below a live agent on a 2 GB machine.
+`off` is untouched by the floor, since that is a deliberate choice to run with no ceiling rather than a ceiling too small to survive.
+On a host with less RAM than the floor the clamp yields a ceiling that never binds, which is the honest outcome - containment cannot help a machine that small, and refusing to spawn there would be the worse failure.
 
 The ceiling is `MemoryMax` plus `MemorySwapMax=0`, and deliberately not `MemoryHigh`.
 `MemoryHigh` looks like free back-pressure before the hard kill, but it only throttles, and an agent's growth is overwhelmingly anonymous memory, which without swap is not reclaimable at all - so the throttle parks the process in uninterruptible sleep instead of ending it.

@@ -70,6 +70,50 @@ The cause is structural rather than tuning: an agent's growth is almost entirely
 With `MemoryMax=200M -p MemorySwapMax=0` and no `MemoryHigh`, the identical runaway died in one second with exit 137.
 A ceiling exists to end a stall, so the variant that introduces a slower stall is not shipped.
 
+## Why the floor is 1 GiB, and why the probe does not measure it
+
+A ceiling is only containment above the size an agent needs to start; below it, every launch in the home is SIGKILLed at once.
+The floor is set from measurement on this host, not from taste.
+
+A one-shot agent needs between 256 MiB and 384 MiB just to answer, and `claude --version` alone needs more than 40 MiB:
+
+```sh
+$ bin/fm-memcap.sh --max 40M  -- claude --version            # rc=137, no output at all
+$ bin/fm-memcap.sh --max 128M -- claude --version            # 2.1.220 (Claude Code)
+$ bin/fm-memcap.sh --max 256M -- claude -p '...' --model haiku   # rc=137
+$ bin/fm-memcap.sh --max 384M -- claude -p '...' --model haiku   # answers
+```
+
+Live crewmates on this box sit at 577-625 MB resident before they build or test anything.
+1 GiB is the next round number above that observed steady state, leaving roughly 400 MB of headroom for the build or test suite a ship task runs inside its own ceiling.
+
+The probe deliberately does not measure this property directly.
+Allocating the 384 MiB minimum inside the probe scope costs 3092 ms per spawn against 21 ms for `true`, measured here over 5 and 10 runs:
+
+```
+probe with true            : 21 ms/run
+probe alloc  64MiB (bash)  : 548 ms/run
+probe alloc 384MiB (bash)  : 3092 ms/run
+bare bash 384MiB (no scope): 3101 ms/run
+```
+
+The bare unscoped figure matching the scoped one shows the cost is the allocation itself, not the scope.
+That is three seconds and a 384 MiB spike at the exact moment the host is starting an agent, which is the pressure this whole layer exists to avoid.
+The floor answers the same question deterministically and for free, so the probe is left to answer only the question it is cheap at: whether this host can create the scope at all.
+
+The floor's own arrival is verified end to end rather than asserted:
+
+```sh
+$ bin/fm-memcap.sh --max 40M -- bash -c 'cg=$(cut -d: -f3 /proc/self/cgroup); cat /sys/fs/cgroup$cg/memory.max'
+warning: fm-memcap.sh --max: memory ceiling 40M is below 1G, less than an agent needs to start; using 1G instead
+1073741824
+$ bin/fm-memcap.sh --max 40M -- claude --version
+warning: fm-memcap.sh --max: memory ceiling 40M is below 1G, less than an agent needs to start; using 1G instead
+2.1.220 (Claude Code)
+```
+
+The second command is the exact invocation that returned `rc=137` with no output before the floor existed.
+
 ## Containment is targeted
 
 An 8 GiB runaway - the scale of the agents in this host's kernel log - inside a 1G ceiling, with a 500 MiB witness process running outside the scope:

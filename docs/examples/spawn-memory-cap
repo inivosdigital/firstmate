@@ -18,6 +18,12 @@
 # warns and falls back to that same default rather than silently removing the
 # protection the typo was asking for.
 #
+# There is a hard floor of 1 GiB. Note how close "40M" is to the "40%" below: a
+# ceiling below what an agent needs to START does not contain a runaway, it
+# kills every launch this home makes, and the pane shows only "Killed". Anything
+# resolving under the floor is raised to it and says so, so the typo costs you a
+# warning rather than a fleet. "off" is exempt, being a deliberate choice.
+#
 # One value covers every kind here on purpose; per-kind tuning lives in the
 # built-in defaults, which already scale with the size of the machine.
 # FM_SPAWN_MEMORY_CAP overrides this file for a single spawn.
