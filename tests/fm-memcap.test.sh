@@ -370,6 +370,9 @@ test_ceiling_kills_only_inside_the_scope() {
     return 0
   fi
   local rc out witness_rc
+  # This test's allocation is 4 GiB; peak real usage stays at the 1G ceiling
+  # because the scope kills it there, but running the suite needs roughly
+  # 1.2 GiB of free headroom on the host. Worth knowing on a constrained CI box.
   # A witness holding real memory OUTSIDE the scope must survive: the point of a
   # per-task ceiling over a machine-wide killer is that the runaway dies and
   # nothing else does.

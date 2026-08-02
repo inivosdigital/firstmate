@@ -78,8 +78,12 @@ done
 
 # Apply the same floor bin/fm-spawn.sh applies, so a ceiling that reaches this
 # wrapper by any other route cannot be smaller than an agent needs either.
-# bin/fm-memcap-lib.sh owns the number, the comparison, and the warning text; a
-# checkout without it skips the floor rather than failing the launch.
+# bin/fm-memcap-lib.sh owns the number, the comparison, and the warning text.
+# An absent, unreadable, non-regular (e.g. a directory), or zero-byte lib
+# skips the floor rather than failing the launch; a syntactically corrupt one
+# still aborts this wrapper under `set -eu` - unreachable in practice, since
+# bin/fm-spawn.sh sources this same file unconditionally and fails first,
+# before anything is typed into the pane.
 # Parameter expansion rather than dirname(1): this runs with whatever PATH the
 # pane has, and under `set -e` a dirname that is not on it would abort the
 # launch - the one thing this script exists to never do.
@@ -87,10 +91,12 @@ case "$0" in
   */*) LIB="${0%/*}/fm-memcap-lib.sh" ;;
   *) LIB="./fm-memcap-lib.sh" ;;
 esac
-if [ -r "$LIB" ]; then
+if [ -f "$LIB" ] && [ -r "$LIB" ]; then
   # shellcheck source=bin/fm-memcap-lib.sh
   . "$LIB"
-  MAX=$(fm_memcap_apply_floor "$MAX" 'fm-memcap.sh --max')
+  if command -v fm_memcap_apply_floor >/dev/null 2>&1; then
+    MAX=$(fm_memcap_apply_floor "$MAX" 'fm-memcap.sh --max')
+  fi
 fi
 
 # env(1)-style leading assignments. A word only counts when its name is a real
@@ -128,10 +134,11 @@ SCOPE_ARGS=(--user --scope --quiet --collect
 probe_scope() {
   command -v systemd-run >/dev/null 2>&1 || return 1
   # The redirect is on a braced group, not a subshell. Bash announces a
-  # signal-killed foreground child on the stderr of the shell that REAPED it, so
-  # only a redirect taking effect in that same shell suppresses the raw
-  # job-control line; forking a subshell leaves the parent to announce it. This
-  # keeps the message below as the pane's only output when a probe is killed.
+  # signal-killed foreground child on the stderr of the shell that REAPED it,
+  # and a subshell would suppress the raw job-control line just as well, since
+  # the subshell is itself the shell doing the reaping. The braced group is
+  # used anyway because it does not fork a second shell. This keeps the
+  # message below as the pane's only output when a probe is killed.
   {
     if command -v timeout >/dev/null 2>&1; then
       timeout "${FM_MEMCAP_PROBE_TIMEOUT:-10}" systemd-run "${SCOPE_ARGS[@]}" -- true

@@ -97,9 +97,14 @@ fm_memcap_total_bytes() {
 
 # fm_memcap_below_floor <spec>
 # True only when <spec> can be SHOWN to resolve below the floor on this host.
-# Anything unevaluable - an unreadable /proc/meminfo, a number too large to
-# multiply safely - reports false, so a value this cannot judge is left exactly
-# as it was rather than silently rewritten.
+# An unreadable /proc/meminfo reports false, so a value this cannot judge is
+# left exactly as it was rather than silently rewritten. The suffix and bare
+# branches carry the same guarantee for a number too large to compare safely,
+# via their digit-count guard below. The percentage branch has no equivalent
+# guard: a FM_MEMCAP_TOTAL_BYTES beyond what 64-bit arithmetic can multiply
+# wraps negative and clamps to the floor instead of being left alone - safe in
+# direction only, and moot in practice since the real source is /proc/meminfo's
+# MemTotal, always far too small to reach that range.
 fm_memcap_below_floor() {
   local spec=${1:-} num limit total
   case "$spec" in
@@ -121,6 +126,12 @@ fm_memcap_below_floor() {
     *T) num=${spec%?}; limit=$(( FM_MEMCAP_FLOOR_BYTES / 1099511627776 )) ;;
     *) num=$spec; limit=$FM_MEMCAP_FLOOR_BYTES ;;
   esac
+  # A value this lib's grammar does not actually accept - a decimal, or a
+  # systemd suffix (P, E) this lib does not scale - reaches here only via a
+  # hand-typed `--max`, never through fm_memcap_valid. Floor it rather than
+  # feeding a non-digit string to the arithmetic comparison below, which would
+  # leak a raw `integer expression expected` diagnostic instead of a warning.
+  case "$num" in *[!0-9]*) return 0 ;; esac
   # Divide the floor by the suffix instead of multiplying the value up to it.
   # The limit is then always a small number, and an absurd pasted value is
   # decided on digit count before any arithmetic touches it, so nothing here
