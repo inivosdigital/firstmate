@@ -261,6 +261,22 @@ test_floor_leaves_an_unevaluable_value_alone_and_quietly() {
   pass "fm-memcap: a value the floor cannot evaluate is left untouched, with no raw diagnostic"
 }
 
+test_floor_guards_a_spec_outside_this_libs_grammar() {
+  local spec out err
+  err="$TMP_ROOT/floor-outside-grammar.err"
+  # A hand-typed --max spec this lib's grammar does not scale - a decimal, a
+  # bare suffix with no digits, or a systemd suffix like P/E this lib does not
+  # know - reaches fm_memcap_below_floor only through direct invocation, never
+  # through fm_memcap_valid. It must floor rather than feed a non-digit string
+  # to the arithmetic comparison, which would leak a raw bash diagnostic.
+  for spec in 1.5M 1P 1E K M G T; do
+    out=$(fm_memcap_apply_floor "$spec" test 2>"$err")
+    [ "$out" = "$FM_MEMCAP_FLOOR_SPEC" ] || fail "'$spec' is outside this lib's grammar and must floor, got '$out'"
+    assert_grep 'below 1G' "$err" "'$spec' must warn like any other floored value, not leak a raw diagnostic"
+  done
+  pass "fm-memcap: a spec outside this lib's grammar floors instead of leaking a raw diagnostic"
+}
+
 # --- wrapper: usage ---------------------------------------------------------
 
 test_wrapper_usage_errors() {
@@ -328,6 +344,44 @@ test_wrapper_runs_the_command_when_scope_creation_fails() {
   assert_contains "$out" "ran" "the command must still run when scope creation fails"
   assert_contains "$out" "no usable systemd user scope" "the degrade must state the reason"
   pass "fm-memcap.sh: a systemd-run that cannot create the scope degrades instead of failing the launch"
+}
+
+# --- wrapper: a broken sibling lib must not abort the launch ---------------
+#
+# bin/fm-memcap-lib.sh is sourced by relative path next to this script. An
+# absent lib already skips the floor rather than failing the launch; the same
+# has to hold for a lib file that exists but is not a normal, function-laden
+# script, since `set -eu` would otherwise abort the wrapper mid-sentence.
+
+wrapper_copy_with_lib() {  # <dir> <dir|empty> -> echoes the copied wrapper's path
+  local dir=$1 mode=$2
+  mkdir -p "$dir"
+  cp "$MEMCAP" "$dir/fm-memcap.sh"
+  case "$mode" in
+    dir) mkdir -p "$dir/fm-memcap-lib.sh" ;;
+    empty) : > "$dir/fm-memcap-lib.sh" ;;
+  esac
+  printf '%s\n' "$dir/fm-memcap.sh"
+}
+
+test_wrapper_survives_a_directory_where_the_lib_should_be() {
+  local wrapper path out rc
+  wrapper=$(wrapper_copy_with_lib "$TMP_ROOT/lib-is-dir" dir)
+  path=$(no_systemd_path)
+  out=$(PATH="$path" "$wrapper" --max 40M -- "$path/printf" 'ran\n' 2>&1); rc=$?
+  expect_code 0 "$rc" "a directory where the sibling lib should be must not abort the wrapper"
+  assert_contains "$out" "ran" "the command must still run when the sibling lib is a directory"
+  pass "fm-memcap.sh: a directory in place of the sibling lib skips the floor instead of aborting"
+}
+
+test_wrapper_survives_an_empty_sibling_lib() {
+  local wrapper path out rc
+  wrapper=$(wrapper_copy_with_lib "$TMP_ROOT/lib-empty" empty)
+  path=$(no_systemd_path)
+  out=$(PATH="$path" "$wrapper" --max 40M -- "$path/printf" 'ran\n' 2>&1); rc=$?
+  expect_code 0 "$rc" "a zero-byte sibling lib must not abort the wrapper"
+  assert_contains "$out" "ran" "the command must still run when the sibling lib defines no floor function"
+  pass "fm-memcap.sh: a zero-byte sibling lib skips the floor instead of aborting"
 }
 
 # --- wrapper: the ceiling is real -------------------------------------------
@@ -706,11 +760,14 @@ test_floor_never_overrides_a_deliberate_off
 test_floor_applies_to_every_source
 test_floor_applies_to_the_default_on_a_small_host
 test_floor_leaves_an_unevaluable_value_alone_and_quietly
+test_floor_guards_a_spec_outside_this_libs_grammar
 test_wrapper_usage_errors
 test_wrapper_applies_leading_assignments
 test_wrapper_does_not_eat_a_command_argument_containing_equals
 test_wrapper_runs_the_command_when_systemd_run_is_absent
 test_wrapper_runs_the_command_when_scope_creation_fails
+test_wrapper_survives_a_directory_where_the_lib_should_be
+test_wrapper_survives_an_empty_sibling_lib
 test_wrapper_puts_the_command_in_a_capped_scope
 test_wrapper_floors_a_ceiling_it_is_handed_directly
 test_wrapper_says_only_its_own_reason_when_the_probe_is_killed

@@ -131,7 +131,7 @@ fm_memcap_below_floor() {
   # hand-typed `--max`, never through fm_memcap_valid. Floor it rather than
   # feeding a non-digit string to the arithmetic comparison below, which would
   # leak a raw `integer expression expected` diagnostic instead of a warning.
-  case "$num" in *[!0-9]*) return 0 ;; esac
+  case "$num" in ''|*[!0-9]*) return 0 ;; esac
   # Divide the floor by the suffix instead of multiplying the value up to it.
   # The limit is then always a small number, and an absurd pasted value is
   # decided on digit count before any arithmetic touches it, so nothing here
