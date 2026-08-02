@@ -348,8 +348,40 @@ clear_pause_tracking() {  # <window>
 }
 
 # Reconcile a declared pause or captain-held status with authoritative crew state.
-# Only a confidently dead ordinary crew may recover paused classification after
-# fm-crew-state has fallen back to stopped or unknown.
+#
+# crew_absorb_class (bin/fm-classify-lib.sh) already reasons about backend
+# liveness everywhere it actually matters for its OWN paused verdicts: its
+# run-step gate override checks a dead agent itself before trusting a stray
+# paused: line under an orphaned working/run-step read, and its done-state
+# override needs no liveness check at all, because nothing runs after done - a
+# declared pause on top of a done state is never contradicted by an active
+# pipeline the way a stray pause under working might be. So a `paused` verdict
+# crew_absorb_class already returned is trusted HERE outright, with no second
+# liveness gate: re-applying one unconditionally overrode a done task's own
+# correctly-classified pause back to `none` for as long as its pane/session
+# stayed open (the ordinary case - a finished ship task idling at the merge
+# gate has no reason to exit), which is exactly the every-few-minutes false
+# wedge alarm this fixes (regression: beamanalyzer-caveat-em-dashes,
+# beamanalyzer-hss-pipe-catalog-reimport, beamanalyzer-verdict-scope-line-followups,
+# all done + declared-paused, all re-alarming on every sweep before this fix).
+# It also removes the "surface once on first sight of a new pane hash" reflex
+# a live agent's directly-paused verdict used to get: the crew's own status-log
+# write already woke firstmate once through the ordinary signal path when it
+# declared the pause (scan_signals/signal_reason_is_actionable, a separate
+# mechanism from this stale-pane cadence), so a second immediate surface here
+# was pure duplication, and keying it to "first sight of this exact pane hash"
+# repeated it every time an idle pane's captured tail drifted (a redrawn
+# timestamp, a cursor blink) - the same repeated-first-sight mechanism behind
+# the live incident above.
+#
+# A `none` verdict is different: it means crew_absorb_class does NOT recognize
+# this crew's state at all (a torn-down worktree, an unattributed endpoint, a
+# read that hit the hard timeout) - only here does the status log's own
+# declared pause get a SEPARATE recovery chance, and only a confidently DEAD
+# ordinary crew may recover it into paused; a live or merely ambiguous agent
+# leaves it none; a secondmate skips this recovery's liveness gate entirely
+# and idles on its own watcher regardless (fm-watch.sh's existing secondmate
+# handling), matching its pre-existing exemption from this check.
 pause_state_class() {  # <window> <task>
   local win=$1 task=$2 key last recheck_file class agent_alive
   key=${win//:/_}
@@ -363,37 +395,32 @@ pause_state_class() {  # <window> <task>
     return
   fi
   if [ -e "$STATE/.paused-$key" ] && [ "$(age_of "$recheck_file")" -lt "$STALE_ESCALATE_SECS" ]; then
-    if [ "$(window_kind "$win")" != secondmate ]; then
-      agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-      if [ "$agent_alive" != dead ]; then
-        rm -f "$recheck_file"
-        printf 'none'
-        return
-      fi
-    fi
     printf 'paused'
     return
   fi
   class=$(crew_absorb_class "$task")
-  if [ "$class" = working ]; then
-    rm -f "$recheck_file"
-    printf 'working'
-    return
-  fi
+  case "$class" in
+    working)
+      rm -f "$recheck_file"
+      printf 'working'
+      return
+      ;;
+    paused)
+      date +%s > "$recheck_file"
+      printf 'paused'
+      return
+      ;;
+  esac
   if [ "$(window_kind "$win")" != secondmate ]; then
     agent_alive=$(fm_backend_agent_alive "$(window_backend "$win")" "$win" 2>/dev/null) || agent_alive=unknown
-    if [ "$agent_alive" != dead ]; then
-      rm -f "$recheck_file"
-      printf 'none'
+    if [ "$agent_alive" = dead ]; then
+      date +%s > "$recheck_file"
+      printf 'paused'
       return
     fi
   fi
-  [ "$class" = none ] && [ "${agent_alive:-unknown}" = dead ] && class=paused
-  case "$class" in
-    paused) date +%s > "$recheck_file" ;;
-    *) rm -f "$recheck_file" ;;
-  esac
-  printf '%s' "$class"
+  rm -f "$recheck_file"
+  printf 'none'
 }
 
 surface_nonterminal_stale() {  # <window> <hash>

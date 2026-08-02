@@ -460,6 +460,62 @@ test_crew_absorb_class_done_without_pause_still_surfaces() {
   pass "crew_absorb_class: a done task with no declared pause keeps ordinary none classification, unaffected by the done-pause override"
 }
 
+# Hard-constraint disconfirming checks for the pause_state_class fix in
+# bin/fm-watch.sh (regression: beamanalyzer-caveat-em-dashes and siblings,
+# see the comment above pause_state_class there): once a direct `paused`
+# verdict from crew_absorb_class is trusted outright with no second liveness
+# gate, the only remaining safety property is that crew_absorb_class itself
+# keeps reporting a NON-paused verdict the moment reality no longer supports
+# a pause. pause_state_class's dispatch is a straight passthrough for
+# anything crew_absorb_class does NOT call `paused` (see its `case "$class"`
+# block), so pinning crew_absorb_class here is equivalent to pinning
+# pause_state_class for these cases; none of them exercise the fix's own new
+# code path (the outright-trust branch), by design. A trailing stale
+# `paused:` line is present in every case below to prove the override does
+# NOT reach for it once the fresher state contradicts it.
+test_crew_absorb_class_hard_constraints_still_surface() {
+  local dir fakebin state
+  dir=$(make_case absorb-hard-constraints); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  # A PR that was green (done) and has since gone red.
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run failed: tests red'
+  printf 'paused: awaiting independent review before merge\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a PR that went red after done was masked by its own stale declared pause"
+
+  # A PR that was closed without merging.
+  export FM_FAKE_CREW_STATE='state: failed · source: run-step · run cancelled: PR closed without merging'
+  printf 'paused: awaiting independent review before merge\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a PR closed without merging was masked by its own stale declared pause"
+
+  # done: reported while the validation run is in fact still active, with a
+  # confirmed-alive agent (rules out the orphaned-run-step dead-agent override).
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'alive'; }
+  export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
+  printf 'paused: awaiting independent review before merge\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = working ] \
+    || fail "an actually-still-active run was masked by a stale declared pause"
+  unset -f fm_backend_agent_alive
+
+  # done: reported but the worktree has since diverged (branch moved, new
+  # uncommitted work resumed) - fm-crew-state.sh's own run-head matching
+  # (unmodified by this fix, see tests/fm-crew-state.test.sh
+  # test_historical_same_branch_rewritten_head_not_current) stops attributing
+  # the old run and instead reports the pane genuinely busy with fresh activity.
+  export FM_FAKE_CREW_STATE='state: working · source: pane · harness busy'
+  printf 'paused: awaiting independent review before merge\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = working ] \
+    || fail "fresh pane activity after a branch move was masked by a stale declared pause"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: a red/cancelled run, a still-active run, and resumed pane activity all still surface despite a stale declared pause; see test_crew_absorb_class_done_without_pause_still_surfaces for the genuinely-wedged-done case and test_nonterminal_stale_not_working_surfaced for the plain idle-with-no-pause case"
+}
+
 # Regression (2026-07-31 live incident: scaffold-returns-readme-currency,
 # falsework-cos-deliver-to-a-human): a no-mistakes run genuinely PARKED at a
 # gate (fm-crew-state.sh's own `state: parked`, not the run-step fallback the
@@ -641,6 +697,62 @@ test_nonterminal_stale_paused_after_done_no_wedge_storm() {
   reap "$pid"
   unset FM_FAKE_CREW_STATE
   pass "a done task's own declared pause latches .paused-<key> and stays absorbed across repeated polls instead of re-nagging every one"
+}
+
+# Regression (2026-08 live incident: beamanalyzer-caveat-em-dashes,
+# beamanalyzer-hss-pipe-catalog-reimport, beamanalyzer-verdict-scope-line-followups):
+# the test above uses an unset/unreadable backend agent (liveness reads
+# "unknown"), which is not what any of the three live tasks actually had - each
+# was a genuinely ALIVE claude session sitting at the merge gate. Before this
+# fix, bin/fm-watch.sh's pause_state_class unconditionally re-checked liveness
+# even for a verdict crew_absorb_class already returned as `paused`, and
+# demoted it to `none` for any agent not confirmed dead - so a done+paused task
+# with a live agent NEVER latched .paused-<key> at all (handle_paused_stale,
+# which sets that marker, is only reached on a `paused` verdict) and re-derived
+# `none` on every single poll, forever. Each poll's own idle-pane capture also
+# drifts slightly in real operation (a redrawn prompt, a blinking cursor), so
+# this reproduces that churn directly instead of holding the pane byte-static,
+# to prove the fix holds even when the hash itself keeps changing underneath
+# it. Watch this fail against the pre-fix pause_state_class: it should die with
+# a stale or possible-wedge wake well before the loop below finishes.
+test_nonterminal_stale_paused_after_done_alive_agent_hash_churn_no_wedge_storm() {
+  local dir state fakebin out window key sig pid statusf i
+  dir=$(make_case nonterminal-stale-paused-after-done-alive-churn); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"
+  window="test:fm-done-paused-alive"
+  printf 'idle, awaiting independent review (0)' > "$dir/pane.txt"
+  printf 'window=%s\nkind=ship\nharness=claude\nbackend=tmux\n' "$window" > "$state/done-paused.meta"
+  statusf="$state/done-paused.status"
+  printf 'paused: awaiting independent review before merge\n' > "$statusf"
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-done-paused_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review (still monitoring for merge/close)'
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$dir/pane.txt" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=claude \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ "$i" -lt 6 ]; do
+    if ! is_live_non_zombie "$pid"; then
+      wait "$pid"
+      fail "a live done+paused agent's churning pane woke the watcher after $i churn cycles: $(cat "$out")"
+    fi
+    sleep 0.4
+    printf 'idle, awaiting independent review (%s)' "$i" > "$dir/pane.txt"
+    i=$((i + 1))
+  done
+  if ! wait_live "$pid" 20; then
+    reap "$pid"; fail "a live done+paused agent's churning pane woke the watcher: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || fail "a live done+paused agent's churning pane printed a wake reason"
+  [ ! -s "$state/.wake-queue" ] || fail "a live done+paused agent's churning pane enqueued a wake"
+  [ -e "$state/.paused-$key" ] || fail "a live done+paused agent's declared pause did not latch .paused-<key>"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a live done+paused agent's churning pane started the wedge timer"
+  reap "$pid"
+  unset FM_FAKE_CREW_STATE
+  pass "a done task's own declared pause stays absorbed for a genuinely alive agent across a repeatedly churning pane hash (the real live-incident mechanism)"
 }
 
 # Regression (2026-07-31 live incident: scaffold-returns-readme-currency,
@@ -1199,10 +1311,16 @@ test_nonterminal_stale_paused_absorbed_then_resurfaced() {
 # fm-crew-state then authoritatively reports stopped rather than paused, but the
 # confirmed-dead agent plus the declared wait or captain-held transfer must retain
 # bounded pause handling.
-# A still-live agent at an external-decision gate is the disconfirming case: it
-# must surface once, while the unchanged hash must not append the same wake on
-# every watcher re-arm.
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
+# A still-live agent directly classified paused by crew_absorb_class gets the SAME
+# bounded cadence, not a special immediate surface: the status-log write that
+# declared the pause already woke firstmate once through the ordinary signal path
+# (unrelated to this stale-pane cadence), so a second immediate surface here was
+# pure duplication - and keying that duplicate to "first sight of this exact pane
+# hash" repeated it every time an idle pane's captured tail drifted, which is the
+# every-few-minutes false wedge alarm fixed in bin/fm-watch.sh's pause_state_class
+# (regression: beamanalyzer-caveat-em-dashes and siblings, done + declared-paused
+# with a live agent, re-alarming on every sweep before this fix).
+test_exited_declared_pause_and_live_gate_share_bounded_cadence() {
   local dir state fakebin out capture_file statusf window key pane_hash sig pid back round wakes bare
   dir=$(make_case exited-declared-pause); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; statusf="$state/held.status"
@@ -1271,37 +1389,60 @@ test_exited_declared_pause_is_bounded_but_live_gate_surfaces() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  # First sight must surface promptly so a live external-decision gate is not
-  # hidden behind the pause cadence.
+  # First sight of a fresh, live, directly-paused crew is absorbed exactly like
+  # a dead one above - no special immediate surface. The status-log write that
+  # declared this pause already woke firstmate once through the ordinary signal
+  # path, so a second immediate wake here would be pure duplication.
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
     FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
-  wait_for_exit "$pid" 40 || fail "live external-decision gate did not surface immediately"
+  if ! wait_live "$pid" 30; then
+    reap "$pid"
+    fail "a fresh live declared pause surfaced instead of absorbing on first sight: $(cat "$out")"
+  fi
+  [ ! -s "$out" ] || { reap "$pid"; fail "a fresh live declared pause printed a wake reason during absorb"; }
+  [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh live declared pause enqueued a wake during absorb"; }
+  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a fresh live declared pause did not latch the pause marker"; }
+  reap "$pid"
 
-  # Re-arm with the stale timer already beyond the wedge threshold. This is the
-  # exact unchanged-hash fallback after the immediate surface: it must retain
-  # the pause cadence and discard any residual wedge timer instead of emitting
-  # a second possible-wedge wake.
-  printf '%s\n' $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  # Age the pause past the threshold: it must still re-surface as a bounded
+  # recheck, exactly like the dead-agent case above - a live agent's pause is
+  # not silenced forever either.
+  back=$(( $(date +%s) - 500 ))
+  if [ "$(uname)" = Darwin ]; then touch -mt "$(date -r "$back" '+%Y%m%d%H%M.%S')" "$statusf"
+  else touch -m -d "@$back" "$statusf"; fi
+  sig=$(seen_sig "$statusf"); printf '%s' "$sig" > "$state/.seen-gate_status"
+  : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
-    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_STALE_ESCALATE_SECS=240 FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a live declared pause past the threshold did not re-surface on the bounded cadence"
+  grep -F "awaiting external" "$out" >/dev/null || fail "a live declared pause recheck was not labeled awaiting-external"
+  grep -F "possible wedge" "$out" >/dev/null && fail "a live declared pause recheck was mislabeled a possible wedge"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a live declared pause recheck retained a wedge timer"
+
+  # Simulate a churning pane hash on the SAME still-paused crew (a redrawn
+  # timestamp, a cursor blink) - the exact live mechanism behind the fixed
+  # incident: repeated "first sight" of a drifting pane hash must not repeatedly
+  # wake firstmate just because the terminal capture differs byte-for-byte.
+  printf 'idle external-decision gate (redrawn)\n' > "$capture_file"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_FAKE_TMUX_CURRENT_COMMAND=grok FM_FAKE_CREW_STATE='state: paused · source: status-log · waiting at an active external-decision gate' \
+    FM_STATE_OVERRIDE="$state" FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh" FM_PAUSE_RESURFACE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" >> "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
     reap "$pid"
-    fail "live external-decision gate escalated on the wedge timer after its immediate surface: $(cat "$out")"
+    fail "a churned pane hash on an unchanged declared pause re-surfaced instead of absorbing: $(cat "$out")"
   fi
-  [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "live external-decision gate lost its pause cadence marker"; }
-  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "live external-decision gate retained the wedge timer"; }
+  [ ! -s "$out" ] || { reap "$pid"; fail "a churned pane hash on an unchanged declared pause printed a wake reason"; }
   reap "$pid"
-  wakes=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  bare=$(awk -F '\t' -v w="$window" '$3 == "stale" && $4 == w && $5 == "stale: " w { n++ } END { print n + 0 }' "$state/.wake-queue")
-  [ "$wakes" -eq 1 ] || fail "live external-decision gate should surface once, got $wakes wakes"
-  [ "$bare" -eq 1 ] || fail "live external-decision gate lost its immediate bare stale surface"
-  pass "exited declared-pause and captain-held panes use bounded pause cadence while a live decision gate still surfaces once"
+  pass "exited declared-pause, captain-held, and a live decision gate all share the same bounded pause cadence, including across a churning pane hash"
 }
 
 test_secondmate_paused_resurfaces_in_normal_mode() {
@@ -2484,11 +2625,13 @@ test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive
 test_crew_absorb_class_unpaused_wedge_still_surfaces
 test_crew_absorb_class_honors_declared_pause_after_done
 test_crew_absorb_class_done_without_pause_still_surfaces
+test_crew_absorb_class_hard_constraints_still_surface
 test_crew_absorb_class_honors_declared_pause_at_parked_gate
 test_crew_absorb_class_parked_without_pause_or_decision_still_surfaces
 test_crew_absorb_class_parked_with_only_open_decision_still_surfaces
 test_nonterminal_stale_paused_orphaned_run_step_latches_marker
 test_nonterminal_stale_paused_after_done_no_wedge_storm
+test_nonterminal_stale_paused_after_done_alive_agent_hash_churn_no_wedge_storm
 test_nonterminal_stale_paused_at_parked_gate_no_wedge_storm
 test_absorb_zero_env_values_sanitized_to_default
 test_absorb_zero_padded_env_values_sanitized_to_default
@@ -2507,7 +2650,7 @@ test_wedge_escalation_marks_demand_deep_inspection_after_threshold
 test_wedge_escalation_resets_when_pane_becomes_active
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
-test_exited_declared_pause_is_bounded_but_live_gate_surfaces
+test_exited_declared_pause_and_live_gate_share_bounded_cadence
 test_secondmate_paused_resurfaces_in_normal_mode
 test_secondmate_nonpaused_stale_remains_suppressed
 test_secondmate_unpause_clears_pause_tracking
