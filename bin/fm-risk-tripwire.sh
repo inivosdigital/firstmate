@@ -105,9 +105,13 @@ PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]
 # the fence delimiters themselves are emitted when they fall inside the task
 # section so brief_scan_text's narrowing can apply the same rule downstream.
 # Both CommonMark fence characters count, and a fence closes only on the
-# character that opened it: "~~~" is the idiomatic wrapper for a pasted markdown
-# template that itself contains backtick fences, which is exactly the shape this
-# tracking exists for, so recognising only backticks left that case open.
+# character that opened it, though not on the length of the run that opened it,
+# so a fence opened with more than three of that character can still be closed
+# early by a shorter inner run of the same character, a case CommonMark
+# forbids but this rule does not check for. "~~~" is the idiomatic wrapper for
+# a pasted markdown template that itself contains backtick fences, which is
+# exactly the shape this tracking exists for, so recognising only backticks
+# left that case open.
 # Falls back to the whole brief when there is no # Task section (a non-standard
 # or hand-written brief), keeping the permissive safety bias.
 brief_task_body() {
@@ -496,11 +500,15 @@ brief_scan_text() {
       # after it to the end of the brief.
       #
       # Only the OPENING decision is fence-gated, deliberately. Flushing and
-      # printing a "#" line inside a fence costs nothing, while suppressing them
-      # cost a whole fenced snippet: the comment fronting the block made its
-      # opening clause a prohibition, so D2 dropped the commands under it. And
-      # letting an in-fence "#" line CLOSE an open exclusion only ever returns
-      # text to the scan, which is the safe direction to be wrong in.
+      # printing a "#" line inside a fence is not free: the flush opens a new
+      # block right there, and a block boundary can turn a D3 clause-drop into
+      # a D2 whole-block drop when the text after it opens with a prohibition -
+      # the same one-directional D2 asymmetry documented above, now reachable
+      # from inside a fence too. Suppressing them instead costs a whole fenced
+      # snippet: the comment fronting the block made its opening clause a
+      # prohibition, so D2 dropped the commands under it. And letting an
+      # in-fence "#" line CLOSE an open exclusion only ever returns text to the
+      # scan, which is the safe direction to be wrong in.
       if (!fence && lvl >= 2 && prevblank && scope_heading($0)) exclevel = lvl
       prevblank = blank
       next

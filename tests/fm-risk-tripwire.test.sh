@@ -1277,6 +1277,141 @@ EOF
   pass "fm-risk-tripwire starts a new block at a fence delimiter"
 }
 
+test_fenced_task_heading_does_not_fool_the_has_task_section_check() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fenced-task-heading"
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  # brief_has_task_section and brief_task_body must never disagree about
+  # whether a "# Task" line is fenced, per the invariant this script's own
+  # header asserts: "the identical match so the two can never disagree about
+  # what is parseable". A brief with no real unfenced "# Task" heading, only a
+  # decoy one pasted inside a "~~~" fence, is the probe: if the two parsers
+  # disagree, one treats the brief as structured (and narrows it) while the
+  # other treats it as unparseable (and scans it whole), and only one of those
+  # readings keeps the risk words that sit outside the fence, behind a
+  # prohibition that only the narrowing path drops.
+  cat <<'EOF' > "$case_dir/data/task-x1/brief.md"
+Update the deploy runbook to describe the recovery script.
+
+Paste this template for reference:
+
+~~~markdown
+# Task
+Example placeholder text.
+~~~
+
+Never rotate the session token manually.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fenced-task-heading: a fenced decoy '# Task' line must not make the brief look structured"
+  assert_contains "$out" "session" "fenced-task-heading: the unfenced prohibition's terms must still reach the scan"
+  assert_contains "$out" "token" "fenced-task-heading: the unfenced prohibition's terms must still reach the scan"
+  pass "fm-risk-tripwire keeps brief_has_task_section and brief_task_body in agreement about a fenced '# Task' line"
+}
+
+test_fenced_setup_heading_does_not_truncate_the_task_body() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fenced-setup-heading"
+  # A pasted copy of the brief scaffold itself, containing a "# Setup" line, is
+  # ordinary authoring (documenting the scaffold, or quoting another task's
+  # brief). brief_task_body must track "~~~" fences on its own, independently
+  # of brief_scan_text and brief_has_task_section, or that inner "# Setup"
+  # line reads as the real scaffold boundary and truncates the task body right
+  # there, losing every risk word after the fence closes.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Update the onboarding doc with this scaffold example:
+
+~~~markdown
+
+# Setup
+run the setup steps here.
+~~~
+
+Then rotate the session token and store the new secret carefully.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fenced-setup-heading: a fenced '# Setup' line must not truncate the task body"
+  assert_contains "$out" "session" "fenced-setup-heading: text after the fence must still be scanned"
+  assert_contains "$out" "token" "fenced-setup-heading: text after the fence must still be scanned"
+  assert_contains "$out" "secret" "fenced-setup-heading: text after the fence must still be scanned"
+  pass "fm-risk-tripwire tracks '~~~' fences in brief_task_body independently of the other two parsers"
+}
+
+test_infence_heading_still_closes_an_open_exclusion() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/infence-exclusion-close"
+  # The header reasons at length about why only the exclusion OPEN is
+  # fence-gated: an in-fence "#" line closing an already-open exclusion only
+  # ever returns text to the scan, the safe direction to be wrong in. Pin that
+  # conclusion: open an exclusion with a real scope heading, then close it with
+  # a heading pasted inside a fenced snippet, and confirm the risk words after
+  # that in-fence heading are scanned rather than staying excluded for the rest
+  # of the brief.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Update the deploy runbook.
+
+## Out of scope
+
+Nothing under `legacy/` should change.
+
+```bash
+## risk heading
+Rotate the session token here.
+```
+
+After the fence.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "infence-exclusion-close: an in-fence heading must still close an open exclusion"
+  assert_contains "$out" "session" "infence-exclusion-close: text after the closing heading must reach the scan"
+  assert_contains "$out" "token" "infence-exclusion-close: text after the closing heading must reach the scan"
+  pass "fm-risk-tripwire lets an in-fence heading close an open exclusion"
+}
+
+test_infence_heading_text_still_reaches_the_scan() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/infence-heading-print"
+  # Heading lines are always scanned and never dropped by D2/D3, even inside a
+  # fence - the print half of that contract, separate from the flush half the
+  # fence-boundary test above already pins. A "#" comment is ordinary brief
+  # authoring inside a fenced command block; if the heading rule's print ever
+  # stopped firing for an in-fence heading, this is the only place its risk
+  # words live and they would vanish silently.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Run the deploy exactly as written, nothing else needs to happen.
+
+```bash
+# rotate the session token and the signing secret here
+echo done
+```
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "infence-heading-print: an in-fence '#' comment must still reach the scan"
+  assert_contains "$out" "session" "infence-heading-print: the in-fence comment's terms must reach the scan"
+  assert_contains "$out" "secret" "infence-heading-print: the in-fence comment's terms must reach the scan"
+  pass "fm-risk-tripwire always prints an in-fence heading line, not just its flush"
+}
+
 test_capitalised_deontic_marker_still_splits_its_clause() {
   local case_dir out status
   case_dir="$TMP_ROOT/capitalised-marker"
@@ -1898,6 +2033,10 @@ test_tilde_fenced_scope_heading_cannot_open_an_excluded_section
 test_nested_backtick_fence_does_not_close_a_tilde_fence
 test_commented_fenced_snippet_still_trips
 test_fence_delimiter_starts_a_new_block
+test_fenced_task_heading_does_not_fool_the_has_task_section_check
+test_fenced_setup_heading_does_not_truncate_the_task_body
+test_infence_heading_still_closes_an_open_exclusion
+test_infence_heading_text_still_reaches_the_scan
 test_capitalised_deontic_marker_still_splits_its_clause
 test_marker_inside_a_word_does_not_split_a_clause
 test_unbounded_no_change_span_does_not_suppress_motivation_prose
