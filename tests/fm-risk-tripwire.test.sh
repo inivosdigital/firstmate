@@ -118,6 +118,254 @@ test_clean_brief_and_diff_passes() {
   pass "fm-risk-tripwire passes a clean brief and diff"
 }
 
+# ---------------------------------------------------------------------------
+# Match-set coverage. The header of bin/fm-risk-tripwire.sh carries the measured
+# record behind the list; these pin its two ends. Each family is asserted in
+# BOTH directions in the same run, because a match set can be wrong by missing a
+# real hit or by firing on firstmate's own everyday vocabulary, and a rule that
+# only ever widens or only ever narrows cannot be checked by one-sided cases.
+# ---------------------------------------------------------------------------
+
+# The two briefs the previous match set missed outright, reproduced from their
+# own prose. Neither carried any term the old list held, which is why no scoping
+# change could have reached them: the words simply were not in the set.
+test_cookie_identity_gating_brief_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/cookie-identity"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Make a labeler's name work regardless of script at the `/who` screen.
+
+Entering a name above U+00FF kills the request with no response at all: `who_submit`'s `set_cookie` raises. Check whether anything else reads or writes that cookie before changing its encoding.
+
+The existing identity gate and length bound still hold, proven by the existing tests still passing.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "cookie-identity: cookie-based identity gating must trip the wire"
+  assert_contains "$out" "cookie" "cookie-identity: should surface the cookie term"
+  assert_contains "$out" "identity gate" "cookie-identity: should surface the qualified identity term"
+  pass "fm-risk-tripwire trips on a cookie-carried identity gate"
+}
+
+test_uid_guard_brief_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/uid-guard"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Consider relocating `api/main.py`'s uid guard from import-time to server-startup-only.
+
+Confirm a startup-time check still fails fast enough, before the server accepts traffic, and does not silently pass through a bad config.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "uid-guard: a uid guard relocation must trip the wire"
+  assert_contains "$out" "uid guard" "uid-guard: should surface the qualified uid term"
+  pass "fm-risk-tripwire trips on a uid guard relocation"
+}
+
+# Firstmate's own approval vocabulary. These are the exact shapes that tripped
+# the gate on 23 briefs of 613 with no access-control sense anywhere in them.
+test_approval_sense_authorize_stays_quiet() {
+  local line case_dir out status i=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/approval-authorize-$i"
+    printf 'Add a --json flag to the sizer report command.\n\n%s\n' "$line" \
+      | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 0 "$status" "approval-authorize-$i: approval prose must not trip the wire"
+    [ -z "$out" ] || fail "approval-authorize-$i: expected no RISK output, got: $out"
+  done <<'EOF'
+Investigate first, then implement: the captain authorized implementation, so this is a ship task.
+A recommendation is evidence, not authorization: this report may argue for work, it does not authorize it.
+This is captain-authorized, shipped as rec #5 from the tampa weekend audit.
+You are explicitly authorized to write throwaway experiment scripts for this project.
+Implementation becomes a task only after a separate captain authorization.
+EOF
+  pass "fm-risk-tripwire no longer trips on the captain's approval vocabulary"
+}
+
+# The other end of the same family: the access-control sense must still trip,
+# both as a qualified pair and as a prefixed standalone word.
+test_access_control_authorize_still_trips() {
+  local work expect case_dir out status i=0
+  while IFS='|' read -r work expect; do
+    [ -n "$work" ] || continue
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/authorize-access-$i"
+    printf '%s\n' "$work" | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "authorize-access-$i: access-control prose must still trip"
+    assert_contains "$out" "$expect" "authorize-access-$i: should surface the access-control term"
+  done <<'EOF'
+Add an authorization check to the admin route.|authorization check
+Reject an unauthorized caller on every mutating endpoint.|unauthorized
+Move the deploy key out of `administrators_authorized_keys` into its own file.|authorized keys
+Add an authz layer in front of the report endpoint.|authz
+Print the identity-platform authorize URL for the auth-code flow.|platform authorize
+EOF
+  pass "fm-risk-tripwire still trips on access-control authorization work"
+}
+
+# Problem 3: ordinary engineering nouns with no auth sense anywhere near them.
+# Both sentences are work prose in a task description, not constraint prose and
+# not a fenced snippet, so no scoping rule could ever have reached them.
+test_parsing_and_supervision_words_stay_quiet() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/parsing-session-token"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Fix the stale classifier firing on a declared pause.
+
+The classifier reads the verb by parsing it as the colon-delimited token that matches the known verb vocabulary, so a declared pause is scored as silence.
+
+A live supervision cycle is running for this session, so build your own fixtures rather than steering the live one.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "parsing-session-token: a parsing token and a firstmate session must not trip"
+  [ -z "$out" ] || fail "parsing-session-token: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire no longer trips on a parsing token or a firstmate session"
+}
+
+# The other end: the same two words in their credential sense must still trip.
+test_credential_session_and_token_work_still_trips() {
+  local work expect case_dir out status i=0
+  while IFS='|' read -r work expect; do
+    [ -n "$work" ] || continue
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/credential-pair-$i"
+    printf '%s\n' "$work" | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "credential-pair-$i: real credential work must still trip"
+    assert_contains "$out" "$expect" "credential-pair-$i: should surface the qualified term"
+  done <<'EOF'
+Rotate the session token whenever privileges change.|session token
+Move the session store out of process memory into redis.|session store
+Set the session cookie with HttpOnly and SameSite on login.|session cookie
+Refresh the access token before it expires.|access token
+Add a CSRF token to every mutating form post.|csrf token
+Revoke the invite token when the invitation is withdrawn.|invite token
+EOF
+  pass "fm-risk-tripwire still trips on session and token credential work"
+}
+
+# The pair rule's own boundary, asserted so it cannot quietly become a bare
+# word match again: the head alone stays quiet, the head plus its qualifier
+# trips, and the qualifier has to be inside the pair window to count.
+test_ambiguous_head_without_a_qualifier_stays_quiet() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/head-alone"
+  printf 'Reuse the same session for every lookup in the batch.\n' | write_task_brief "$case_dir"
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+  expect_code 0 "$status" "head-alone: an unqualified head must not trip"
+  [ -z "$out" ] || fail "head-alone: expected no RISK output, got: $out"
+
+  # The qualifier here is deliberately one that is NOT a standalone match-set
+  # term, so the trip can only come from the pair rule and not from the
+  # qualifier matching on its own.
+  case_dir="$TMP_ROOT/head-qualified"
+  printf 'Reuse the same session id for every lookup in the batch.\n' | write_task_brief "$case_dir"
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+  expect_code 1 "$status" "head-qualified: the same head plus a qualifier must trip"
+  assert_contains "$out" "session id" "head-qualified: should surface the pair"
+
+  # A qualifier three words out, which is firstmate's own turn-end guard prose
+  # and the exact shape of the corpus false fires: widening the window to a
+  # whole clause was measured to re-admit 41 briefs, every one of them a
+  # "guard ... session" or "check ... session" of this kind and not one a real
+  # hit. Paired with the window-0 case above, this pins the window at exactly 1.
+  case_dir="$TMP_ROOT/head-distant-qualifier"
+  printf 'Run the guard check at every session start.\n' \
+    | write_task_brief "$case_dir"
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+  expect_code 0 "$status" "head-distant-qualifier: a qualifier outside the pair window must not trip"
+  [ -z "$out" ] || fail "head-distant-qualifier: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire pairs an ambiguous head only with a qualifier inside the window"
+}
+
+# Terms deliberately left out of the match set, each pinned by the vocabulary
+# that made it unusable. These fail the moment one is promoted to a bare word.
+test_rejected_standalone_terms_stay_quiet() {
+  local line case_dir out status i=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/rejected-term-$i"
+    printf '%s\n' "$line" | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 0 "$status" "rejected-term-$i: '$line' must not trip the wire"
+    [ -z "$out" ] || fail "rejected-term-$i: expected no RISK output, got: $out"
+  done <<'EOF'
+Fix the negation guard in the paste import so it stops rejecting valid rows.
+Move the repository root resolution into the shared loader.
+Carry a beam's shape identity through Save As so a promoted sizer keeps it.
+Fetch many messages in one uid range without chunking the await loop.
+Weigh the extra latency token cost against a pre-generation pass.
+EOF
+  pass "fm-risk-tripwire keeps rejected standalone terms out of the match set"
+}
+
+test_cookie_path_trips() {
+  local case_dir out status
+  case_dir=$(make_case cookie-path)
+  printf 'Add a --json flag to the status command.\n' > "$case_dir/data/task-x1/brief.md"
+  mkdir -p "$case_dir/wt/app/lib"
+  printf 'cookie handling\n' > "$case_dir/wt/app/lib/cookies.ts"
+  git -C "$case_dir/wt" add app/lib/cookies.ts
+  git -C "$case_dir/wt" commit -qm "touch cookie code"
+  write_task_meta "$case_dir"
+
+  set +e
+  out=$(run_tripwire "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "cookie-path: a path component named cookies must trip"
+  assert_contains "$out" "app/lib/cookies.ts" "cookie-path: should list the risky path"
+  pass "fm-risk-tripwire trips on a cookie path component"
+}
+
 test_brief_keyword_trips_wire() {
   local case_dir out status
   case_dir=$(make_case brief-keyword)
@@ -1695,10 +1943,14 @@ test_descriptive_nothing_is_not_a_prohibition() {
   # Here it is the subject of a defect report about a real table, which is how
   # a bug is described, and the recorded case that legitimately declares a
   # non-change scope with the same word is pinned separately as false-fire 5.
+  # The defect names the session id, not just the sessions table: a bare
+  # "session" is no longer a match-set term on its own (see the header's record
+  # of what that word costs), so the fixture has to carry the qualified form for
+  # this test to keep testing the prohibition rule rather than the match set.
   cat <<'EOF' | write_task_brief "$case_dir"
 Handle a frozen upload target in the accept route.
 
-When the write times out midway the route still commits, so it inserts a photo row nothing links back to `sessions.slate_photo_id`, leaving a permanently orphaned record.
+When the write times out midway the route still commits, so it inserts a photo row nothing links back to `sessions.slate_photo_id`, leaving a permanently orphaned record with no session id on it.
 EOF
 
   set +e
@@ -1999,6 +2251,15 @@ test_brief_keyword_trips_wire
 test_diff_path_trips_wire
 test_brief_only_mode_before_worktree_exists
 test_nothing_to_check_errors
+test_cookie_identity_gating_brief_trips
+test_uid_guard_brief_trips
+test_approval_sense_authorize_stays_quiet
+test_access_control_authorize_still_trips
+test_parsing_and_supervision_words_stay_quiet
+test_credential_session_and_token_work_still_trips
+test_ambiguous_head_without_a_qualifier_stays_quiet
+test_rejected_standalone_terms_stay_quiet
+test_cookie_path_trips
 test_scaffolded_brief_boilerplate_does_not_trip
 test_scaffolded_brief_risky_task_still_trips
 test_herdr_lab_boilerplate_does_not_trip

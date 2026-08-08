@@ -64,10 +64,12 @@ ID=${1:-}
 #   - verb forms need their own stems: appending the outer (s|ed|ing|ion|...)
 #     suffix to a bare NOUN literal cannot reach the verb, so "migration" alone
 #     could only become "migrations", never "migrate"/"migrating"/"migrated",
-#     and the bare "auth" branch never reaches "authorize"/"authenticate".
+#     and the bare "auth" branch never reaches "authenticate".
 #   - the un/re/de/pre prefixes ("unauthorized"/"unauthenticated" - the most
 #     common access-control phrasing) glue a letter onto the stem's front, so
-#     the auth stems carry an explicit optional prefix.
+#     the auth stems carry an explicit prefix alternative. On the authoriz stem
+#     that prefix is REQUIRED rather than optional, for the reason recorded
+#     under "authoriz" below; on the authenticat stem it stays optional.
 #   - a bare "auth"-anything stem is still avoided, so "authoritative"/"author"
 #     stay shut.
 # Word bounding is done by splitting the body into whole tokens (below), NOT by
@@ -76,12 +78,145 @@ ID=${1:-}
 # a false negative in the dangerous direction. Whole-token matching is identical
 # on GNU and BSD grep and, unlike a boundary-consuming grep -o pattern, still
 # reports BOTH words of an adjacent risk pair like "session token" (a consumed
-# shared delimiter would drop the second). Single-word keywords go in WORD_REGEX;
-# the multi-word phrases have no lone token and are matched on the
-# space-normalized stream via PHRASE_REGEX.
-WORD_KEYWORDS='auth|authentication|authorization|(un|re|de|pre)?authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|session|credential|password|secret|token|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission'
+# shared delimiter would drop the second).
+#
+# THE SAFETY DIRECTION IS NOT SYMMETRICAL. A missed real hit is far worse than a
+# false one: a false hit costs an over-tiered task, a missed one lets safety-
+# critical work run on a cheap model with no second check. So WIDENING the match
+# set is cheap and needs little justification, while NARROWING it must be proven
+# safe against the whole brief corpus, term by term, with the evidence recorded
+# here. A term that cannot be proven safe to drop stays in.
+#
+# There are three classes, because the corpus showed that some words are risky
+# on their own and some are risky only in company:
+#   WORD_REGEX    single words that carry risk wherever they appear.
+#   PHRASE_REGEX  multi-word risk terms that have no lone token to match.
+#   PAIR_REGEX    AMBIGUOUS heads that carry risk only next to a qualifier.
+#                 "session token" and "session cookie" name a credential; "this
+#                 session" and "leading token" do not. The pair test is what
+#                 keeps the first shape tripping without the second.
+#
+# ---------------------------------------------------------------------------
+# The measured record behind this list. Every figure below was produced by
+# running the brief half of this scan (no worktree, so the diff checkpoint never
+# runs) over every data/<id>/brief.md this fleet had on disk on 2026-08-08 - 613
+# briefs - and counting a brief as tripping when a RISK line is printed. The
+# previous list tripped 358 of 613 (58.4%); this one trips 270 (44.0%), moving 93
+# briefs to clean and 5 to tripping. Both directions are enumerated below.
+#
+# MOVED OUT OF WORD_REGEX AND INTO PAIR_REGEX. Each was read brief by brief, not
+# sampled, over every brief whose verdict the move changes:
+#   - session/sessions. 42 briefs trip on it and nothing else. All 42 are a
+#     firstmate, tmux, browser, chrome-devtools-axi, CAD, brainstorming or
+#     diagnostic session, or an application's own domain object (scaffold-
+#     returns' "session create", carscanner's "session state" walkup). Not one
+#     is an authentication session. One of them is a recorded false fire whose
+#     own review brief says the floor "flagged it for it mentions session state
+#     handling".
+#   - token/tokens. 16 briefs trip on it and nothing else. All 16 are a parsing
+#     token ("the leading token", "any 2-letter token", "the colon-delimited
+#     token that matches the known verb vocabulary") or an LLM token ("reasoning
+#     token gotchas", "200k tokens", "image tokens are priced differently"). Not
+#     one is a credential.
+#   - authoriz(e|ed|es|ing|ation|ations|er|ers) with no un/re/de/pre prefix.
+#     23 briefs trip on it and nothing else, and all 23 are firstmate's APPROVAL
+#     sense, never access control: "the captain authorized implementation", "a
+#     recommendation is evidence, not authorization", "you are explicitly
+#     authorized to write throwaway scripts", "this does not authorize building
+#     the feature". No scoping rule reaches these, because approval language is
+#     ordinary background prose rather than the constraint prose the narrowing
+#     below suppresses. The prefixed forms stay in WORD_REGEX untouched:
+#     "unauthorized"/"reauthorized" are never the approval sense.
+#
+# ADDED TO WORD_REGEX:
+#   - cookie/cookies. Catches a labeling task whose whole risk surface is a
+#     cookie carrying labeler identity across mutating routes, and which the
+#     previous list missed outright. It is the ONLY brief of 613 that this term
+#     newly matches: zero false fires corpus-wide.
+#   - login. Newly trips 3 briefs: an account that "locks out after failed
+#     login", a scrape blocked by "captcha, rate limiting, login walls", and one
+#     healthcheck that "only hit GET /login". Two of three are real, the third
+#     is cheap, and widening is the safe direction.
+#   - authn/authz. The unambiguous abbreviations, which PATH_STRONG_REGEX below
+#     already treats as strong signals while this list did not. With the bare
+#     authoriz family moved to PAIR_REGEX, "add an authz check" needs authz to
+#     stay caught by a single word. 0 briefs move; this closes a gap rather than
+#     answering one the corpus raised.
+#
+# ADDED TO PAIR_REGEX AS HEADS (added, but qualified rather than standalone,
+# because as standalone words the corpus shows them firing mostly on non-risk):
+#   - uid/uids. "uid guard" catches a uid-guard relocation task the previous
+#     list missed outright. As a standalone word it would also have fired on an
+#     IMAP "uid range", which is a message number, not a user.
+#   - identity/identities. "identity gate" is the second signal in that same
+#     labeling task. As a standalone word it would have fired on 6 more briefs,
+#     all of them "shape identity", "byte identity", "job identity" or "a live
+#     identity matched state" - none about access control.
+#
+# REJECTED, with the count of briefs each would have moved and what they are:
+#   - guard as a standalone word. It would newly trip 27 clean briefs and 26 are
+#     ordinary code guards: a negation guard, a timeout guard, an idempotency
+#     guard, a digit guard, a packed-refs lock-race guard, and firstmate's own
+#     tier and turn-end guards. Kept as a PAIR qualifier, where "uid guard"
+#     trips and "turn-end guard" does not.
+#   - root (44 clean briefs, every one a filesystem, worktree or repo root),
+#     escalation (10, all firstmate's own model/effort escalation), hash (5, all
+#     git hashes and hash maps). Ordinary engineering nouns with no auth sense
+#     in this corpus.
+#   - injection (2: one real shell-quoting hazard, one dependency injection),
+#     sanitize (2), signature (2), sudo (2), tls, pii, salt, exploit (1 each).
+#     Each is one or two briefs with mixed senses, none of them a miss anyone
+#     reported. Left out to keep the list defensible rather than long; add one
+#     the moment a brief needs it, since widening is the cheap direction.
+#   - Removing the authoriz family outright instead of qualifying it. It would
+#     have cost "add an authorization check" its only signal, and the corpus
+#     does carry the access-control sense: SSH authorized_keys in two briefs,
+#     "is authorization actually enforced on every path", an OAuth authorize
+#     URL, "is the key still authorized".
+#   - Narrowing PATH_STRONG_REGEX/PATH_WEAK_REGEX the same way. Left alone
+#     deliberately: a path COMPONENT named session or token (lib/auth/session.rb)
+#     is a far stronger signal than the same word in prose, the weak/strong split
+#     below already handles firstmate's own bin/fm-session-start.sh, and every
+#     false fire reported against this scanner was prose. cookie/cookies is added
+#     there only to keep the path list in step with the new prose term.
+#
+# THE PAIR WINDOW. A qualifier counts when it sits within PAIR_WINDOW words of
+# the head in the SAME clause, and 1 is not a guess:
+#   - Strict adjacency (window 0) was measured first and drops real work prose.
+#     "Authorize each request before the handler runs" and "Rotate the session
+#     identifier whenever privileges change" both put the qualifier two words
+#     out; both are pinned as must-trip cases in tests/fm-risk-tripwire.test.sh.
+#   - Widening to a whole clause was measured too, and re-admits 41 briefs of
+#     which every single one is a false fire: "guard ... session" (firstmate's
+#     turn-end guard), "check ... session" (a check at session start), "session
+#     session", "token token", "authorized ... check" (a captain-authorized beam
+#     check). Not one genuine risk brief is among them.
+#   - Window 1 costs exactly 2 of those 41 back and buys the verb-determiner-
+#     object shape above, which is how ordinary English states the work.
+# Clause scoping is free here because brief_scan_text emits one clause per line,
+# so newlines are preserved for this scan (unlike the phrase stream, which is
+# flattened) and a pair can never form across two clauses.
+#
+# WHAT THIS STILL MISSES, stated plainly for the same reason the narrowing's own
+# gap is stated below: a brief whose only risk signal is a bare unqualified
+# "session", "token" or "authorization" - "the authorization is broken on the
+# admin page" - no longer trips the prose scan. That is the price of clearing 93
+# briefs' worth of firstmate's own everyday vocabulary, and it is bounded by the
+# diff checkpoint, by every other term in WORD_REGEX that such a brief almost
+# always also carries, and by the qualifier list being cheap to widen.
+# ---------------------------------------------------------------------------
+WORD_KEYWORDS='auth|authn|authz|authentication|(un|re|de|pre)authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|cookie|login|credential|password|secret|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission'
 WORD_REGEX="(${WORD_KEYWORDS})(s|es|ed|ing|ion|ions)?"
 PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]]+mutation|public[[:space:]]+exposure|breaking[[:space:]]+change)(s|es|ed|ing|ion|ions)?'
+# Ambiguous heads and the qualifiers that make them risk terms. A head also
+# qualifies another head, because two ambiguous words together ("session token")
+# are not ambiguous. The qualifier list is closed and drawn from the collocations
+# the corpus actually carries plus standard authentication vocabulary; every
+# entry only ever ADDS a hit, so lengthening it is the cheap direction and
+# shortening it is what needs the evidence.
+AMBIG_HEADS='sessions?|tokens?|uids?|identity|identities|authoriz(e|ed|es|ing|ation|ations|er|ers)?'
+AMBIG_QUALIFIERS='auth|authn|authz|authenticat(e|ed|es|ing|ion|ions|or|ors)?|unauthenticated|unauthorized|login|logins|logged|signin|sso|oauth|jwt|saml|csrf|xsrf|bearer|refresh|access|api|invite|reset|pairing|rotat(e|ed|es|ing|ion)|revoke|revoked|revocation|expiry|expiration|cookie|cookies|credential|credentials|secret|secrets|password|passwords|key|keys|id|ids|identifier|identifiers|user|users|gate|gated|gating|guard|guards|check|checks|header|headers|middleware|endpoint|endpoints|route|routes|request|requests|role|roles|permission|permissions|privilege|privileges|policy|policies|bypass|enforce|enforced|enforcement|admin|hijack|hijacked|hijacking|fixation|spoof|spoofed|spoofing|store|provider|platform'
+PAIR_WINDOW=1
 
 # Scan only the task-specific body of the brief (the # Task section up to the
 # next scaffold section heading), never the fixed scaffold boilerplate
@@ -170,7 +305,7 @@ brief_has_task_section() {
 # NO delimiter (e.g. "authsetup.rb") is not matched, because catching it would
 # require substring matching again and reopen exactly those false positives; the
 # brief-text scan and the delimiter tokenization below cover the realistic cases.
-PATH_STRONG_REGEX='^(auth|authn|authz|authoriz(e|ed|es|ing|ation|ations|er|ers)?|authenticat(e|ed|es|ing|ion|ions|or|ors)?|migrat(e|ed|es|ing|ion|ions)|schema|schemas|secret|secrets|credential|credentials|payment|payments|billing|security|password|passwords|token|tokens|permission|permissions|encrypt(s|ed|ing|ion|ions)?|decrypt(s|ed|ing|ion|ions)?)$'
+PATH_STRONG_REGEX='^(auth|authn|authz|authoriz(e|ed|es|ing|ation|ations|er|ers)?|authenticat(e|ed|es|ing|ion|ions|or|ors)?|cookie|cookies|migrat(e|ed|es|ing|ion|ions)|schema|schemas|secret|secrets|credential|credentials|payment|payments|billing|security|password|passwords|token|tokens|permission|permissions|encrypt(s|ed|ing|ion|ions)?|decrypt(s|ed|ing|ion|ions)?)$'
 PATH_WEAK_REGEX='^(session|sessions)$'
 path_is_risky() {
   local path=$1 comp base
@@ -543,7 +678,25 @@ if [ -f "$BRIEF" ]; then
   # tokens; phrases keep their inter-word gap on the space-normalized stream.
   word_hits=$(printf '%s\n' "$lc" | tr -c '[:alnum:]' '\n' | grep -xE "$WORD_REGEX" || true)
   phrase_hits=$(printf '%s\n' "$lc" | tr -c '[:alnum:]' ' ' | tr -s ' ' | grep -oE "$PHRASE_REGEX" || true)
-  hit=$(printf '%s\n%s\n' "$word_hits" "$phrase_hits" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
+  # An ambiguous head counts only when a qualifier sits within PAIR_WINDOW words
+  # of it. Newlines survive the tr here, unlike the phrase stream above, so a
+  # pair can only form inside one clause of brief_scan_text's output. Matching
+  # is on whole awk fields rather than a regex over the flattened stream, so
+  # "auth" inside "authoritative" can never qualify an adjacent head.
+  pair_hits=$(printf '%s\n' "$lc" | tr -c '[:alnum:]\n' ' ' | tr -s ' ' | awk \
+    -v heads="^(${AMBIG_HEADS})$" -v quals="^(${AMBIG_QUALIFIERS})$" -v window="$PAIR_WINDOW" '
+    {
+      for (i = 1; i <= NF; i++) {
+        if ($i !~ heads) continue
+        for (d = 1; d <= window + 1; d++) {
+          j = i - d
+          if (j >= 1 && ($j ~ quals || $j ~ heads)) { print $j " " $i; break }
+          j = i + d
+          if (j <= NF && ($j ~ quals || $j ~ heads)) { print $i " " $j; break }
+        }
+      }
+    }')
+  hit=$(printf '%s\n%s\n%s\n' "$word_hits" "$phrase_hits" "$pair_hits" | sed '/^$/d' | sort -u | tr '\n' ',' | sed 's/,$//')
   if [ -n "$hit" ]; then
     echo "RISK: brief for $ID mentions risk-adjacent term(s): $hit"
     FOUND=1
