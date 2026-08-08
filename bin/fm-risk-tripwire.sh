@@ -121,6 +121,16 @@ brief_task_body() {
   fi
 }
 
+# Whether the brief has the "# Task" section brief_task_body scopes to, using
+# the identical match so the two can never disagree about what is parseable.
+brief_has_task_section() {
+  awk '
+    /^```/ { fence = !fence; next }
+    !fence && /^# Task[[:space:]]*$/ { found = 1; exit }
+    END { exit(found ? 0 : 1) }
+  ' "$1"
+}
+
 # Component/token match against one changed file's path (already lowercased by
 # the caller). Deliberately NOT a blanket bin/* match: firstmate's own
 # supervision backbone lives under bin/ and is routed by an explicit dispatch
@@ -164,6 +174,195 @@ path_is_risky() {
   return 1
 }
 
+# The task body alone is still far too permissive a scan surface, because
+# firstmate writes what a task must NOT touch into the same # Task region as
+# what it must do. The better written the brief, the more risky surfaces it
+# names, so the scan fired hardest on the most careful briefs. Measured over the
+# 603 briefs this fleet had on disk when this narrowing was written, the body
+# scan tripped 401 of them (66%), and ten consecutive fires across five
+# repositories were pure constraint prose about paths the task never went near.
+# A floor that applies to two thirds of all work is not a floor; worse, it
+# pushes firstmate into deciding case by case whether to honor its own gate,
+# which is the erosion a mechanical gate exists to prevent.
+#
+# So the body is narrowed to the prose that describes the WORK by dropping the
+# prose that fences the work off, in three deliberately narrow steps:
+#
+#   D1  a scope-declaring SECTION. A "##"-or-deeper heading that declares a
+#       non-change scope ("Explicitly out of scope", "What should NOT need
+#       changing") opens an excluded region, closed by the next heading at the
+#       same or shallower depth.
+#   D2  a prohibition BLOCK. A list item or paragraph whose FIRST sentence is a
+#       prohibition is dropped whole, because the sentences after it elaborate
+#       the prohibition rather than the task. This is what reaches a matching
+#       word that sits in a positively phrased sentence inside an otherwise
+#       prohibitive bullet ("... A live supervision cycle is active for this
+#       session.").
+#   D3  a prohibition SENTENCE. Any surviving sentence that is itself a
+#       prohibition or an explicit non-change assertion is dropped on its own.
+#
+# Heading lines are ALWAYS scanned and never dropped by D2/D3: a heading is the
+# most compressed statement of what its section is about, so a risk word in one
+# is the strongest prose signal available.
+#
+# Rejected alternatives, recorded because the choice is the substance here:
+#   - Excluding a section named "Constraints". Of 1766 hit lines across those
+#     603 briefs, only 112 sat under a heading named Constraints and 335 sat
+#     under no heading at all, the rest spread across free-form headings
+#     ("Background", "What to build", "Hard safety rules"). Firstmate names
+#     these sections however the task reads best, so the name is not a boundary,
+#     and three of the recorded false fires put their only hit under an ordinary
+#     descriptive heading where no name-based rule could reach it.
+#   - Treating any negation in a heading as a scope declaration. Bug-report
+#     headings use bare "not"/"never" constantly ("Finding 1 - AUTH_DIR is never
+#     resolved", "atomicWrite's mode promise is not kept"). Keying D1 on those
+#     words was measured to clear five genuinely auth-bearing briefs outright,
+#     precisely the failure this guardrail exists to prevent, so D1 matches only
+#     explicit scope-declaration phrases and never bare negation.
+#   - Dropping the prose scan and matching only the changed paths. Not
+#     available: the first checkpoint runs before the task is spawned, when no
+#     diff exists, and that is the checkpoint that sets the dispatch tier.
+#   - Per-sentence negation handling alone. It cannot reach a matching word that
+#     sits in a positively phrased sentence of a prohibitive bullet, which is
+#     why D2 exists alongside D3.
+#   - Requiring a recognised change verb near the term instead of suppressing
+#     fencing prose. That inverts the safety direction: ways to describe work
+#     are an open word class ("move the session token out of localStorage" uses
+#     none of the obvious ones), while prohibition phrasings are a closed one.
+#     The open class must sit on the trip side, so this is a suppression test
+#     and never a corroboration test.
+#   - Counting bare negation, or scope qualifiers like "with no downtime" and
+#     "without breaking X", as prohibitions. Those mark negative polarity, not a
+#     prohibition, and firstmate's two commonest registers are both negative
+#     polarity about work it fully intends to do: the bug symptom and the safety
+#     qualifier. Only deontic forms addressed to the worker count (see
+#     prohibition() below).
+#
+# What this still misses, stated plainly because the safety direction is NOT
+# symmetrical and a missed real hit is far worse than a false one: a genuinely
+# risky task whose ONLY mention of the risky surface sits inside a prohibition
+# that concedes no work on it ("Never touch the session store.", in a brief that
+# otherwise describes its session work in words the match set does not carry) is
+# no longer caught by the prose scan. Four things bound that. A prohibition that
+# concedes adjacent work on the same surface is not suppressed at all, which is
+# the commonest way a real brief mentions a risky surface it is working beside
+# (see concedes_work below). A brief with no parseable "# Task" section is
+# scanned whole and unnarrowed, because the structure the narrowing assumes is
+# not there to assume. Any narrowing that would leave nothing to scan is
+# discarded and the full task body is scanned instead, so the rule can only ever
+# remove text it can also see work prose beside. And the diff checkpoint below,
+# the binding one, still floors the task once code exists.
+brief_scan_text() {
+  local narrowed body
+  # The narrowing's whole premise is the shape of the "# Task" region firstmate
+  # writes. When a brief has no parseable one - hand-written, or a decorated
+  # heading like "# Task - VALIDATION RESUME" that the section matcher does not
+  # recognise - that premise is absent, so the structure it would assume is not
+  # there to assume. Scan the whole file unnarrowed instead of guessing, which
+  # is the fail-toward-tripping direction this guardrail requires.
+  if ! brief_has_task_section "$1"; then
+    cat "$1"
+    return
+  fi
+  body=$(brief_task_body "$1")
+  narrowed=$(printf '%s\n' "$body" | awk '
+    function norm(s) { s = tolower(s); gsub(/[^a-z0-9]+/, " ", s); return " " s " " }
+    # A heading that declares what the task does NOT change. Deliberately a
+    # closed phrase list, never bare "not"/"never" (see the rejected list above).
+    function scope_heading(s,   t) {
+      t = norm(s)
+      return (t ~ / (out of scope|not in scope|non goal|non goals|should not need|not need changing|does not change|do not change|do not touch|what not to|leave unchanged|leave untouched) /)
+    }
+    # A sentence that forbids one thing WHILE conceding work on the same surface
+    # is not fencing, it is scoping live work, and the surface it names is one
+    # the task is about to be inside. "Do not break the login cookie while you
+    # change the handler" says the handler is being changed. Measured on a real
+    # access-control brief whose only match-set word was the "session middleware"
+    # it was told not to touch, next to a route it was rewriting: suppressing
+    # that sentence lost the whole task. So a conceding sentence is never a
+    # prohibition. The connective list is closed and short on purpose; every
+    # entry pulls text back onto the trip side, which is the safe direction.
+    function concedes_work(s,   t) {
+      t = norm(s)
+      return (t ~ / (while you|when you|as you|while changing|while moving|while adding|in the process of|as part of this) /)
+    }
+    # Only DEONTIC negation counts: language addressed to the worker, telling it
+    # what not to do. Descriptive negation is deliberately absent, because it is
+    # how a bug report states the defect the task exists to fix. A brief saying
+    # the login handler does not rotate the session token describes work that IS
+    # needed; one saying do not rotate the session token forbids it. A bug report
+    # says "does not work", it never says "must not work". Treating the
+    # contracted descriptive forms or "cannot" as prohibitions was measured to
+    # clear exactly that kind of brief, so they are excluded here and the
+    # noisier reading is preferred.
+    function prohibition(s,   t) {
+      t = norm(s)
+      if (concedes_work(s)) return 0
+      if (t ~ / (never|avoid|avoids|avoiding|forbidden|prohibited) /) return 1
+      # "nothing" is the one word here that is usually NOT deontic. "Nothing in
+      # the accept payload changes" declares a non-change scope; "it inserts a
+      # row nothing links back to" describes a defect, and suppressing that was
+      # measured to hide a real database table from the scan. So "nothing" only
+      # counts beside an explicit non-change verb, which is a closed list and
+      # narrows a suppression trigger, the safe direction.
+      if (t ~ / nothing /) {
+        if (t ~ / (change|changes|changed|move|moves|moved|touch|touches|touched|alter|alters|altered|differ|differs|affected|modified) /) return 1
+      }
+      if (t ~ / (do not|must not|may not|should not|shall not) /) return 1
+      if (t ~ / (don t|mustn t|shouldn t) /) return 1
+      if (t ~ / (untouched|unchanged|unaffected|unmodified|off limits|out of scope|read only|hands off) /) return 1
+      if (t ~ / (needs no|need no|no need|not needed|no [a-z ]*change) /) return 1
+      return 0
+    }
+    # Emit a finished block: dropped whole when its first sentence is a
+    # prohibition (D2), otherwise sentence by sentence (D3).
+    function flush(   n, i, parts) {
+      if (block ~ /^[[:space:]]*$/) { block = ""; return }
+      gsub(/[[:space:]]+/, " ", block)
+      n = split(block, parts, /[.!?;] +/)
+      for (i = 1; i <= n; i++) {
+        if (parts[i] ~ /^[[:space:]]*$/) continue
+        if (i == 1 && prohibition(parts[i])) { block = ""; return }
+        if (!prohibition(parts[i])) print parts[i]
+      }
+      block = ""
+    }
+    { blank = ($0 ~ /^[[:space:]]*$/) }
+    /^#+[[:space:]]/ {
+      flush()
+      lvl = 0
+      while (substr($0, lvl + 1, 1) == "#") lvl++
+      if (exclevel > 0 && lvl <= exclevel) exclevel = 0
+      # The heading itself always reaches the scan, even when it opens an
+      # excluded section.
+      print
+      # Only a real markdown section heading may open an excluded region: at
+      # least "##" deep and blank-line-preceded, the shape bin/fm-brief.sh emits
+      # and the same discipline brief_task_body applies to its own boundaries. A
+      # column-0 "# " line in the body is a shell comment in an example command
+      # ("# then run the schema migration"), and letting one open an exclusion
+      # would silently drop every risk word after it to the end of the brief.
+      if (lvl >= 2 && prevblank && scope_heading($0)) exclevel = lvl
+      prevblank = blank
+      next
+    }
+    exclevel > 0 { prevblank = blank; next }
+    /^[[:space:]]*$/ { flush(); prevblank = blank; next }
+    # A new list item starts a new block; a continuation line joins the current
+    # one, so a hard-wrapped bullet is judged as the single sentence it reads as.
+    /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/ { flush() }
+    { block = block " " $0; prevblank = blank }
+    END { flush() }
+  ')
+  # Never let the narrowing empty the scan: a brief written entirely as
+  # constraints falls back to its full task body rather than passing silently.
+  if [ -n "$(printf '%s' "$narrowed" | tr -d '[:space:]')" ]; then
+    printf '%s\n' "$narrowed"
+  else
+    printf '%s\n' "$body"
+  fi
+}
+
 FOUND=0
 CHECKED=0
 DIFF_UNRESOLVED=0
@@ -171,7 +370,7 @@ DIFF_UNRESOLVED=0
 BRIEF="$DATA/$ID/brief.md"
 if [ -f "$BRIEF" ]; then
   CHECKED=1
-  lc=$(brief_task_body "$BRIEF" | tr '[:upper:]' '[:lower:]')
+  lc=$(brief_scan_text "$BRIEF" | tr '[:upper:]' '[:lower:]')
   # Split on every non-alnum char so each word is its own token (this also
   # splits snake_case identifiers like run_schema_migration), then match whole
   # tokens; phrases keep their inter-word gap on the space-normalized stream.
