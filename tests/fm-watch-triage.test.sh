@@ -1026,7 +1026,15 @@ test_hung_no_mistakes_status_does_not_freeze_watcher_beacon() {
   git -C "$wt" checkout -q -b fm/hung-no-mistakes-status
   : > "$calls_file"
   printf 'working: compiling step 2\n' > "$status_file"
-  fm_write_meta "$state/task.meta" "window=fm:fm-task" "worktree=$wt" "kind=ship"
+  fm_write_meta "$state/task.meta" "window=fm:fm-task" "worktree=$wt" "kind=ship" "harness=claude"
+  # The semantic busy-state redesign (bin/fm-busy-lib.sh) retired rendered
+  # pane-text scraping for a converted adapter like claude: a busy verdict
+  # now comes only from the crew's own semantic lifecycle record, so a busy
+  # pane must be armed through the real writer exactly like
+  # tests/fm-crew-state.test.sh's test_no_run_busy_pane does.
+  local gen; gen=$("$ROOT/bin/fm-busy-event.sh" arm "$state" task)
+  "$ROOT/bin/fm-busy-event.sh" apply "$state" task busy --gen "$gen" \
+    --source claude-hook --event user-prompt-submit
   cat > "$fakebin/no-mistakes" <<'SH'
 #!/usr/bin/env bash
 set -u

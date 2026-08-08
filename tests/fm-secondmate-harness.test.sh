@@ -2067,7 +2067,13 @@ SH
       "$ROOT/bin/fm-config-push.sh" > "$first_out" 2>&1
   ) &
   first_pid=$!
-  for _ in $(seq 1 100); do
+  # 500 iterations (~10s), not the tighter budget this loop used before: a
+  # config push runs through fm-send.sh's fm-guard.sh check first, and that
+  # guard's watcher-liveness verdict (bin/fm-wake-lib.sh's
+  # fm_watcher_supervision_verdict) now does real process/lock inspection
+  # instead of a cheap beacon-mtime read, so reaching pointer delivery
+  # legitimately takes longer than the old budget assumed.
+  for _ in $(seq 1 500); do
     [ -e "$entered" ] && break
     sleep 0.02
   done
