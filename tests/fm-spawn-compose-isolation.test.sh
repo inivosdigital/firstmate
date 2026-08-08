@@ -59,7 +59,7 @@ run_spawn() {  # <home> <id> <proj> <pane> <fakebin> [extra-args...]
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$pane" TMUX="fake,1,0" \
     PATH="$fakebin:$PATH" \
-    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex "$@" 2>&1
+    "$ROOT/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off "$@" 2>&1
 }
 
 # --- two worktrees of the same project, same leaf basename, different pool

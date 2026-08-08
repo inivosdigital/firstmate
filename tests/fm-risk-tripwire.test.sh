@@ -94,7 +94,7 @@ scaffold_brief() {
   shift 2
   mkdir -p "$case_dir/state"
   FM_ROOT_OVERRIDE="$ROOT" FM_DATA_OVERRIDE="$case_dir/data" FM_STATE_OVERRIDE="$case_dir/state" \
-    "$ROOT/bin/fm-brief.sh" task-x1 someproject "$@" >/dev/null 2>&1
+    "$ROOT/bin/fm-brief.sh" task-x1 someproject --mode no-mistakes "$@" >/dev/null 2>&1
   brief="$case_dir/data/task-x1/brief.md"
   sed "s|{TASK}|$task|" "$brief" > "$brief.tmp" && mv "$brief.tmp" "$brief"
 }

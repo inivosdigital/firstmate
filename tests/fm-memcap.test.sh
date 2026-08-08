@@ -582,7 +582,7 @@ EOF
   mkdir -p "$tmp/home/config"
   printf '3G\n' > "$tmp/home/config/spawn-memory-cap"
 
-  out=$(run_spawn "$tmp/home" memcap-ship "$proj" "$wt" "$fakebin" codex)
+  out=$(run_spawn "$tmp/home" memcap-ship "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
   assert_contains "$out" "spawned memcap-ship" "spawn should succeed"
   assert_grep "memcap=3G" "$tmp/home/state/memcap-ship.meta" "meta should record the requested ceiling"
 
@@ -605,7 +605,7 @@ EOF
   assert_grep "kind=scout" "$tmp/home/state/memcap-scout.meta" "fixture sanity: this should be a scout"
 
   : > "$sendlog"
-  run_spawn "$tmp/home" memcap-ship2 "$proj" "$wt" "$fakebin" codex >/dev/null
+  run_spawn "$tmp/home" memcap-ship2 "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off >/dev/null
   assert_grep "memcap=40%" "$tmp/home/state/memcap-ship2.meta" "a ship should get the larger default share"
   pass "fm-spawn: with no config, the ceiling follows the spawn kind"
 }
@@ -619,7 +619,7 @@ EOF
   mkdir -p "$tmp/home/config"
   printf 'six gigs\n' > "$tmp/home/config/spawn-memory-cap"
 
-  out=$(run_spawn "$tmp/home" memcap-bad "$proj" "$wt" "$fakebin" codex)
+  out=$(run_spawn "$tmp/home" memcap-bad "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
   assert_contains "$out" "spawned memcap-bad" "a malformed ceiling must not fail the spawn"
   assert_contains "$out" "unusable memory ceiling" "a malformed ceiling must warn at spawn time"
   assert_grep "memcap=40%" "$tmp/home/state/memcap-bad.meta" "a malformed ceiling should fall back to the kind default"
@@ -637,7 +637,7 @@ EOF
   mkdir -p "$tmp/home/config"
   printf 'off\n' > "$tmp/home/config/spawn-memory-cap"
 
-  run_spawn "$tmp/home" memcap-off "$proj" "$wt" "$fakebin" codex >/dev/null
+  run_spawn "$tmp/home" memcap-off "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off >/dev/null
   assert_grep "memcap=off" "$tmp/home/state/memcap-off.meta" "meta should record that no ceiling was asked for"
   line=$(launch_line "$sendlog")
   assert_not_contains "$line" "fm-memcap.sh" "'off' must leave the launch command exactly as it was"
@@ -658,7 +658,7 @@ spawn_with_fmroot() {  # <fmroot> <tmp> <id> <proj> <wt> <fakebin>
     FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" TMUX="fake,1,0" FM_SPAWN_MEMORY_CAP='' \
     FM_MEMCAP_TOTAL_BYTES="$BIG_HOST_BYTES" \
     PATH="$fakebin:$PATH" \
-    "$fmroot/bin/fm-spawn.sh" "$id" "$proj" codex 2>&1
+    "$fmroot/bin/fm-spawn.sh" "$id" "$proj" codex --mode no-mistakes --yolo off 2>&1
 }
 
 test_spawn_still_succeeds_without_the_wrapper_script() {
@@ -719,7 +719,7 @@ $(spawn_fixture "$tmp")
 EOF
   mkdir -p "$tmp/home/config"
   printf 'off\n' > "$tmp/home/config/spawn-memory-cap"
-  run_spawn "$tmp/home" memcap-offmeta "$proj" "$wt" "$fakebin" codex >/dev/null
+  run_spawn "$tmp/home" memcap-offmeta "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off >/dev/null
   # The counterpart to the two cases above: a captain's own `off` must stay
   # `off`, so the two are distinguishable in the durable record.
   assert_grep "memcap=off" "$tmp/home/state/memcap-offmeta.meta" "a deliberate 'off' must be recorded as 'off'"
@@ -737,7 +737,7 @@ EOF
   # The typo the shipped example is one keystroke away from.
   printf '40M\n' > "$tmp/home/config/spawn-memory-cap"
 
-  out=$(run_spawn "$tmp/home" memcap-floor "$proj" "$wt" "$fakebin" codex)
+  out=$(run_spawn "$tmp/home" memcap-floor "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
   assert_contains "$out" "spawned memcap-floor" "a sub-floor ceiling must not fail the spawn"
   assert_contains "$out" "less than an agent needs to start" "a sub-floor ceiling must warn at spawn time"
   assert_grep "memcap=1G" "$tmp/home/state/memcap-floor.meta" "meta should record the floored ceiling, not the typo"

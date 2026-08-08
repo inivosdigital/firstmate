@@ -479,7 +479,7 @@ SH
   touch "$case_dir/state/.last-watcher-beat"
 
   fm_write_meta "$case_dir/state/task-x1.meta" \
-    "window=fm-task-x1" \
+    "window=firstmate:fm-task-x1" \
     "worktree=$case_dir/wt" \
     "project=$case_dir/project" \
     "kind=ship" \
