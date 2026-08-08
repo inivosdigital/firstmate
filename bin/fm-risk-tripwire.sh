@@ -437,13 +437,28 @@ path_is_risky() {
 #     For this to reach the example, "but" and "instead" split a clause the way
 #     a deontic marker does (see clause_split below).
 #
-# Every step above is strictly permissive: D2 now fires on a subset of the
-# blocks it used to fire on, and splitting a clause can only turn one
-# dropped clause into a dropped clause plus a kept one, never the reverse (any
-# prohibition pattern matching a fragment also matches the clause it came from,
-# since normalisation puts a space at both ends of each). So no text that
-# reaches the scan today can stop reaching it, and the trip set can only grow
-# toward the pre-narrowing scanner's, never past it.
+# Every step above is strictly permissive AS A NARROWING STEP: D2 now fires on a
+# subset of the blocks it used to fire on, and splitting a clause can only turn
+# one dropped clause into a dropped clause plus a kept one, never the reverse
+# (any prohibition pattern matching a fragment also matches the clause it came
+# from, since normalisation puts a space at both ends of each). So the text this
+# narrowing hands on can only grow, never shrink.
+#
+# That is a claim about the narrowing, and NOT about the scan end to end. Read
+# only that far and it licenses "any increase in permissiveness is free", which
+# is false: the narrowing is not the last stage. brief_scan_text ends in an
+# emptiness fallback that prints the whole unnarrowed body when the narrowed text
+# comes back blank. A fallback keyed on emptiness is a step function, so it is
+# not monotone in the narrowing, and one more surviving fragment can mean
+# strictly LESS text scanned. The third entry under "What this still misses"
+# names that shape and bounds it. The next change here has to clear that entry as
+# well as this paragraph.
+#
+# One end-to-end bound does hold, for a separate reason: every stage here only
+# ever removes text from the task body, and the fallback restores that body
+# whole, so the scanned text is always some subset of the body the pre-narrowing
+# scanner read. The trip set therefore stays inside that scanner's, never past
+# it, however permissive the narrowing becomes.
 #
 # Measured over the 613 briefs on disk when this was written, brief half only,
 # by running each version over every data/<id>/brief.md with no worktree.
@@ -569,6 +584,22 @@ path_is_risky() {
 #     here and it was taken everywhere it did not reopen a recorded false fire;
 #     this is the one place it did, so the quieter reading is kept and named
 #     rather than hidden.
+#   - A brief whose task body the narrowing would previously have emptied, and
+#     now leaves one surviving fragment instead. The emptiness fallback below
+#     restores the whole unnarrowed body only when narrowing leaves NOTHING, so
+#     that one fragment switches the fallback off and the rest of the body stops
+#     being scanned. This is the single direction in which a more permissive
+#     narrowing scans strictly less, and it shows up as a brief going from
+#     tripping to clean. Bounded by measurement rather than by argument: over the
+#     617 briefs on disk when this entry was written, the fallback fires on 0 of
+#     them both before and after the rule change, counted by marking the fallback
+#     branch itself and sweeping every brief, so no brief on this fleet moves.
+#     What is one ordinary edit away is the precondition, not the outcome: 154 of
+#     the 617 have a task body with no markdown heading anywhere, and 24 of those
+#     are six content lines or shorter. Left as a named gap on purpose. The
+#     obvious repair is to keep the fallback from ever switching off, which is
+#     the last-token guard measured and rejected above on recorded evidence, and
+#     there is no cheap monotone form of it.
 #
 # What actually bounds those, measured over the 613 briefs on disk when the
 # block rule above was last changed rather than assumed, because an overstated
@@ -820,6 +851,8 @@ brief_scan_text() {
   ')
   # Never let the narrowing empty the scan: a brief written entirely as
   # constraints falls back to its full task body rather than passing silently.
+  # Keyed on emptiness, so it is a step function and NOT monotone in the
+  # narrowing above it: see the third entry under "What this still misses".
   if [ -n "$(printf '%s' "$narrowed" | tr -d '[:space:]')" ]; then
     printf '%s\n' "$narrowed"
   else

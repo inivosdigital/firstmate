@@ -1687,10 +1687,14 @@ test_work_clause_after_a_leading_prohibition_still_trips() {
   # The direction the clause rescue used to miss. Its mirror image (work first,
   # caveat second) is pinned separately; both orderings must now survive, or
   # the rescue is decided by word order rather than by what the brief says.
+  # The rescued clause carries "credential" rather than a bare "session" so the
+  # assertion pins the narrowing and not one match-set entry: bare "session" is
+  # being moved behind a qualifier, and this test is about which TEXT reaches
+  # the scan, not about which words the scan matches once it gets there.
   cat <<'EOF' | write_task_brief "$case_dir"
 Make the reports page stop timing out.
 
-Do not touch the report queries, but do add a session index.
+Do not touch the report queries, but do add an index on the credential table.
 EOF
 
   set +e
@@ -1699,7 +1703,7 @@ EOF
   set -e
 
   expect_code 1 "$status" "trailing-work-clause: work stated after a leading prohibition must still be scanned"
-  assert_contains "$out" "session" "trailing-work-clause: the work clause must reach the scan"
+  assert_contains "$out" "credential" "trailing-work-clause: the work clause must reach the scan"
   pass "fm-risk-tripwire keeps a work clause that follows a leading prohibition"
 }
 
@@ -1708,12 +1712,14 @@ test_instead_splits_a_clause_that_turns_back_to_work() {
   case_dir="$TMP_ROOT/instead-clause"
   # "instead" is the second contrastive split point and it is load-bearing on
   # its own: without it this whole sentence is one clause, it reads as a
-  # prohibition on its closing "needs no auth", and the session work vanishes
-  # with it. Transcribed from the live brief that recovered when it was added.
+  # prohibition on its closing "needs no auth", and the work before the split
+  # vanishes with it. Transcribed from the live brief that recovered when it was
+  # added, with its risk term changed from a bare "session" to "credential" for
+  # the reason given on the previous test.
   cat <<'EOF' | write_task_brief "$case_dir"
 Reproduce the intake failure.
 
-Reproduce against the live site if you can get a session, or drive the fetch helper directly instead, which needs no auth.
+Reproduce against the live site if you can get a credential, or drive the fetch helper directly instead, which needs no auth.
 EOF
 
   set +e
@@ -1722,7 +1728,7 @@ EOF
   set -e
 
   expect_code 1 "$status" "instead-clause: work before a contrastive \"instead\" must still be scanned"
-  assert_contains "$out" "session" "instead-clause: the work clause must reach the scan"
+  assert_contains "$out" "credential" "instead-clause: the work clause must reach the scan"
   pass "fm-risk-tripwire splits a clause at a contrastive \"instead\""
 }
 
