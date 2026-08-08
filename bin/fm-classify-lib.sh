@@ -131,8 +131,9 @@ status_is_captain_relevant() {
 
 # 0 if a status line's leading verb is the pause verb (paused: <reason>). A pure
 # read of the line itself, so the daemon's classify_stale can reuse the last line
-# it already read without a fm-crew-state.sh call. Matches only the verb before the
-# first colon, so a reason mentioning "paused" elsewhere does not false-match.
+# it already read without a fm-crew-state.sh call. Matches only the leading verb
+# (status_line_verb), so a reason mentioning "paused" elsewhere does not
+# false-match and a stamped line is read the same as a plain one.
 status_is_paused() {  # <status-line>
   local line=$1 verb
   [ -n "$line" ] || return 1
@@ -176,21 +177,167 @@ status_is_paused_or_captain_held() {  # <status-line>
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
 # The three parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
+#
+# All three read the text BEFORE the first colon, so all three break identically
+# on any prefix that contains a colon of its own. The one that occurs in practice
+# is an ISO-8601 timestamp: nothing tells a worker not to prefix its status lines
+# with one (bin/fm-brief.sh's scaffold specifies "<state>: <one short line>" and
+# is silent about a prefix), and workers do. On such a line the whole family
+# misreads at once - the verb parses as "2026-08-08T06", the note as
+# "18:42Z blocked: ...", and the key falls back to "default".
+#
+# That produces three failures, measured against the shipped library, 2026-08-08:
+#
+#   1. A declared pause stops registering, so an idle pane that is correctly
+#      paused re-escalates as a possible wedge every window. Noisy, but visible.
+#
+#   2. A stamped needs-decision or blocked line opens NO decision at all: the
+#      mangled verb never matches the needs-decision|blocked arm below, so there
+#      is no record to close and nothing ever reaches the fleet-wide OPEN
+#      DECISIONS surface. A keyed line loses its last line of defence too, since
+#      the free-text fallback greps for a literal "needs-decision:" that a
+#      "needs-decision [key=x]:" line does not contain.
+#
+#   3. The unclosable case is the mirror image: a PLAIN opener answered by a
+#      STAMPED resolution. The opener registers, the resolution's mangled verb
+#      matches no closing arm, and the decision stays open forever.
+#
+# Two and three are the dangerous pair, and they fail in opposite directions:
+# one hides an escalation that was raised, the other keeps one alive that was
+# already answered.
+#
+# The fix normalizes ONCE, here, via _fm_status_strip_timestamp below, rather
+# than teaching each caller to distrust the first colon. Two approaches were
+# considered:
+#
+#   Chosen: strip a leading timestamp before parsing. It needs no knowledge of
+#   the verb vocabulary, so it keeps working under the FM_CAPTAIN_RE,
+#   FM_CLASSIFY_PAUSED_VERB, FM_CLASSIFY_RESOLVE_VERB and
+#   FM_CLASSIFY_CAPTAIN_HELD_VERB overrides; and because all three parsers share
+#   the one normalizer, verb, note and key cannot disagree about where the
+#   status line really starts.
+#
+#   Rejected: parse the verb as whichever colon-delimited token matches a known
+#   verb. It inverts the dependency (the parser would have to know every
+#   consumer's vocabulary, including the overridable ones); it would empty the
+#   verb VALUE for a legacy bare line such as "merged", which two consumers use
+#   for more than a membership test (bin/fm-fleet-snapshot.sh publishes it as
+#   last_event.state in the snapshot JSON the session digest reads, and
+#   bin/fm-crew-state.sh maps it), so such a line would report an empty state;
+#   and, decisively, it fixes only the verb, leaving the note garbled and the
+#   key wrong, so a keyed decision would open under "default" while its
+#   resolution closes the real key - strictly worse than the unfixed parse,
+#   because it manufactures the unclosable decision described above instead of
+#   merely failing to open one.
+#   (status_is_captain_relevant's free-text fallback would NOT break under that
+#   alternative: an empty verb still clears the exclusion set and the free-text
+#   match still runs against the whole original line. Measured, not assumed.)
+#
+# When the verb still cannot be parsed - an unrecognized prefix format leaves a
+# multi-word token before the colon - the deliberate rule is that it may never
+# SUPPRESS anything. It is not the pause verb, not captain-held, not terminal,
+# and opens no activity phase or decision, so an unreadable line cannot quiet a
+# pane; it keeps aging on the ordinary wedge path, which re-escalates once per
+# window. Captain-relevance is deliberately NOT granted to it: the away-mode
+# daemon treats a captain-relevant nonterminal verdict as "already surfaced" and
+# clears wedge aging (bin/fm-supervise-daemon.sh), then dedupes the line by
+# content, so granting it would trade a repeating wedge alarm for a single
+# one-shot surface - quieter, not louder, which is the wrong direction for
+# exactly the failure this whole section exists to prevent.
+
+# Strip a leading ISO-8601 timestamp from a status line, so the parsers below
+# see the same "<verb>[ key-token]: <note>" shape whether or not the worker
+# stamped its line. Accepts the bare and bracketed forms of a date, optionally
+# followed by a time (T-, t- or space-separated, seconds and fractional seconds
+# optional) and a zone (Z or an offset). Pure read, prints the normalized line.
+#
+# Anchoring is what makes this safe rather than a second guess: the prefix must
+# begin with a full YYYY-MM-DD date, which no status verb can, AND be followed
+# by its closing bracket where bracketed and then whitespace. Anything that
+# fails either check is returned untouched, so a plain line - including an
+# unstamped legacy line such as "merged" or "PR ready" - is never rewritten.
+# All three anchors are pinned by tests; loosening any of them moves a line from
+# the non-suppressing unparseable path to a declared pause, which is the
+# expensive direction, so none of them may be relaxed without replacing the
+# assertion that holds it.
+#
+# Cost, so the next reader does not have to re-measure it. Printing the result
+# means each of the three parsers forks a subshell per call: on this ARM host
+# roughly 266us -> 2988us for status_line_verb, and a whole-file
+# status_open_decisions over 500 lines goes from about 7.4s to about 11.5s.
+# That is not material where it is actually paid: the poll loop calls these a
+# handful of times per task per cycle (tens of ms per 15s poll), and the
+# per-wake drain uses the cursor-bounded incremental fold, so it pays only for
+# new appends; the whole-file folds are all one-shot commands. A fork-free form
+# exists and was prototyped and verified byte-identical over a 500-line corpus:
+# have this helper assign to a named scratch global instead of printing, and
+# have the three parsers read it. One function would still own the rule, so
+# verb, note and key still could not disagree. It was not taken because the
+# printing form is simpler and keeps this helper a pure read, matching the
+# character the file header claims. Revisit that trade only if a consumer starts
+# folding long status files INSIDE the poll loop, which is the one condition
+# that would make the fork cost matter.
+_fm_status_strip_timestamp() {  # <status-line> -> line with a leading timestamp removed
+  local rest bracketed=''
+  rest=$1
+  rest=${rest#"${rest%%[![:space:]]*}"}
+  case "$rest" in
+    \[*) rest=${rest#\[}; bracketed=yes ;;
+  esac
+  case "$rest" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*) rest=${rest#??????????} ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  case "$rest" in
+    [Tt][0-9][0-9]:[0-9][0-9]*|' '[0-9][0-9]:[0-9][0-9]*)
+      rest=${rest#?}                                     # T / t / space separator
+      rest=${rest#?????}                                 # HH:MM
+      case "$rest" in :[0-9][0-9]*) rest=${rest#???} ;; esac       # :SS
+      case "$rest" in                                              # .fff
+        .[0-9]*) rest=${rest#.}; rest=${rest#"${rest%%[!0-9]*}"} ;;
+      esac
+      case "$rest" in                                              # zone
+        [Zz]*) rest=${rest#?} ;;
+        [+-][0-9][0-9]:[0-9][0-9]*) rest=${rest#??????} ;;
+        [+-][0-9][0-9][0-9][0-9]*) rest=${rest#?????} ;;
+        [+-][0-9][0-9]*) rest=${rest#???} ;;
+      esac
+      ;;
+  esac
+  if [ -n "$bracketed" ]; then
+    case "$rest" in
+      \]*) rest=${rest#?} ;;
+      *) printf '%s' "$1"; return 0 ;;
+    esac
+  fi
+  case "$rest" in
+    [[:space:]]*) ;;
+    *) printf '%s' "$1"; return 0 ;;
+  esac
+  printf '%s' "${rest#"${rest%%[![:space:]]*}"}"
+}
+
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*}
+  local v
+  v=$(_fm_status_strip_timestamp "$1")
+  v=${v%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
   printf '%s' "$v"
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
-  case "$1" in
-    *:*) local n=${1#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
-    *) printf '%s' "$1" ;;
+  local line
+  line=$(_fm_status_strip_timestamp "$1")
+  case "$line" in
+    *:*) local n=${line#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
+    *) printf '%s' "$line" ;;
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix k
+  prefix=$(_fm_status_strip_timestamp "$1")
+  prefix=${prefix%%:*}
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}

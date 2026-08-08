@@ -493,6 +493,239 @@ test_crew_absorb_class_done_without_pause_still_surfaces() {
   pass "crew_absorb_class: a done task with no declared pause keeps ordinary none classification, unaffected by the done-pause override"
 }
 
+# Regression (2026-08-08 live incident: beamanalyzer-round-hss-k22-bearing): a
+# worker may prefix its status lines with an ISO-8601 timestamp - bin/fm-brief.sh
+# specifies "<state>: <one short line>" and says nothing about a prefix - which
+# puts a colon INSIDE the text every parser in fm-classify-lib.sh reads as the
+# verb. The whole family then misread at once: the verb became "2026-08-08T06",
+# the note "18:42Z blocked: ...", and a keyed decision fell back to "default". The
+# visible symptom was a declared pause that never registered, so a correctly
+# paused pane wedge-escalated every window; the severe one was a keyed
+# needs-decision that read as neither captain-relevant nor a decision under its
+# own key, so no matching resolution could ever close it.
+#
+# Each verb is asserted in BOTH forms against the SAME expected verdict, not
+# merely against each other, so the pair cannot go vacuous by both forms breaking
+# together.
+test_timestamped_status_lines_classify_as_plain_ones() {
+  local ts='2026-08-08T06:18:42Z ' verb want_paused want_held want_term want_capt
+  local plain stamped got_p got_s
+
+  # Verdict of one predicate on one line, as a comparable token.
+  _ts_pred() {  # <fn> <line> -> yes|no
+    if "$1" "$2"; then printf 'yes'; else printf 'no'; fi
+  }
+  # Assert one predicate agrees with <want> in both the plain and stamped form.
+  _ts_both() {  # <fn> <want> <plain> <stamped> <verb>
+    got_p=$(_ts_pred "$1" "$3"); got_s=$(_ts_pred "$1" "$4")
+    [ "$got_p" = "$2" ] || fail "$5: plain form changed behavior - $1 returned $got_p, expected $2"
+    [ "$got_s" = "$2" ] || fail "$5: timestamped form misclassified - $1 returned $got_s, expected $2"
+  }
+
+  # verb paused paused_or_held terminal_verb captain_relevant
+  while read -r verb want_paused want_held want_term want_capt; do
+    [ -n "$verb" ] || continue
+    plain="$verb [key=api-shape]: some summary"
+    stamped="$ts$plain"
+
+    [ "$(status_line_verb "$stamped")" = "$verb" ] \
+      || fail "$verb: timestamped verb parsed as '$(status_line_verb "$stamped")'"
+    [ "$(status_line_verb "$plain")" = "$verb" ] \
+      || fail "$verb: plain verb parsed as '$(status_line_verb "$plain")'"
+    [ "$(status_line_note "$stamped")" = 'some summary' ] \
+      || fail "$verb: timestamped note parsed as '$(status_line_note "$stamped")'"
+    [ "$(status_line_note "$plain")" = 'some summary' ] \
+      || fail "$verb: plain note parsed as '$(status_line_note "$plain")'"
+
+    _ts_both status_is_paused "$want_paused" "$plain" "$stamped" "$verb"
+    _ts_both status_is_paused_or_captain_held "$want_held" "$plain" "$stamped" "$verb"
+    _ts_both status_is_terminal_verb "$want_term" "$plain" "$stamped" "$verb"
+    _ts_both status_is_captain_relevant "$want_capt" "$plain" "$stamped" "$verb"
+  done <<'VERBS'
+working         no  no  no  no
+paused          yes yes no  no
+blocked         no  no  yes yes
+needs-decision  no  no  yes yes
+done            no  no  yes yes
+failed          no  no  yes yes
+resolved        no  no  no  no
+captain-held    no  yes no  no
+VERBS
+  unset -f _ts_pred _ts_both
+
+  # The colon-free +HHMM zone, pinned because it is the exact shape this repo's
+  # own watcher log writes (state/.watch-triage.log records
+  # "[2026-08-08T13:28:04-0400]"), and it is the one zone form no other
+  # assertion here covers.
+  status_is_paused '[2026-08-08T13:28:04-0400] paused: awaiting review' \
+    || fail "a bracketed +HHMM-zone stamp was not read as a declared pause"
+  status_is_paused '2026-08-08T13:28:04+0400 paused: awaiting review' \
+    || fail "a bare +HHMM-zone stamp was not read as a declared pause"
+
+  pass "every status verb classifies identically stamped and plain across the paused, captain-held, terminal and captain-relevant tests"
+}
+
+# The keyed decision and activity folds read the same verb/note/key family, so a
+# stamped line must open and close a decision under its REAL key. Before the fix
+# the key fell back to "default", so a stamped needs-decision opened a decision
+# its own matching resolution could never close.
+test_timestamped_status_lines_fold_under_their_real_key() {
+  local dir state open activity
+  dir=$(make_case classify-timestamped-fold); state="$dir/state"
+
+  printf '%s\n' \
+    '2026-08-08T04:10:30Z needs-decision [key=qf-floor]: floor Qf at 0 or not' \
+    '2026-08-08T04:11:00Z done: implemented and committed' \
+    > "$state/stamped.status"
+  open=$(status_open_decisions "$state/stamped.status")
+  printf '%s' "$open" | grep -F $'qf-floor\tneeds-decision\tfloor Qf at 0 or not' >/dev/null \
+    || fail "a stamped needs-decision did not open under its real key with its real note: [$open]"
+  printf '%s' "$open" | grep -F $'default\t' >/dev/null \
+    && fail "a stamped needs-decision fell back to the default key"
+
+  # ... and its matching stamped resolution closes it.
+  printf '%s\n' '2026-08-08T04:15:00Z resolved [key=qf-floor]: captain kept the scope as briefed' \
+    >> "$state/stamped.status"
+  [ -z "$(status_open_decisions "$state/stamped.status")" ] \
+    || fail "a stamped resolution did not close the decision its stamped opener raised"
+
+  # The activity fold shares the family: a stamped declared pause opens a phase
+  # under its own key, and a stamped terminal event closes it.
+  printf '%s\n' \
+    '2026-08-08T04:41:59Z paused [key=review]: awaiting validation review step' \
+    > "$state/stamped-activity.status"
+  activity=$(status_open_activities "$state/stamped-activity.status")
+  printf '%s' "$activity" | grep -F $'review\tpaused\tawaiting validation review step' >/dev/null \
+    || fail "a stamped declared pause did not open an activity phase under its real key: [$activity]"
+  printf '%s\n' '2026-08-08T05:38:13Z done [key=review]: review returned green' \
+    >> "$state/stamped-activity.status"
+  [ -z "$(status_open_activities "$state/stamped-activity.status")" ] \
+    || fail "a stamped terminal event did not close the phase its stamped pause opened"
+
+  pass "stamped lines open and close keyed decisions and activity phases under their real key"
+}
+
+# crew_absorb_class is the fourth caller routed through the same parse: its
+# declared-pause overrides all gate on status_is_paused reading this task's own
+# last status line. With the verb mangled, a stamped `paused:` line was invisible
+# here, so the watcher never latched a paused verdict and re-surfaced the
+# identical stale hash every poll - the five consecutive wedge escalations that
+# filed this defect.
+test_crew_absorb_class_honors_timestamped_declared_pause() {
+  local dir fakebin state
+  dir=$(make_case absorb-timestamped-pause); fakebin="$dir/fakebin"; state="$dir/state"
+  export FM_CREW_STATE_BIN="$fakebin/fm-crew-state.sh"
+  export FM_STATE_OVERRIDE="$state"
+  export FM_FAKE_CREW_STATE='state: done · source: run-step · checks green: PR ready for review'
+  fm_write_meta "$state/task-a.meta" "window=sess:fm-task-a" "backend=tmux"
+
+  printf '2026-08-08T04:41:59Z paused: awaiting validation review step\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "a stamped declared pause was not honored by crew_absorb_class (got $(crew_absorb_class task-a))"
+  crew_is_paused task-a || fail "crew_is_paused did not recognize a stamped declared pause"
+  ! crew_is_provably_working task-a || fail "a stamped paused crew was treated as provably working"
+
+  # Same verdict as the plain form it is equivalent to.
+  printf 'paused: awaiting validation review step\n' > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "the plain declared pause changed behavior"
+
+  # The parked-gate override reads the stamped decision fold too: both signals
+  # (a declared pause AND a still-open keyed decision) must be seen on stamped
+  # lines, or a parked run re-surfaces on every poll.
+  export FM_FAKE_CREW_STATE='state: parked · source: run-step · parked at review'
+  printf '%s\n' \
+    '2026-08-08T04:10:30Z needs-decision [key=qf-floor]: floor Qf at 0 or not' \
+    '2026-08-08T04:41:59Z paused: awaiting the captain on the Qf floor' \
+    > "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = paused ] \
+    || fail "a stamped parked gate (stamped pause + stamped open decision) was not honored"
+
+  # Disconfirming: once the stamped decision is resolved, the parked-gate
+  # override must stop firing, so a genuinely wedged parked run still surfaces.
+  # The pause is re-declared as the LAST line so that the open decision is the
+  # only signal differing from the absorbed case above - otherwise the pause
+  # test alone would carry this assertion and the two-signal bar would go
+  # unpinned.
+  printf '%s\n' \
+    '2026-08-08T04:50:40Z resolved [key=qf-floor]: captain answered' \
+    '2026-08-08T04:51:00Z paused: still idling after the answer landed' \
+    >> "$state/task-a.status"
+  [ "$(crew_absorb_class task-a)" = none ] \
+    || fail "a parked run still declaring a pause but with no open decision left was absorbed as paused"
+
+  unset FM_FAKE_CREW_STATE FM_STATE_OVERRIDE
+  pass "crew_absorb_class: stamped declared pauses and stamped open decisions drive the same overrides as plain ones"
+}
+
+# A prefix format the normalizer does NOT recognize still leaves a verb it cannot
+# parse. The deliberate rule (recorded in bin/fm-classify-lib.sh) is that such a
+# line may never SUPPRESS anything: it is not the pause verb, not captain-held,
+# not terminal, and it neither opens nor closes a decision or activity phase, so
+# an unreadable line cannot quiet a pane and it keeps aging on the ordinary wedge
+# path. Captain-relevance is deliberately NOT granted, because the away-mode
+# daemon treats a captain-relevant nonterminal verdict as already surfaced and
+# clears wedge aging, which would make it quieter rather than louder.
+test_unparseable_status_verb_never_suppresses() {
+  local dir state open activity
+  dir=$(make_case classify-unparseable); state="$dir/state"
+
+  # A US-style stamp, deliberately outside the ISO-8601 shape the normalizer
+  # anchors on, so the verb genuinely cannot be recovered.
+  local u='08/08/2026 06:18:42 '
+  [ "$(status_line_verb "${u}paused: waiting")" = paused ] \
+    && fail "fixture is not actually unparseable - the normalizer recovered the verb"
+
+  status_is_paused "${u}paused: waiting" \
+    && fail "an unparseable line was allowed to declare a pause and quiet the pane"
+  status_is_paused_or_captain_held "${u}captain-held: tracked" \
+    && fail "an unparseable line was allowed to claim a captain-held transfer"
+  status_is_terminal_verb "${u}done: shipped" \
+    && fail "an unparseable line was classed as a terminal verb"
+
+  # The normalizer's other two anchors, each pinned here because loosening
+  # either one moves a line from this non-suppressing path to a declared pause,
+  # which silences the pane. The date anchor is pinned by the fixture guard
+  # above; these two were previously held by nothing.
+  status_is_paused '[2026-08-08T06:18:42Z paused: waiting on release' \
+    && fail "a stamp whose bracket is never closed was allowed to declare a pause"
+  status_is_paused '2026-08-08T06:18:42Zpaused: waiting on release' \
+    && fail "a stamp with no whitespace after it was allowed to declare a pause"
+
+  # It must not be able to CLOSE a real open decision. Asserted on a keyed AND a
+  # default-key decision: under a key the unreadable key slug alone would block
+  # the close, so only the bare form proves the unparseable VERB is what refuses
+  # the transition.
+  printf '%s\n' \
+    'needs-decision [key=api-shape]: A or B' \
+    "${u}resolved [key=api-shape]: answered" \
+    > "$state/u.status"
+  open=$(status_open_decisions "$state/u.status")
+  printf '%s' "$open" | grep -F $'api-shape\tneeds-decision\t' >/dev/null \
+    || fail "an unparseable resolution silently closed a genuinely open keyed decision: [$open]"
+
+  printf '%s\n' 'needs-decision: A or B' "${u}resolved: answered" > "$state/u-default.status"
+  open=$(status_open_decisions "$state/u-default.status")
+  printf '%s' "$open" | grep -F $'default\tneeds-decision\t' >/dev/null \
+    || fail "an unparseable resolution silently closed a genuinely open default-key decision: [$open]"
+
+  # Nor silently supersede a running activity phase, keyed or default.
+  printf '%s\n' \
+    'working [key=phase1]: building' \
+    "${u}done [key=phase1]: finished" \
+    > "$state/u-activity.status"
+  activity=$(status_open_activities "$state/u-activity.status")
+  printf '%s' "$activity" | grep -F $'phase1\tworking\t' >/dev/null \
+    || fail "an unparseable terminal event silently closed an open keyed activity phase: [$activity]"
+
+  printf '%s\n' 'working: building' "${u}done: finished" > "$state/u-default-activity.status"
+  activity=$(status_open_activities "$state/u-default-activity.status")
+  printf '%s' "$activity" | grep -F $'default\tworking\t' >/dev/null \
+    || fail "an unparseable terminal event silently closed an open default-key activity phase: [$activity]"
+
+  pass "an unparseable status verb can never suppress: no pause, no captain-held, no terminal verdict, and no silent decision or phase close"
+}
+
 # Hard-constraint disconfirming checks for the pause_state_class fix in
 # bin/fm-watch.sh (regression: beamanalyzer-caveat-em-dashes and siblings,
 # see the comment above pause_state_class there): once a direct `paused`
@@ -3162,6 +3395,10 @@ test_crew_absorb_class_honors_declared_pause_at_open_gate_even_when_alive
 test_crew_absorb_class_unpaused_wedge_still_surfaces
 test_crew_absorb_class_honors_declared_pause_after_done
 test_crew_absorb_class_done_without_pause_still_surfaces
+test_timestamped_status_lines_classify_as_plain_ones
+test_timestamped_status_lines_fold_under_their_real_key
+test_crew_absorb_class_honors_timestamped_declared_pause
+test_unparseable_status_verb_never_suppresses
 test_crew_absorb_class_hard_constraints_still_surface
 test_crew_absorb_class_honors_declared_pause_at_parked_gate
 test_crew_absorb_class_parked_without_pause_or_decision_still_surfaces
