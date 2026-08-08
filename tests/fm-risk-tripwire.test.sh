@@ -1552,6 +1552,204 @@ EOF
   pass "fm-risk-tripwire still scans a fenced snippet fronted by a prohibitive comment"
 }
 
+# The "#" case above closes only because a "#" line is also a markdown heading.
+# Every other comment syntax reached the same block through no boundary at all,
+# which is why three review rounds each reported one more of them. The block
+# rule no longer applies inside a fence, so the marker is irrelevant: assert
+# that per syntax rather than trusting the shape, because a rule that keyed on
+# the marker set would pass the ones it listed and fail the ones it did not.
+comment_syntax_marker() {
+  case $1 in
+    hash) printf '#' ;;
+    sql) printf -- '--' ;;
+    slash) printf '//' ;;
+    html) printf '<!--' ;;
+    semicolon) printf ';' ;;
+    percent) printf '%%' ;;
+  esac
+}
+
+test_every_comment_syntax_fronting_a_fenced_snippet_still_trips() {
+  local syntax case_dir out status term
+  for syntax in hash sql slash html semicolon percent; do
+    case_dir="$TMP_ROOT/fenced-comment-$syntax"
+    {
+      printf 'Wire the intake job up to the staging database.\n\n'
+      printf '```\n'
+      printf '%s Never run this against prod.\n' "$(comment_syntax_marker "$syntax")"
+      printf 'ALTER TABLE users ADD COLUMN session_secret text;\n'
+      printf "INSERT INTO settings (key) VALUES ('credential_token');\n"
+      printf 'db.migrate();\n'
+      printf '```\n\nConfirm the intake job runs.\n'
+    } | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "fenced-comment-$syntax: a caveat comment must not drop the snippet under it"
+    for term in credential migrate secret session token; do
+      assert_contains "$out" "$term" "fenced-comment-$syntax: the fenced snippet must reach the scan"
+    done
+  done
+  pass "fm-risk-tripwire scans a fenced snippet fronted by a comment in any syntax"
+}
+
+test_fenced_block_is_never_dropped_whole() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fence-no-block-drop"
+  # The structural half of the rule above, with no comment marker in sight: an
+  # opening line that is a bare prohibition sentence. In prose that drops the
+  # block; inside a fence it must only drop itself.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Bring the staging box back in line.
+
+```
+Never run this against prod.
+export SESSION_SECRET=staging
+```
+
+Then load the login page and confirm it renders.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fence-no-block-drop: a prohibitive opening line must not drop the fenced block"
+  assert_contains "$out" "secret" "fence-no-block-drop: the rest of the fence must reach the scan"
+  pass "fm-risk-tripwire never drops a fenced block whole on its opening clause"
+}
+
+test_fenced_prohibition_clause_is_still_dropped() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fence-clause-drop"
+  # The other side of the same rule, so exempting fenced blocks from the whole
+  # block drop is not read as exempting them from the narrowing altogether. A
+  # standing prohibition alone inside a fence is still suppressed clause by
+  # clause. The marker is deliberately not "#", which would be scanned as a
+  # heading and never reach the clause rule at all.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Document the deploy runbook.
+
+```
+-- Never rotate the session token or the signing secret by hand.
+```
+
+Write it up in the runbook.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "fence-clause-drop: a lone in-fence prohibition must still be suppressed"
+  [ -z "$out" ] || fail "fence-clause-drop: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire still suppresses a prohibition clause inside a fence"
+}
+
+test_in_fence_comment_boundary_no_longer_costs_the_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fence-comment-boundary"
+  # An in-fence "#" line flushes, so the lines after it become their own block
+  # opening on a prohibition. While the block rule applied inside fences that
+  # boundary promoted a clause drop into a whole block drop and took the work
+  # line with it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Add an index so the reports page stops timing out.
+
+```bash
+psql -c "create index on reports (user_id)"
+# cleanup step
+Never run this against prod.
+Rotate the credential afterwards.
+```
+
+Confirm the reports page loads.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fence-comment-boundary: a block boundary inside a fence must not cost the lines after it"
+  assert_contains "$out" "credential" "fence-comment-boundary: the work line must survive the boundary"
+  pass "fm-risk-tripwire keeps work text after an in-fence comment boundary"
+}
+
+test_work_clause_after_a_leading_prohibition_still_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/trailing-work-clause"
+  # The direction the clause rescue used to miss. Its mirror image (work first,
+  # caveat second) is pinned separately; both orderings must now survive, or
+  # the rescue is decided by word order rather than by what the brief says.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Make the reports page stop timing out.
+
+Do not touch the report queries, but do add a session index.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "trailing-work-clause: work stated after a leading prohibition must still be scanned"
+  assert_contains "$out" "session" "trailing-work-clause: the work clause must reach the scan"
+  pass "fm-risk-tripwire keeps a work clause that follows a leading prohibition"
+}
+
+test_instead_splits_a_clause_that_turns_back_to_work() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/instead-clause"
+  # "instead" is the second contrastive split point and it is load-bearing on
+  # its own: without it this whole sentence is one clause, it reads as a
+  # prohibition on its closing "needs no auth", and the session work vanishes
+  # with it. Transcribed from the live brief that recovered when it was added.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Reproduce the intake failure.
+
+Reproduce against the live site if you can get a session, or drive the fetch helper directly instead, which needs no auth.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "instead-clause: work before a contrastive \"instead\" must still be scanned"
+  assert_contains "$out" "session" "instead-clause: the work clause must reach the scan"
+  pass "fm-risk-tripwire splits a clause at a contrastive \"instead\""
+}
+
+test_all_prohibitive_opening_sentence_still_drops_its_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/all-prohibitive-opening"
+  # The block rule's remaining job, stated on its own rather than only through
+  # the recorded false fires: every clause of the opening sentence is a
+  # prohibition, so the positively phrased sentence after it is elaboration and
+  # not work. This is the assertion that stops the rule from being relaxed into
+  # judging clauses alone.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Review one commit before it lands.
+
+- **Never restart the watcher, and never `pkill -f bin/fm-watch.sh`**: that can kill sibling homes. A live supervision cycle is active for this session. Build your own fixtures instead.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "all-prohibitive-opening: an all-prohibitive opening sentence must still drop its block"
+  [ -z "$out" ] || fail "all-prohibitive-opening: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire still drops a block whose opening sentence is all prohibition"
+}
+
 test_fence_delimiter_starts_a_new_block() {
   local case_dir out status
   case_dir="$TMP_ROOT/fence-boundary"
@@ -2346,6 +2544,13 @@ test_fenced_scope_heading_cannot_open_an_excluded_section
 test_tilde_fenced_scope_heading_cannot_open_an_excluded_section
 test_nested_backtick_fence_does_not_close_a_tilde_fence
 test_commented_fenced_snippet_still_trips
+test_every_comment_syntax_fronting_a_fenced_snippet_still_trips
+test_fenced_block_is_never_dropped_whole
+test_fenced_prohibition_clause_is_still_dropped
+test_in_fence_comment_boundary_no_longer_costs_the_block
+test_work_clause_after_a_leading_prohibition_still_trips
+test_instead_splits_a_clause_that_turns_back_to_work
+test_all_prohibitive_opening_sentence_still_drops_its_block
 test_fence_delimiter_starts_a_new_block
 test_fenced_task_heading_does_not_fool_the_has_task_section_check
 test_fenced_setup_heading_does_not_truncate_the_task_body

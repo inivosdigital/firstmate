@@ -389,8 +389,9 @@ path_is_risky() {
 #       non-change scope ("Explicitly out of scope", "What should NOT need
 #       changing") opens an excluded region, closed by the next heading at the
 #       same or shallower depth.
-#   D2  a prohibition BLOCK. A list item or paragraph whose FIRST clause is a
-#       prohibition is dropped whole, because what follows it elaborates the
+#   D2  a prohibition BLOCK. A PROSE list item or paragraph whose OPENING
+#       SENTENCE is prohibitive in every one of its clauses is dropped whole,
+#       because what follows an all-prohibitive opening elaborates the
 #       prohibition rather than the task. This is what reaches a matching word
 #       that sits in a positively phrased sentence inside an otherwise
 #       prohibitive bullet ("... A live supervision cycle is active for this
@@ -403,12 +404,62 @@ path_is_risky() {
 # once ("Document that Gmail needs an App Password for IMAP auth, do not assume
 # plain password auth works"). Judging that sentence as one unit loses the work
 # instruction along with the caveat. Splitting at the deontic marker keeps it:
-# across the 605 briefs, 1597 sentences read as prohibitions taken whole yet
-# keep at least one clause once split. The rescue is one-directional, though:
-# a work clause that PRECEDES its caveat survives, while one that follows a
-# leading prohibition ("Do not touch the report queries, but do add a session
-# index") still goes down with the block, because D2 judges the opening clause.
-# That asymmetry is inherited from the block rule, not introduced by the split.
+# across the 613 briefs, 1661 sentences read as prohibitions taken whole yet
+# keep at least one clause once split.
+#
+# D2's two qualifiers above - PROSE, and OPENING SENTENCE rather than opening
+# clause - are what stop one prohibition from taking unrelated work text down
+# with it. Both replace an earlier rule that dropped any block whose opening
+# CLAUSE was a prohibition, and both only ever return text to the scan:
+#
+#   - PROSE. "Is this block's opening clause a prohibition?" presumes the block
+#     is one authored prose point, which a paragraph or a list item is and a
+#     fenced code block is not. A comment among code lines is a note ABOUT the
+#     code, not an umbrella over it, so a caveat comment fronting a snippet used
+#     to drop the snippet. That was reported in two consecutive review rounds,
+#     first for "#" and then for "--", "//", "<!--", ";" and "%", each answered
+#     by giving one more line shape its own block boundary rather than asking
+#     whether a fenced block should be judged this way at all. A third round,
+#     the earliest, had already reported the same mechanism without a comment in
+#     sight: prohibition prose fronting work text took the work text.
+#     Exempting fenced blocks from the whole-block drop closes every comment
+#     syntax at once and names none of them, so a syntax nobody has written down
+#     yet is closed too. D3 still judges each fenced clause on its own, so a
+#     genuine standing prohibition inside a fence is still suppressed.
+#   - OPENING SENTENCE. Keying on the opening clause made the rescue in the
+#     paragraph above one-directional: a work clause that PRECEDED its caveat
+#     survived, while one that FOLLOWED a leading prohibition in the same
+#     sentence ("Do not touch the report queries, but do add a session index")
+#     went down with the whole block. Requiring every clause of the opening
+#     sentence to be prohibitive before dropping the block closes that
+#     direction, because the work clause makes the opening sentence not
+#     all-prohibitive and the block survives to be judged clause by clause.
+#     For this to reach the example, "but" and "instead" split a clause the way
+#     a deontic marker does (see clause_split below).
+#
+# Every step above is strictly permissive: D2 now fires on a subset of the
+# blocks it used to fire on, and splitting a clause can only turn one
+# dropped clause into a dropped clause plus a kept one, never the reverse (any
+# prohibition pattern matching a fragment also matches the clause it came from,
+# since normalisation puts a space at both ends of each). So no text that
+# reaches the scan today can stop reaching it, and the trip set can only grow
+# toward the pre-narrowing scanner's, never past it.
+#
+# Measured over the 613 briefs on disk when this was written, brief half only,
+# by running each version over every data/<id>/brief.md with no worktree.
+# Against the previous rule: 1 brief goes from clean to tripping and 0 go from
+# tripping to clean. Checked at token level and not only at verdict level,
+# because a brief can keep its verdict while quietly losing a term: that same
+# brief is the only hit list that differs anywhere in the corpus, so no brief
+# lost a term either.
+# Against the pre-narrowing scan: 0 briefs trip that it did not, so the trip
+# set is still a strict subset of the scan this whole narrowing had to stay
+# inside, and 51 of the briefs it tripped stay clean (52 under the previous
+# rule). Trip rate moves from 358 briefs (58.4%) to 359 (58.6%), against 410
+# (66.9%) unnarrowed. The narrowing steps themselves move as the permissive
+# direction predicts: whole-block drops fall from 1223 to 1197, clause drops
+# rise from 3277 to 3316 as the blocks D2 no longer takes reach D3 instead, and
+# split rescues rise from 1610 to 1661.
 #
 # Heading lines are ALWAYS scanned and never dropped by D2/D3: a heading is the
 # most compressed statement of what its section is about, so a risk word in one
@@ -448,6 +499,36 @@ path_is_risky() {
 #   - Per-sentence negation handling alone. It cannot reach a matching word that
 #     sits in a positively phrased sentence of a prohibitive bullet, which is
 #     why D2 exists alongside D3.
+#   - Dropping D2 outright, so every clause is judged on its own. It closes the
+#     comment channel and the whole asymmetry at once and needs no fence
+#     exemption, which is why it was measured first. Measured against the nine
+#     recorded false fires the narrowing exists to stop: eight stay clean and
+#     the ninth comes straight back, because its shape IS a prohibitive bullet
+#     whose later sentence reads positively ("... A live supervision cycle is
+#     active for this session."). D1 and D3 clear the other eight on their own,
+#     so D2's entire remaining job is that one shape, and it cannot be given up
+#     without giving that up. Whole-corpus effect against the rule below: 364
+#     briefs trip against 359, and two of the five that return are the briefs
+#     behind recorded false fires 4 and 7 themselves.
+#   - Requiring EVERY clause in the whole BLOCK to be a prohibition, rather than
+#     every clause of its opening sentence. Measured to be the same trade as
+#     dropping D2 and no better: 364 briefs, the same five returning, the same
+#     recorded false fire back. Its later sentences are exactly the
+#     non-prohibitions the rule would require to be absent, so the one shape D2
+#     still exists for is the one shape this cannot express.
+#   - Giving a comment line its own block boundary, one comment syntax at a
+#     time. This is what the previous round did for "#" and what the next one
+#     would have done for "--" and "//", and it measurably does not converge: a
+#     nine-line rule adding "--" and "//" to the boundary set closed
+#     two of at least five syntaxes and left "<!--", markdown's own comment
+#     syntax, still open. It also costs text in the other direction, since a new
+#     block boundary promotes a D3 clause-drop into a D2 whole-block drop. The
+#     PROSE qualifier above closes all of them without naming any.
+#   - Ending D2's drop at the first later sentence that reads as a work
+#     instruction. Rejected on the same word-class grounds as the change-verb
+#     entry below: recognising work is an open class, so every phrasing the
+#     detector misses stays silently suppressed, and nothing in the rule tells a
+#     reader which ones those are.
 #   - Never letting the narrowing remove the LAST match-set token from a brief,
 #     so no brief can go from tripping to clean. It sounds like a free safety
 #     net and it is not: it was implemented and measured, and it restores the
@@ -469,26 +550,42 @@ path_is_risky() {
 #     prohibition() below).
 #
 # What this still misses, stated plainly because the safety direction is NOT
-# symmetrical and a missed real hit is far worse than a false one: a genuinely
-# risky task whose ONLY mention of the risky surface sits inside a prohibition
-# that concedes no work on it ("Never touch the session store.", in a brief that
-# otherwise describes its session work in words the match set does not carry) is
-# no longer caught by the prose scan.
+# symmetrical and a missed real hit is far worse than a false one:
+#   - A genuinely risky task whose ONLY mention of the risky surface sits inside
+#     a prohibition that concedes no work on it ("Never touch the session
+#     store.", in a brief that otherwise describes its session work in words the
+#     match set does not carry) is not caught by the prose scan.
+#   - Half of the one-directional asymmetry above survives, across sentences
+#     rather than within one. "Do not touch the report queries, but do add a
+#     session index." now trips; "Do not touch the report queries. Do add a
+#     session index." still does not, because the opening sentence is
+#     all-prohibitive and D2 drops the block. This residual is left deliberately
+#     and it is not an oversight: it is the SAME SHAPE as the recorded false
+#     fire D2 exists for, an all-prohibitive opening followed by a positively
+#     phrased later sentence in one block, and the two want opposite verdicts on
+#     text a structural rule cannot tell apart. Closing it means dropping D2,
+#     which was measured to bring that false fire straight back (see the
+#     rejected list above). Preferring the noisier reading is the standing bias
+#     here and it was taken everywhere it did not reopen a recorded false fire;
+#     this is the one place it did, so the quieter reading is kept and named
+#     rather than hidden.
 #
-# What actually bounds that, measured over the same 605 briefs rather than
-# assumed, because an overstated safety margin in a mechanical gate's own header
-# is worse than a stated gap:
-#   - Clause splitting is the one bound that carries real weight. 1597 sentences
+# What actually bounds those, measured over the 613 briefs on disk when the
+# block rule above was last changed rather than assumed, because an overstated
+# safety margin in a mechanical gate's own header is worse than a stated gap:
+#   - Clause splitting is the one bound that carries real weight. 1661 sentences
 #     read as prohibitions taken whole yet keep at least one clause, against
-#     1184 blocks dropped whole at D2 and 3236 clauses dropped at D3. Every one
-#     of those 1597 is work prose a sentence-level rule would have lost.
-#   - concedes_work rescues 21 clauses. Small, and it is kept because the case
-#     it covers is the one that cost a real access-control brief its whole scan
-#     (see concedes_work below), not because the count is reassuring.
+#     1197 blocks dropped whole at D2 and 3316 clauses dropped at D3. Every one
+#     of those 1661 is work prose a sentence-level rule would have lost.
+#   - concedes_work rescues 22 clauses, counting both its paths: 18 clauses
+#     printed despite reading as prohibitions, and 4 blocks D2 would otherwise
+#     have dropped whole. Small, and it is kept because the case it covers is
+#     the one that cost a real access-control brief its whole scan (see
+#     concedes_work below), not because the count is reassuring.
 #   - A brief with no parseable "# Task" section is scanned whole and
 #     unnarrowed, because the structure the narrowing assumes is not there to
-#     assume. 3 of 605 briefs take that path.
-#   - The empty-narrowing fallback below fires on 0 of 605. It is an emptiness
+#     assume. 3 of 613 briefs take that path.
+#   - The empty-narrowing fallback below fires on 0 of 613. It is an emptiness
 #     test, not a substance test, and headings print unconditionally, so any
 #     heading anywhere in the task body keeps the narrowed text non-empty
 #     forever. Treat it as a floor against a pathological brief, never as a
@@ -591,11 +688,25 @@ brief_scan_text() {
     # trailing caveat is a prohibition. A marker is only a split point when it
     # stands as a whole word, so "whenever" never carves a sentence apart and
     # cannot strand the words after it in a fragment that then reads prohibitive.
+    #
+    # "but" and "instead" split too, though neither is deontic. They mark where
+    # a prohibition ENDS and the sentence turns back to work, which is the half
+    # of the asymmetry a deontic-only marker set cannot reach: without them "do
+    # not touch the report queries, but do add a session index" is one clause,
+    # it reads as a prohibition whole, and the work goes with it. Both are
+    # closed-class contrastive connectives and both only ever hand text back to
+    # the scan. Kept to the two that were measured to move something: "but"
+    # moves the sentence above, "instead" recovers a live brief whose only
+    # session mention sat in a clause ending "which needs no auth" and which the
+    # pre-narrowing scan tripped on. "however" and "whereas" were measured over
+    # the same 613 briefs and moved nothing in either direction, so they are
+    # left out rather than added for symmetry; add them on the same evidence if
+    # a brief ever needs them.
     function clause_split(s, out,   n, buf, rest, p, len, before, after) {
       n = 0
       buf = ""
       rest = s
-      while (match(rest, /(do not|don[^a-z0-9]?t|must not|mustn[^a-z0-9]?t|may not|might not|should not|shouldn[^a-z0-9]?t|shall not|never|avoid|avoids|avoiding)/)) {
+      while (match(rest, /(do not|don[^a-z0-9]?t|must not|mustn[^a-z0-9]?t|may not|might not|should not|shouldn[^a-z0-9]?t|shall not|never|avoid|avoids|avoiding|but|instead)/)) {
         p = RSTART
         len = RLENGTH
         before = (p > 1) ? substr(rest, p - 1, 1) : ""
@@ -614,13 +725,14 @@ brief_scan_text() {
       if (buf ~ /[a-z0-9]/) out[++n] = buf
       return n
     }
-    # Emit a finished block: dropped whole when its opening clause is a
-    # prohibition (D2), otherwise clause by clause (D3). A concession is judged
-    # per SENTENCE, not per clause, so "do not break the login cookie while you
-    # change the handler, and do not touch the session middleware" keeps the
-    # surface the concession covers instead of losing it at the comma.
-    function flush(   ns, nc, i, j, sents, frags, conc, first) {
-      if (block ~ /^[[:space:]]*$/) { block = ""; return }
+    # Emit a finished block: dropped whole when it is prose and every clause of
+    # its opening sentence is a prohibition (D2), otherwise clause by clause
+    # (D3). A concession is judged per SENTENCE, not per clause, so "do not
+    # break the login cookie while you change the handler, and do not touch the
+    # session middleware" keeps the surface the concession covers instead of
+    # losing it at the comma.
+    function flush(   ns, nc, i, j, sents, frags, conc, first, allproh) {
+      if (block ~ /^[[:space:]]*$/) { block = ""; blockfence = 0; return }
       gsub(/[[:space:]]+/, " ", block)
       # Everything this function emits is lowercased by the caller before it is
       # matched, so folding case here costs nothing and lets clause_split use
@@ -633,15 +745,22 @@ brief_scan_text() {
         if (sents[i] !~ /[a-z0-9]/) continue
         conc = concedes_work(sents[i])
         nc = clause_split(sents[i], frags)
-        for (j = 1; j <= nc; j++) {
-          if (first) {
-            first = 0
-            if (!conc && prohibition(frags[j])) { block = ""; return }
+        if (first) {
+          first = 0
+          # D2. blockfence is what keeps this off fenced code: a comment among
+          # code lines is a note about the code, never an umbrella over it.
+          if (!blockfence && !conc) {
+            allproh = 1
+            for (j = 1; j <= nc; j++) if (!prohibition(frags[j])) allproh = 0
+            if (allproh) { block = ""; blockfence = 0; return }
           }
+        }
+        for (j = 1; j <= nc; j++) {
           if (conc || !prohibition(frags[j])) print frags[j]
         }
       }
       block = ""
+      blockfence = 0
     }
     { blank = ($0 ~ /^[[:space:]]*$/) }
     # Fence delimiters reach this scan because brief_task_body emits them inside
@@ -671,16 +790,17 @@ brief_scan_text() {
       # and letting one open an exclusion would silently drop every risk word
       # after it to the end of the brief.
       #
-      # Only the OPENING decision is fence-gated, deliberately. Flushing and
-      # printing a "#" line inside a fence is not free: the flush opens a new
-      # block right there, and a block boundary can turn a D3 clause-drop into
-      # a D2 whole-block drop when the text after it opens with a prohibition -
-      # the same one-directional D2 asymmetry documented above, now reachable
-      # from inside a fence too. Suppressing them instead costs a whole fenced
-      # snippet: the comment fronting the block made its opening clause a
-      # prohibition, so D2 dropped the commands under it. And letting an
-      # in-fence "#" line CLOSE an open exclusion only ever returns text to the
-      # scan, which is the safe direction to be wrong in.
+      # Only the OPENING decision is fence-gated, deliberately. Suppressing an
+      # in-fence "#" line cost a whole fenced snippet, because the comment
+      # fronting the block made its opening clause a prohibition and D2 dropped
+      # the commands under it. Flushing one used to have a cost of its own in
+      # the same direction, since a fresh block boundary can hand D2 an opening
+      # that reads prohibitive and promote a clause-drop into a whole-block
+      # drop; that cost is gone now that D2 does not apply inside a fence at
+      # all, so the boundary here only ever changes where D3 judges one clause
+      # to end. And letting an in-fence "#" line CLOSE an open exclusion only
+      # ever returns text to the scan, which is the safe direction to be wrong
+      # in.
       if (!fence && lvl >= 2 && prevblank && scope_heading($0)) exclevel = lvl
       prevblank = blank
       next
@@ -690,7 +810,12 @@ brief_scan_text() {
     # A new list item starts a new block; a continuation line joins the current
     # one, so a hard-wrapped bullet is judged as the single sentence it reads as.
     /^[[:space:]]*([-*+]|[0-9]+[.)])[[:space:]]/ { flush() }
-    { block = block " " $0; prevblank = blank }
+    # Record whether the text in this block came from inside a fence, at the
+    # moment the block opens. flush() runs before every fence toggle, so the
+    # live fence flag read there would give the same answer today; capturing it
+    # here says what D2 actually needs to know and keeps that true if a future
+    # rule ever flushes on the other side of a toggle.
+    { if (block == "") blockfence = fence; block = block " " $0; prevblank = blank }
     END { flush() }
   ')
   # Never let the narrowing empty the scan: a brief written entirely as
