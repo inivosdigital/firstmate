@@ -886,7 +886,16 @@ EOF
 }
 
 # Each recorded false fire matched only on prose that fences the work off from a
-# risky surface the task never went near. All eight must now pass clean.
+# risky surface the task never went near. All nine fixtures must pass clean.
+#
+# Ten were recorded, nine are fixtured here, and the gap is deliberate. Eight
+# were reproduced from their own brief files. The ninth is fixtured from its
+# recorded quoted text because that sentence appears verbatim in several
+# surviving briefs and the record does not name the task, so no one file can be
+# said to be it. The tenth was recorded only as "a fourth in the same session
+# had the same shape", with no task id and no quoted sentence anywhere, so there
+# is nothing to build a fixture from and inventing a replacement would assert
+# coverage that does not exist.
 test_recorded_false_fires_no_longer_trip() {
   local n case_dir out status
   for n in 1 2 3 4 5 6 7 8 9; do
@@ -1059,6 +1068,314 @@ EOF
   expect_code 0 "$status" "concedes-control: a standing prohibition with no conceded work must stay suppressed"
   [ -z "$out" ] || fail "concedes-control: expected no RISK output, got: $out"
   pass "fm-risk-tripwire still suppresses a prohibition that concedes no work"
+}
+
+test_work_clause_survives_a_trailing_prohibition_clause() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/trailing-caveat"
+  # A real regression: an IMAP connector brief whose only match-set words sat in
+  # a work instruction with a trailing caveat. Judging the sentence as one unit
+  # dropped the instruction with the caveat and the whole brief went clean.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Add an IMAP intake connector for the RFQ mailbox.
+
+Point it at a dedicated label rather than the whole mailbox, so it never mixes with the owner's real inbox. Document in your PR description that Gmail requires either an App Password or OAuth2 for IMAP auth - do not assume plain password auth works.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "trailing-caveat: a work instruction must survive its own trailing caveat"
+  assert_contains "$out" "password" "trailing-caveat: the work clause's terms must reach the scan"
+  assert_contains "$out" "auth" "trailing-caveat: the work clause's terms must reach the scan"
+  pass "fm-risk-tripwire keeps a work clause whose sentence ends in a prohibition"
+}
+
+test_leading_prohibition_clause_still_suppresses_its_own_sentence() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/leading-prohibition"
+  # The direction that must not move: when the prohibition leads, everything it
+  # governs is still fencing prose. This is the shape of every standing safety
+  # bullet in the fleet, and the reason the split is anchored on the marker
+  # opening a clause rather than merely appearing in one.
+  # The elaborating sentence deliberately carries the only match-set word and is
+  # not itself a prohibition, so nothing but the block drop can suppress it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Rename the export button label.
+
+- **Never read, modify, move, or delete anything under the shared data path**. It holds the live credentials the production login service reads at boot.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "leading-prohibition: a bullet that opens with a prohibition is still fencing prose"
+  [ -z "$out" ] || fail "leading-prohibition: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire still drops a block whose opening clause is a prohibition"
+}
+
+test_fenced_scope_heading_cannot_open_an_excluded_section() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fenced-heading"
+  # Pasting a markdown or issue template into a brief is ordinary authoring. A
+  # scope-declaring line inside the fence must not exclude everything after it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Update the contributor docs to describe the new PR template.
+
+Paste this template into `.github/PULL_REQUEST_TEMPLATE.md`:
+
+```markdown
+## Summary
+
+## Out of scope
+
+```
+
+Then rotate the signing secret and re-issue the session token.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fenced-heading: a scope heading inside a code fence must not exclude the rest"
+  assert_contains "$out" "secret" "fenced-heading: text after the fence must still be scanned"
+  assert_contains "$out" "session" "fenced-heading: text after the fence must still be scanned"
+  pass "fm-risk-tripwire does not let a fenced scope heading open an excluded section"
+}
+
+test_unbounded_no_change_span_does_not_suppress_motivation_prose() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/no-change-span"
+  # "no ... change" declares a non-change only as a noun phrase. Here "change" is
+  # the verb the sentence is describing, and the span crosses an infinitive.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Add an admin-token path to the account tool.
+
+There is no supported way to change a user's password without an admin token today, which is why support has to do it by hand.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "no-change-span: an infinitive inside the span must not read as a declared non-change"
+  assert_contains "$out" "password" "no-change-span: the described surface must reach the scan"
+
+  # The other half of the bound: a span far too long to be one noun phrase, with
+  # no infinitive in it, so only the length limit can keep this on the trip side.
+  case_dir="$TMP_ROOT/no-change-span-long"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Add an admin-token path to the account tool.
+
+Support has no way of resetting a password until the operator approves the change.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "no-change-span: a long span must not read as a declared non-change"
+  assert_contains "$out" "password" "no-change-span: the long-span surface must reach the scan"
+  pass "fm-risk-tripwire does not read 'no way to change X' as a declared non-change"
+}
+
+test_declared_no_change_phrase_is_still_suppressed() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/no-change-declared"
+  # The control for the test above: the noun-phrase form is the one real briefs
+  # use to fence a surface off, and it must stay suppressed.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Add an L/500 option to the deflection limit dropdown.
+
+The ratio is carried as a plain number all the way through, so no schema change is needed.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "no-change-declared: a declared non-change noun phrase must stay suppressed"
+  [ -z "$out" ] || fail "no-change-declared: expected no RISK output, got: $out"
+  pass "fm-risk-tripwire still suppresses a declared non-change noun phrase"
+}
+
+test_excluded_section_closes_at_the_next_heading() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/exclevel-reset"
+  # The reset that closes a D1 excluded region. Without it the exclusion runs to
+  # the end of the task body and every risk word after it is silently dropped.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Tidy the export button label.
+
+## Out of scope
+
+The billing screen is not part of this.
+
+## What to build
+
+Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "exclevel-reset: a heading at the same depth must close the excluded section"
+  assert_contains "$out" "schema" "exclevel-reset: work after the excluded section must be scanned"
+  pass "fm-risk-tripwire closes an excluded section at the next heading of the same depth"
+}
+
+test_excluded_section_closes_at_a_shallower_heading() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/exclevel-shallower"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Tidy the export button label.
+
+### Out of scope
+
+The billing screen is not part of this.
+
+## What to build
+
+Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "exclevel-shallower: a shallower heading must close the excluded section"
+  assert_contains "$out" "schema" "exclevel-shallower: work after the excluded section must be scanned"
+  pass "fm-risk-tripwire closes an excluded section at a shallower heading"
+}
+
+test_top_level_scope_heading_does_not_exclude() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/exclevel-depth"
+  # D1's depth guard. A column-0 "# " line in a task body is a shell comment in
+  # an example command far more often than it is a section heading.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Tidy the export button label.
+
+# Out of scope
+
+Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "exclevel-depth: a top-level heading must not open an excluded section"
+  assert_contains "$out" "schema" "exclevel-depth: text after it must still be scanned"
+  pass "fm-risk-tripwire requires at least two hashes to open an excluded section"
+}
+
+test_scope_heading_without_a_blank_line_before_it_does_not_exclude() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/exclevel-blankline"
+  # D1's blank-line-precedence guard: every heading bin/fm-brief.sh emits is
+  # blank-line-preceded, so a "##" line butted against prose is quoted text.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Tidy the export button label. The reviewer asked for the section below verbatim:
+## Out of scope
+
+Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "exclevel-blankline: a heading with no blank line before it must not exclude"
+  assert_contains "$out" "schema" "exclevel-blankline: text after it must still be scanned"
+  pass "fm-risk-tripwire requires a blank line before a heading that opens an excluded section"
+}
+
+test_list_item_starts_a_new_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/block-list-boundary"
+  # D2 drops a block as a unit, so the list-item boundary decides its blast
+  # radius. Without it the prohibition bullet and the work bullet merge and the
+  # work bullet goes with it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Tidy the export button label.
+
+- Never touch the billing screen.
+- Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "block-list-boundary: a following bullet must not be swallowed by a prohibition bullet"
+  assert_contains "$out" "schema" "block-list-boundary: the work bullet must be scanned on its own"
+  pass "fm-risk-tripwire starts a new block at each list item"
+}
+
+test_blank_line_starts_a_new_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/block-blank-boundary"
+  # The paragraph counterpart of the boundary above. The prohibition leads, so
+  # without the blank-line flush the whole body is one block and the block drop
+  # takes the work paragraph down with it. The heading is there to keep the
+  # narrowed text non-empty, so the whole-body fallback cannot mask the loss.
+  cat <<'EOF' | write_task_brief "$case_dir"
+## What to do
+
+Never touch the billing screen.
+
+Add a status column to the orders schema and backfill it from the ledger.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "block-blank-boundary: a following paragraph must not be swallowed by a prohibition paragraph"
+  assert_contains "$out" "schema" "block-blank-boundary: the work paragraph must be scanned on its own"
+  pass "fm-risk-tripwire starts a new block at each blank line"
+}
+
+test_empty_task_section_falls_back_to_the_whole_brief() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/empty-task-body"
+  # brief_task_body's own fallback: a "# Task" heading with nothing under it
+  # before the next scaffold boundary must scan the whole file, not nothing.
+  mkdir -p "$case_dir/state" "$case_dir/data/task-x1"
+  cat > "$case_dir/data/task-x1/brief.md" <<'EOF'
+Rotate the signing secret and re-issue the session token.
+
+# Task
+
+# Setup
+You are in a disposable worktree.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "empty-task-body: an empty task section must scan the whole brief, not nothing"
+  assert_contains "$out" "secret" "empty-task-body: the whole file should be scanned"
+  pass "fm-risk-tripwire scans the whole brief when the task section is empty"
 }
 
 test_descriptive_nothing_is_not_a_prohibition() {
@@ -1399,6 +1716,18 @@ test_task_prose_term_trips_while_constraint_terms_stay_quiet
 test_work_sentence_beside_prohibition_in_same_block_still_trips
 test_prohibition_conceding_adjacent_work_still_trips
 test_standing_prohibition_without_conceded_work_stays_quiet
+test_work_clause_survives_a_trailing_prohibition_clause
+test_leading_prohibition_clause_still_suppresses_its_own_sentence
+test_fenced_scope_heading_cannot_open_an_excluded_section
+test_unbounded_no_change_span_does_not_suppress_motivation_prose
+test_declared_no_change_phrase_is_still_suppressed
+test_excluded_section_closes_at_the_next_heading
+test_excluded_section_closes_at_a_shallower_heading
+test_top_level_scope_heading_does_not_exclude
+test_scope_heading_without_a_blank_line_before_it_does_not_exclude
+test_list_item_starts_a_new_block
+test_blank_line_starts_a_new_block
+test_empty_task_section_falls_back_to_the_whole_brief
 test_descriptive_nothing_is_not_a_prohibition
 test_scope_qualifier_does_not_suppress_real_work
 test_realistic_risky_brief_trips_without_a_recognised_change_verb

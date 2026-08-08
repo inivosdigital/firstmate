@@ -101,14 +101,16 @@ PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]
 # A boundary heading must also be blank-line-preceded, as every real scaffold
 # heading is (bin/fm-brief.sh emits a blank line before each), so a task body
 # that itself quotes a bare "# Setup" line inline does not cut the scan short.
-# Lines inside a fenced code block are likewise never treated as a boundary.
+# Lines inside a fenced code block are likewise never treated as a boundary, and
+# the fence delimiters themselves are emitted when they fall inside the task
+# section so brief_scan_text's narrowing can apply the same rule downstream.
 # Falls back to the whole brief when there is no # Task section (a non-standard
 # or hand-written brief), keeping the permissive safety bias.
 brief_task_body() {
   local body
   body=$(awk '
     { blank = ($0 ~ /^[[:space:]]*$/) }
-    /^```/ { fence = !fence; prevblank = blank; next }
+    /^```/ { fence = !fence; if (intask) print; prevblank = blank; next }
     !fence && /^# Task[[:space:]]*$/ { intask=1; prevblank = blank; next }
     intask && !fence && prevblank && /^# (Herdr isolation.*|Herdr lifecycle declaration.*|Setup|Rules|Project memory|Definition of done)[[:space:]]*$/ { intask=0 }
     intask { print }
@@ -178,8 +180,8 @@ path_is_risky() {
 # firstmate writes what a task must NOT touch into the same # Task region as
 # what it must do. The better written the brief, the more risky surfaces it
 # names, so the scan fired hardest on the most careful briefs. Measured over the
-# 603 briefs this fleet had on disk when this narrowing was written, the body
-# scan tripped 401 of them (66%), and ten consecutive fires across five
+# 605 briefs this fleet had on disk when this narrowing was written, the body
+# scan tripped 403 of them (66.6%), and ten consecutive fires across five
 # repositories were pure constraint prose about paths the task never went near.
 # A floor that applies to two thirds of all work is not a floor; worse, it
 # pushes firstmate into deciding case by case whether to honor its own gate,
@@ -192,39 +194,68 @@ path_is_risky() {
 #       non-change scope ("Explicitly out of scope", "What should NOT need
 #       changing") opens an excluded region, closed by the next heading at the
 #       same or shallower depth.
-#   D2  a prohibition BLOCK. A list item or paragraph whose FIRST sentence is a
-#       prohibition is dropped whole, because the sentences after it elaborate
-#       the prohibition rather than the task. This is what reaches a matching
-#       word that sits in a positively phrased sentence inside an otherwise
+#   D2  a prohibition BLOCK. A list item or paragraph whose FIRST clause is a
+#       prohibition is dropped whole, because what follows it elaborates the
+#       prohibition rather than the task. This is what reaches a matching word
+#       that sits in a positively phrased sentence inside an otherwise
 #       prohibitive bullet ("... A live supervision cycle is active for this
 #       session.").
-#   D3  a prohibition SENTENCE. Any surviving sentence that is itself a
-#       prohibition or an explicit non-change assertion is dropped on its own.
+#   D3  a prohibition CLAUSE. Any surviving clause that is itself a prohibition
+#       or an explicit non-change assertion is dropped on its own.
+#
+# D2 and D3 both judge CLAUSES, not whole sentences, because a compound sentence
+# routinely carries a work instruction and a caveat about the same surface at
+# once ("Document that Gmail needs an App Password for IMAP auth, do not assume
+# plain password auth works"). Judging that sentence as one unit loses the work
+# instruction along with the caveat. Splitting at the deontic marker keeps it:
+# across the 605 briefs, 1597 sentences read as prohibitions taken whole yet
+# keep at least one clause once split.
 #
 # Heading lines are ALWAYS scanned and never dropped by D2/D3: a heading is the
 # most compressed statement of what its section is about, so a risk word in one
 # is the strongest prose signal available.
 #
-# Rejected alternatives, recorded because the choice is the substance here:
-#   - Excluding a section named "Constraints". Of 1766 hit lines across those
-#     603 briefs, only 112 sat under a heading named Constraints and 335 sat
-#     under no heading at all, the rest spread across free-form headings
-#     ("Background", "What to build", "Hard safety rules"). Firstmate names
-#     these sections however the task reads best, so the name is not a boundary,
-#     and three of the recorded false fires put their only hit under an ordinary
-#     descriptive heading where no name-based rule could reach it.
+# Rejected alternatives, recorded because the choice is the substance here.
+# Every figure below states how it was counted, so a later reader can re-derive
+# it rather than guess what was measured:
+#   - Excluding a section named "Constraints". Counting each LINE of each
+#     brief's task body that carries at least one whole-token match-set hit, and
+#     attributing it to the nearest preceding markdown heading: of 1747 hit
+#     lines across the 605 briefs, 197 (11%) sat under a heading whose text
+#     contains "constraint" and 327 (18%) under no heading at all, the rest
+#     spread across free-form headings ("Background", "What to build", "Hard
+#     safety rules"). Firstmate names these sections however the task reads
+#     best, so the name is not a boundary. Of the nine fixtured false fires, two
+#     put a hit under an ordinary descriptive heading ("Background, and what is
+#     already true"; "What the numbering has to mean") and one names its section
+#     "What should NOT need changing", so three of nine are out of a name-based
+#     rule's reach.
 #   - Treating any negation in a heading as a scope declaration. Bug-report
 #     headings use bare "not"/"never" constantly ("Finding 1 - AUTH_DIR is never
-#     resolved", "atomicWrite's mode promise is not kept"). Keying D1 on those
-#     words was measured to clear five genuinely auth-bearing briefs outright,
-#     precisely the failure this guardrail exists to prevent, so D1 matches only
-#     explicit scope-declaration phrases and never bare negation.
+#     resolved", "atomicWrite's mode promise is not kept"). Measured by widening
+#     scope_heading() to accept bare "not"/"never" and re-running both versions
+#     over all 605 briefs: 19 briefs change verdict and 4 go clean outright. Two
+#     of those four are plainly risk-bearing - one pins Stripe and Lob live keys
+#     and an analytics token behind a heading reading "Scope: M0 and M0.5 ONLY.
+#     Do NOT start M0.6", the other loses a data-package schema behind "why it
+#     should not block you". The remaining 15 keep tripping but lose real terms
+#     ("auth", "public exposure", "schema", "token"). Losing two risk-bearing
+#     briefs outright is precisely the failure this guardrail exists to prevent,
+#     so D1 matches only explicit scope-declaration phrases and never bare
+#     negation.
 #   - Dropping the prose scan and matching only the changed paths. Not
 #     available: the first checkpoint runs before the task is spawned, when no
 #     diff exists, and that is the checkpoint that sets the dispatch tier.
 #   - Per-sentence negation handling alone. It cannot reach a matching word that
 #     sits in a positively phrased sentence of a prohibitive bullet, which is
 #     why D2 exists alongside D3.
+#   - Never letting the narrowing remove the LAST match-set token from a brief,
+#     so no brief can go from tripping to clean. It sounds like a free safety
+#     net and it is not: it was implemented and measured, and it restores the
+#     recorded false fires this narrowing exists to stop. They are cleared by
+#     D2/D3, not by D1, because "## Constraints" is not a scope-declaring
+#     heading, so the constraint prose holds the brief's only match-set tokens
+#     and a last-token guard puts every one of them back. Do not implement it.
 #   - Requiring a recognised change verb near the term instead of suppressing
 #     fencing prose. That inverts the safety direction: ways to describe work
 #     are an open word class ("move the session token out of localStorage" uses
@@ -243,15 +274,37 @@ path_is_risky() {
 # risky task whose ONLY mention of the risky surface sits inside a prohibition
 # that concedes no work on it ("Never touch the session store.", in a brief that
 # otherwise describes its session work in words the match set does not carry) is
-# no longer caught by the prose scan. Four things bound that. A prohibition that
-# concedes adjacent work on the same surface is not suppressed at all, which is
-# the commonest way a real brief mentions a risky surface it is working beside
-# (see concedes_work below). A brief with no parseable "# Task" section is
-# scanned whole and unnarrowed, because the structure the narrowing assumes is
-# not there to assume. Any narrowing that would leave nothing to scan is
-# discarded and the full task body is scanned instead, so the rule can only ever
-# remove text it can also see work prose beside. And the diff checkpoint below,
-# the binding one, still floors the task once code exists.
+# no longer caught by the prose scan.
+#
+# What actually bounds that, measured over the same 605 briefs rather than
+# assumed, because an overstated safety margin in a mechanical gate's own header
+# is worse than a stated gap:
+#   - Clause splitting is the one bound that carries real weight. 1597 sentences
+#     read as prohibitions taken whole yet keep at least one clause, against
+#     1184 blocks dropped whole at D2 and 3236 clauses dropped at D3. Every one
+#     of those 1597 is work prose a sentence-level rule would have lost.
+#   - concedes_work rescues 21 clauses. Small, and it is kept because the case
+#     it covers is the one that cost a real access-control brief its whole scan
+#     (see concedes_work below), not because the count is reassuring.
+#   - A brief with no parseable "# Task" section is scanned whole and
+#     unnarrowed, because the structure the narrowing assumes is not there to
+#     assume. 3 of 605 briefs take that path.
+#   - The empty-narrowing fallback below fires on 0 of 605. It is an emptiness
+#     test, not a substance test, and headings print unconditionally, so any
+#     heading anywhere in the task body keeps the narrowed text non-empty
+#     forever. Treat it as a floor against a pathological brief, never as a
+#     bound that operates in practice.
+#   - The diff checkpoint below still floors the task once code exists, but it
+#     matches file PATHS and never prose, at a later checkpoint, and it is not a
+#     backstop for this scan: on a real IMAP intake task, the files actually
+#     carrying the app password (src/config.ts and the mail client) tested clean
+#     against path_is_risky, and only an unrelated migration riding the same
+#     branch made it fire.
+#
+# So the honest position is one strong bound, one narrow one, and two floors
+# that rarely or never fire. That is why the suppression rules above are kept
+# deliberately closed-list and why widening any of them needs the same
+# whole-corpus measurement rather than an argument.
 brief_scan_text() {
   local narrowed body
   # The narrowing's whole premise is the shape of the "# Task" region firstmate
@@ -295,9 +348,18 @@ brief_scan_text() {
     # contracted descriptive forms or "cannot" as prohibitions was measured to
     # clear exactly that kind of brief, so they are excluded here and the
     # noisier reading is preferred.
+    # " no <up to six words> change(s) " reads as a declared non-change ("no
+    # engine, schema, persistence, or migration change is needed"). Bounded in
+    # length, and barred from spanning an infinitive, so ordinary motivation
+    # prose like "there is no supported way to change a password" is not read as
+    # a declaration that nothing changes.
+    function declared_no_change(t,   span) {
+      if (!match(t, / no ([a-z0-9]+ )?([a-z0-9]+ )?([a-z0-9]+ )?([a-z0-9]+ )?([a-z0-9]+ )?([a-z0-9]+ )?changes? /)) return 0
+      span = substr(t, RSTART, RLENGTH)
+      return (span !~ / to /)
+    }
     function prohibition(s,   t) {
       t = norm(s)
-      if (concedes_work(s)) return 0
       if (t ~ / (never|avoid|avoids|avoiding|forbidden|prohibited) /) return 1
       # "nothing" is the one word here that is usually NOT deontic. "Nothing in
       # the accept payload changes" declares a non-change scope; "it inserts a
@@ -311,24 +373,77 @@ brief_scan_text() {
       if (t ~ / (do not|must not|may not|should not|shall not) /) return 1
       if (t ~ / (don t|mustn t|shouldn t) /) return 1
       if (t ~ / (untouched|unchanged|unaffected|unmodified|off limits|out of scope|read only|hands off) /) return 1
-      if (t ~ / (needs no|need no|no need|not needed|no [a-z ]*change) /) return 1
+      if (t ~ / (needs no|need no|no need|not needed) /) return 1
+      if (declared_no_change(t)) return 1
       return 0
     }
-    # Emit a finished block: dropped whole when its first sentence is a
-    # prohibition (D2), otherwise sentence by sentence (D3).
-    function flush(   n, i, parts) {
+    # Split a sentence immediately before every deontic marker that opens a word,
+    # so a compound sentence is judged clause by clause instead of as one unit.
+    # This is the difference between "Document that Gmail needs an App Password
+    # for IMAP auth, do not assume plain password auth works" reaching the scan
+    # and vanishing from it: the main clause is a work instruction and only the
+    # trailing caveat is a prohibition. A marker is only a split point when it
+    # stands as a whole word, so "whenever" never carves a sentence apart and
+    # cannot strand the words after it in a fragment that then reads prohibitive.
+    function clause_split(s, out,   n, buf, rest, p, len, before, after) {
+      n = 0
+      buf = ""
+      rest = s
+      while (match(rest, /(do not|don[^a-z0-9]?t|must not|mustn[^a-z0-9]?t|may not|might not|should not|shouldn[^a-z0-9]?t|shall not|never|avoid|avoids|avoiding)/)) {
+        p = RSTART
+        len = RLENGTH
+        before = (p > 1) ? substr(rest, p - 1, 1) : ""
+        after = substr(rest, p + len, 1)
+        if (before ~ /[a-z0-9]/ || after ~ /[a-z0-9]/) {
+          buf = buf substr(rest, 1, p + len - 1)
+          rest = substr(rest, p + len)
+          continue
+        }
+        buf = buf substr(rest, 1, p - 1)
+        if (buf ~ /[a-z0-9]/) out[++n] = buf
+        buf = substr(rest, p, len)
+        rest = substr(rest, p + len)
+      }
+      buf = buf rest
+      if (buf ~ /[a-z0-9]/) out[++n] = buf
+      return n
+    }
+    # Emit a finished block: dropped whole when its opening clause is a
+    # prohibition (D2), otherwise clause by clause (D3). A concession is judged
+    # per SENTENCE, not per clause, so "do not break the login cookie while you
+    # change the handler, and do not touch the session middleware" keeps the
+    # surface the concession covers instead of losing it at the comma.
+    function flush(   ns, nc, i, j, sents, frags, conc, first) {
       if (block ~ /^[[:space:]]*$/) { block = ""; return }
       gsub(/[[:space:]]+/, " ", block)
-      n = split(block, parts, /[.!?;] +/)
-      for (i = 1; i <= n; i++) {
-        if (parts[i] ~ /^[[:space:]]*$/) continue
-        if (i == 1 && prohibition(parts[i])) { block = ""; return }
-        if (!prohibition(parts[i])) print parts[i]
+      # Everything this function emits is lowercased by the caller before it is
+      # matched, so folding case here costs nothing and lets clause_split use
+      # plain lowercase patterns rather than per-letter classes, which is the
+      # only portable way to match case-insensitively across awk implementations.
+      block = tolower(block)
+      ns = split(block, sents, /[.!?;] +/)
+      first = 1
+      for (i = 1; i <= ns; i++) {
+        if (sents[i] !~ /[a-z0-9]/) continue
+        conc = concedes_work(sents[i])
+        nc = clause_split(sents[i], frags)
+        for (j = 1; j <= nc; j++) {
+          if (first) {
+            first = 0
+            if (!conc && prohibition(frags[j])) { block = ""; return }
+          }
+          if (conc || !prohibition(frags[j])) print frags[j]
+        }
       }
       block = ""
     }
     { blank = ($0 ~ /^[[:space:]]*$/) }
-    /^#+[[:space:]]/ {
+    # Fence delimiters reach this scan because brief_task_body emits them inside
+    # the task section. Track them here so a scope-declaring line pasted inside a
+    # fenced markdown or issue template cannot open a D1 exclusion that swallows
+    # every risk word after it, the same discipline both sibling parsers apply.
+    /^```/ { flush(); fence = !fence; prevblank = blank; next }
+    !fence && /^#+[[:space:]]/ {
       flush()
       lvl = 0
       while (substr($0, lvl + 1, 1) == "#") lvl++
