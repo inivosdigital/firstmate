@@ -1149,6 +1149,181 @@ EOF
   pass "fm-risk-tripwire does not let a fenced scope heading open an excluded section"
 }
 
+test_tilde_fenced_scope_heading_cannot_open_an_excluded_section() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/tilde-fenced-heading"
+  # "~~~" is a legal CommonMark fence and the idiomatic one for a pasted
+  # markdown template, so recognising only backticks left this case wide open.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Update the contributor docs to describe the new PR template.
+
+Paste this template into `.github/PULL_REQUEST_TEMPLATE.md`:
+
+~~~markdown
+## Summary
+
+## Out of scope
+
+~~~
+
+Then rotate the signing secret and re-issue the session token.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "tilde-fenced-heading: a scope heading inside a tilde fence must not exclude the rest"
+  assert_contains "$out" "secret" "tilde-fenced-heading: text after the fence must still be scanned"
+  assert_contains "$out" "session" "tilde-fenced-heading: text after the fence must still be scanned"
+  pass "fm-risk-tripwire tracks tilde fences as well as backtick fences"
+}
+
+test_nested_backtick_fence_does_not_close_a_tilde_fence() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/nested-fence"
+  # The reason "~~~" gets reached for in the first place: it wraps a template
+  # that itself contains backtick fences. Closing on any fence character would
+  # end the outer fence at the inner one, and the scope heading after it would
+  # then open an exclusion that runs to the end of the brief.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Update the contributor docs to describe the new PR template.
+
+Paste this template into `.github/PULL_REQUEST_TEMPLATE.md`:
+
+~~~markdown
+## Summary
+
+Example of a filled-in template:
+
+```
+## Summary
+Parser rewrite.
+
+## Out of scope
+Nothing outside the parser.
+```
+~~~
+
+Then rotate the signing secret and re-issue the session token.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "nested-fence: an inner backtick fence must not close the outer tilde fence"
+  assert_contains "$out" "secret" "nested-fence: text after the outer fence must still be scanned"
+  assert_contains "$out" "session" "nested-fence: text after the outer fence must still be scanned"
+  pass "fm-risk-tripwire closes a fence only on the character that opened it"
+}
+
+test_commented_fenced_snippet_still_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fenced-comment"
+  # A fenced snippet fronted by a "# Never ..." comment is ordinary brief
+  # authoring. Suppressing "#" lines inside a fence made that comment the
+  # block's opening clause, so the block drop took the commands with it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Staging is out of sync with main, so the login page 500s for every user. Bring it
+back in line and confirm a user can log in again.
+
+Run exactly this on the staging box, and nowhere else:
+
+```bash
+# Never run this against prod.
+export SESSION_SECRET="$(cat /run/keys/staging.session)"
+psql "$STAGING_URL" -f prisma/migrations/20260808_add_credential_token/migration.sql
+```
+
+Then load the login page and confirm it renders.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fenced-comment: a commented fenced snippet must not be dropped whole"
+  for term in credential migration secret session token; do
+    assert_contains "$out" "$term" "fenced-comment: the fenced commands must reach the scan"
+  done
+  pass "fm-risk-tripwire still scans a fenced snippet fronted by a prohibitive comment"
+}
+
+test_fence_delimiter_starts_a_new_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/fence-boundary"
+  # A fence delimiter is a block boundary like a blank line. Without it the
+  # snippet merges into the prohibition paragraph above and goes down with it.
+  cat <<'EOF' | write_task_brief "$case_dir"
+## Deploy steps
+
+Never run this against prod.
+```bash
+export SESSION_SECRET=staging
+```
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "fence-boundary: a fenced snippet must not merge into the paragraph above it"
+  assert_contains "$out" "secret" "fence-boundary: the fenced snippet must be judged on its own"
+  pass "fm-risk-tripwire starts a new block at a fence delimiter"
+}
+
+test_capitalised_deontic_marker_still_splits_its_clause() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/capitalised-marker"
+  # Firstmate briefs use capitalised emphasis constantly ("Do NOT start M0.6").
+  # clause_split's patterns are plain lowercase, so the case fold before it is a
+  # load-bearing dependency: without it the marker stops opening a clause and
+  # the work instruction in front of it is lost with the caveat behind it. The
+  # heading keeps the narrowed text non-empty so the whole-body fallback cannot
+  # mask that loss.
+  cat <<'EOF' | write_task_brief "$case_dir"
+## Documentation
+
+Document that the mail client needs an App Password for IMAP auth, DO NOT assume plain password auth works.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "capitalised-marker: a capitalised marker must still open a clause"
+  assert_contains "$out" "auth" "capitalised-marker: the work clause must reach the scan"
+  assert_contains "$out" "password" "capitalised-marker: the work clause must reach the scan"
+  pass "fm-risk-tripwire splits on a capitalised deontic marker"
+}
+
+test_marker_inside_a_word_does_not_split_a_clause() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/marker-in-word"
+  # "whenever" contains "never". If that counted as a split point it would
+  # strand the rest of the sentence in a fragment that then reads prohibitive,
+  # so an ordinary work instruction would vanish.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Whenever the session token is refreshed, write the new expiry to the audit log.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "marker-in-word: a marker inside a word must not carve the sentence apart"
+  assert_contains "$out" "session" "marker-in-word: the work sentence must reach the scan"
+  assert_contains "$out" "token" "marker-in-word: the work sentence must reach the scan"
+  pass "fm-risk-tripwire only splits on a whole-word deontic marker"
+}
+
 test_unbounded_no_change_span_does_not_suppress_motivation_prose() {
   local case_dir out status
   case_dir="$TMP_ROOT/no-change-span"
@@ -1719,6 +1894,12 @@ test_standing_prohibition_without_conceded_work_stays_quiet
 test_work_clause_survives_a_trailing_prohibition_clause
 test_leading_prohibition_clause_still_suppresses_its_own_sentence
 test_fenced_scope_heading_cannot_open_an_excluded_section
+test_tilde_fenced_scope_heading_cannot_open_an_excluded_section
+test_nested_backtick_fence_does_not_close_a_tilde_fence
+test_commented_fenced_snippet_still_trips
+test_fence_delimiter_starts_a_new_block
+test_capitalised_deontic_marker_still_splits_its_clause
+test_marker_inside_a_word_does_not_split_a_clause
 test_unbounded_no_change_span_does_not_suppress_motivation_prose
 test_declared_no_change_phrase_is_still_suppressed
 test_excluded_section_closes_at_the_next_heading

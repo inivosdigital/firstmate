@@ -104,13 +104,23 @@ PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]
 # Lines inside a fenced code block are likewise never treated as a boundary, and
 # the fence delimiters themselves are emitted when they fall inside the task
 # section so brief_scan_text's narrowing can apply the same rule downstream.
+# Both CommonMark fence characters count, and a fence closes only on the
+# character that opened it: "~~~" is the idiomatic wrapper for a pasted markdown
+# template that itself contains backtick fences, which is exactly the shape this
+# tracking exists for, so recognising only backticks left that case open.
 # Falls back to the whole brief when there is no # Task section (a non-standard
 # or hand-written brief), keeping the permissive safety bias.
 brief_task_body() {
   local body
   body=$(awk '
     { blank = ($0 ~ /^[[:space:]]*$/) }
-    /^```/ { fence = !fence; if (intask) print; prevblank = blank; next }
+    /^(```|~~~)/ {
+      ch = substr($0, 1, 1)
+      if (!fence) { fence = 1; fencech = ch } else if (ch == fencech) fence = 0
+      if (intask) print
+      prevblank = blank
+      next
+    }
     !fence && /^# Task[[:space:]]*$/ { intask=1; prevblank = blank; next }
     intask && !fence && prevblank && /^# (Herdr isolation.*|Herdr lifecycle declaration.*|Setup|Rules|Project memory|Definition of done)[[:space:]]*$/ { intask=0 }
     intask { print }
@@ -127,7 +137,11 @@ brief_task_body() {
 # the identical match so the two can never disagree about what is parseable.
 brief_has_task_section() {
   awk '
-    /^```/ { fence = !fence; next }
+    /^(```|~~~)/ {
+      ch = substr($0, 1, 1)
+      if (!fence) { fence = 1; fencech = ch } else if (ch == fencech) fence = 0
+      next
+    }
     !fence && /^# Task[[:space:]]*$/ { found = 1; exit }
     END { exit(found ? 0 : 1) }
   ' "$1"
@@ -183,6 +197,11 @@ path_is_risky() {
 # 605 briefs this fleet had on disk when this narrowing was written, the body
 # scan tripped 403 of them (66.6%), and ten consecutive fires across five
 # repositories were pure constraint prose about paths the task never went near.
+# After the narrowing, the same sweep over the same 605 briefs trips 353 (58.3%)
+# with 0 briefs newly tripping, so the trip set is a strict subset of what the
+# unnarrowed scan caught. Both figures come from running each version over every
+# data/<id>/brief.md with no worktree, and counting a brief as tripping when the
+# brief half of the scan prints a RISK line.
 # A floor that applies to two thirds of all work is not a floor; worse, it
 # pushes firstmate into deciding case by case whether to honor its own gate,
 # which is the erosion a mechanical gate exists to prevent.
@@ -209,7 +228,11 @@ path_is_risky() {
 # plain password auth works"). Judging that sentence as one unit loses the work
 # instruction along with the caveat. Splitting at the deontic marker keeps it:
 # across the 605 briefs, 1597 sentences read as prohibitions taken whole yet
-# keep at least one clause once split.
+# keep at least one clause once split. The rescue is one-directional, though:
+# a work clause that PRECEDES its caveat survives, while one that follows a
+# leading prohibition ("Do not touch the report queries, but do add a session
+# index") still goes down with the block, because D2 judges the opening clause.
+# That asymmetry is inherited from the block rule, not introduced by the split.
 #
 # Heading lines are ALWAYS scanned and never dropped by D2/D3: a heading is the
 # most compressed statement of what its section is about, so a risk word in one
@@ -348,6 +371,13 @@ brief_scan_text() {
     # contracted descriptive forms or "cannot" as prohibitions was measured to
     # clear exactly that kind of brief, so they are excluded here and the
     # noisier reading is preferred.
+    # This test was widened as well as bounded, and the widening is the part a
+    # reader would not guess: the matched noun became "changes?", where the
+    # previous pattern required a space straight after "change" and so never
+    # matched the plural at all. It therefore now fires where it did not.
+    # Corpus effect is exactly 1 brief of 605, which loses "security" and
+    # "credential" from its hit list and still trips on "authorized"; the prose
+    # suppressed there is a genuine declared-non-change list.
     # " no <up to six words> change(s) " reads as a declared non-change ("no
     # engine, schema, persistence, or migration change is needed"). Bounded in
     # length, and barred from spanning an infinitive, so ordinary motivation
@@ -442,8 +472,14 @@ brief_scan_text() {
     # the task section. Track them here so a scope-declaring line pasted inside a
     # fenced markdown or issue template cannot open a D1 exclusion that swallows
     # every risk word after it, the same discipline both sibling parsers apply.
-    /^```/ { flush(); fence = !fence; prevblank = blank; next }
-    !fence && /^#+[[:space:]]/ {
+    /^(```|~~~)/ {
+      flush()
+      ch = substr($0, 1, 1)
+      if (!fence) { fence = 1; fencech = ch } else if (ch == fencech) fence = 0
+      prevblank = blank
+      next
+    }
+    /^#+[[:space:]]/ {
       flush()
       lvl = 0
       while (substr($0, lvl + 1, 1) == "#") lvl++
@@ -452,12 +488,20 @@ brief_scan_text() {
       # excluded section.
       print
       # Only a real markdown section heading may open an excluded region: at
-      # least "##" deep and blank-line-preceded, the shape bin/fm-brief.sh emits
-      # and the same discipline brief_task_body applies to its own boundaries. A
-      # column-0 "# " line in the body is a shell comment in an example command
-      # ("# then run the schema migration"), and letting one open an exclusion
-      # would silently drop every risk word after it to the end of the brief.
-      if (lvl >= 2 && prevblank && scope_heading($0)) exclevel = lvl
+      # least "##" deep, blank-line-preceded, and outside a fence. That is the
+      # shape bin/fm-brief.sh emits and the same discipline brief_task_body
+      # applies to its own boundaries. A column-0 "# " line in the body is a
+      # shell comment in an example command ("# then run the schema migration"),
+      # and letting one open an exclusion would silently drop every risk word
+      # after it to the end of the brief.
+      #
+      # Only the OPENING decision is fence-gated, deliberately. Flushing and
+      # printing a "#" line inside a fence costs nothing, while suppressing them
+      # cost a whole fenced snippet: the comment fronting the block made its
+      # opening clause a prohibition, so D2 dropped the commands under it. And
+      # letting an in-fence "#" line CLOSE an open exclusion only ever returns
+      # text to the scan, which is the safe direction to be wrong in.
+      if (!fence && lvl >= 2 && prevblank && scope_heading($0)) exclevel = lvl
       prevblank = blank
       next
     }
