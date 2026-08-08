@@ -101,31 +101,31 @@ ID=${1:-}
 # running the brief half of this scan (no worktree, so the diff checkpoint never
 # runs) over every data/<id>/brief.md this fleet had on disk on 2026-08-08 - 613
 # briefs - and counting a brief as tripping when a RISK line is printed. The
-# previous list tripped 358 of 613 (58.4%); this one trips 270 (44.0%), moving 93
-# briefs to clean and 5 to tripping. Both directions are enumerated below.
+# previous list tripped 358 of 613 (58.4%); this one trips 274 (44.7%), moving 91
+# briefs to clean and 7 to tripping. Both directions are enumerated below.
 #
 # MOVED OUT OF WORD_REGEX AND INTO PAIR_REGEX. Each was read brief by brief, not
-# sampled, over every brief whose verdict the move changes:
-#   - session/sessions. 42 briefs trip on it and nothing else. All 42 are a
-#     firstmate, tmux, browser, chrome-devtools-axi, CAD, brainstorming or
-#     diagnostic session, or an application's own domain object (scaffold-
-#     returns' "session create", carscanner's "session state" walkup). Not one
-#     is an authentication session. One of them is a recorded false fire whose
-#     own review brief says the floor "flagged it for it mentions session state
-#     handling".
-#   - token/tokens. 16 briefs trip on it and nothing else. All 16 are a parsing
-#     token ("the leading token", "any 2-letter token", "the colon-delimited
-#     token that matches the known verb vocabulary") or an LLM token ("reasoning
-#     token gotchas", "200k tokens", "image tokens are priced differently"). Not
-#     one is a credential.
+# sampled, over every brief whose verdict the move changes. Of the 91 briefs this
+# list moves to clean, 39 tripped on session alone, 16 on token alone, 22 on the
+# bare authoriz family alone, and the remaining 14 on two or more of the three:
+#   - session/sessions. All 39 are a firstmate, tmux, browser,
+#     chrome-devtools-axi, CAD, brainstorming or diagnostic session, or an
+#     application's own domain object (scaffold-returns' "session create",
+#     carscanner's "session state" walkup). Not one is an authentication
+#     session. One of them is a recorded false fire whose own review brief says
+#     the floor "flagged it for it mentions session state handling".
+#   - token/tokens. All 16 are a parsing token ("the leading token", "any
+#     2-letter token", "the colon-delimited token that matches the known verb
+#     vocabulary") or an LLM token ("reasoning token gotchas", "200k tokens",
+#     "image tokens are priced differently"). Not one is a credential.
 #   - authoriz(e|ed|es|ing|ation|ations|er|ers) with no un/re/de/pre prefix.
-#     23 briefs trip on it and nothing else, and all 23 are firstmate's APPROVAL
-#     sense, never access control: "the captain authorized implementation", "a
-#     recommendation is evidence, not authorization", "you are explicitly
-#     authorized to write throwaway scripts", "this does not authorize building
-#     the feature". No scoping rule reaches these, because approval language is
-#     ordinary background prose rather than the constraint prose the narrowing
-#     below suppresses. The prefixed forms stay in WORD_REGEX untouched:
+#     All 22 are firstmate's APPROVAL sense, never access control: "the captain
+#     authorized implementation", "a recommendation is evidence, not
+#     authorization", "you are explicitly authorized to write throwaway
+#     scripts", "this does not authorize building the feature". No scoping
+#     rule reaches these, because approval language is ordinary background
+#     prose rather than the constraint prose the narrowing below suppresses.
+#     The prefixed forms stay in WORD_REGEX untouched:
 #     "unauthorized"/"reauthorized" are never the approval sense.
 #
 # ADDED TO WORD_REGEX:
@@ -142,6 +142,14 @@ ID=${1:-}
 #     authoriz family moved to PAIR_REGEX, "add an authz check" needs authz to
 #     stay caught by a single word. 0 briefs move; this closes a gap rather than
 #     answering one the corpus raised.
+#   - injection. Newly trips exactly 4 briefs and no brief goes clean. Three are
+#     a real injection surface: quoting a launch string the memory wrapper is
+#     prepended to, closing a control-character injection risk in a value being
+#     written out, and CSV formula injection in an export. The fourth is a test
+#     shim's own "injection patterns". Three of four real is the cheap trade
+#     this file's asymmetry rule describes, so it is a standalone word rather
+#     than a pair head. Note "inject" is deliberately NOT the term: it would
+#     also catch away mode's own escalation injection vocabulary.
 #
 # ADDED TO PAIR_REGEX AS HEADS (added, but qualified rather than standalone,
 # because as standalone words the corpus shows them firing mostly on non-risk):
@@ -153,21 +161,40 @@ ID=${1:-}
 #     all of them "shape identity", "byte identity", "job identity" or "a live
 #     identity matched state" - none about access control.
 #
-# REJECTED, with the count of briefs each would have moved and what they are:
-#   - guard as a standalone word. It would newly trip 27 clean briefs and 26 are
-#     ordinary code guards: a negation guard, a timeout guard, an idempotency
-#     guard, a digit guard, a packed-refs lock-race guard, and firstmate's own
-#     tier and turn-end guards. Kept as a PAIR qualifier, where "uid guard"
-#     trips and "turn-end guard" does not.
-#   - root (44 clean briefs, every one a filesystem, worktree or repo root),
-#     escalation (10, all firstmate's own model/effort escalation), hash (5, all
+# ADDED TO PAIR_REGEX AS QUALIFIERS:
+#   - expire/expires/expired/expiring, logout/logouts, invalidate/invalidated/
+#     invalidation. Session-expiry prose is the one realistic authentication
+#     shape that carries no other term in this whole file: "expire the session
+#     after an hour of inactivity" has no auth, cookie, login, credential,
+#     password, secret, permission or access control anywhere in it, so without
+#     these qualifiers it trips nothing at all. Measured cost is zero over the
+#     616 briefs on disk when they were added: the same 271 trip before and
+#     after with identical hit sets, and the only change is three
+#     already-tripping briefs gaining "expire session", "expired token" and
+#     "session invalidated". Qualifiers are monotonic - they
+#     can only add a pair, never remove one - so lengthening this list can never
+#     re-open anything the narrowing above closed.
+#
+# REJECTED, with the count of briefs each would newly trip and what they are.
+# Every count below is measured over the 339 of those 613 briefs that the list at
+# the head of this file leaves clean, which is the only baseline that answers
+# "what would adding this cost me now":
+#   - guard as a standalone word. It would newly trip 47 clean briefs, and they
+#     are ordinary code guards: a negation guard, a timeout guard, an
+#     idempotency guard, a digit guard, a packed-refs lock-race guard, and
+#     firstmate's own tier and turn-end guards. Kept as a PAIR qualifier, where
+#     "uid guard" trips and "turn-end guard" does not.
+#   - root (67 clean briefs, every one a filesystem, worktree or repo root),
+#     escalation (15, all firstmate's own model/effort escalation), hash (5, all
 #     git hashes and hash maps). Ordinary engineering nouns with no auth sense
 #     in this corpus.
-#   - injection (2: one real shell-quoting hazard, one dependency injection),
-#     sanitize (2), signature (2), sudo (2), tls, pii, salt, exploit (1 each).
-#     Each is one or two briefs with mixed senses, none of them a miss anyone
-#     reported. Left out to keep the list defensible rather than long; add one
-#     the moment a brief needs it, since widening is the cheap direction.
+#   - signature (4), exploit (3), sanitize (2), sudo (2), tls, pii, salt (1
+#     each). Each is a handful of briefs with mixed senses, none of them a miss
+#     anyone reported; both sudo briefs, for instance, are lab-machine benchmark
+#     prose rather than a privilege-escalation surface. Left out to keep the
+#     list defensible rather than long; add one the moment a brief needs it,
+#     since widening is the cheap direction. injection was rejected here on an
+#     undercount and has since been added above, which is that rule working.
 #   - Removing the authoriz family outright instead of qualifying it. It would
 #     have cost "add an authorization check" its only signal, and the corpus
 #     does carry the access-control sense: SSH authorized_keys in two briefs,
@@ -198,14 +225,24 @@ ID=${1:-}
 # flattened) and a pair can never form across two clauses.
 #
 # WHAT THIS STILL MISSES, stated plainly for the same reason the narrowing's own
-# gap is stated below: a brief whose only risk signal is a bare unqualified
-# "session", "token" or "authorization" - "the authorization is broken on the
-# admin page" - no longer trips the prose scan. That is the price of clearing 93
-# briefs' worth of firstmate's own everyday vocabulary, and it is bounded by the
-# diff checkpoint, by every other term in WORD_REGEX that such a brief almost
-# always also carries, and by the qualifier list being cheap to widen.
+# gap is stated below. There are two shapes, and they fail for different reasons:
+#   - A bare unqualified head, where the brief's only risk signal is "session",
+#     "token" or "authorization" on its own: "the authorization is broken on the
+#     admin page" no longer trips the prose scan.
+#   - A head whose qualifier IS present but falls outside the window: "log the
+#     user out after an hour of inactivity and clear the session" pairs nothing,
+#     because "log ... out" is three tokens apart and "clear the session" has no
+#     qualifier in range. This one has no cheap fix and should not get one -
+#     widening the window is exactly what was measured above and rejected, since
+#     a whole-clause window re-admits 41 briefs of which every one is a false
+#     fire.
+# That is the price of clearing 91 briefs' worth of firstmate's own everyday
+# vocabulary. It is bounded by the diff checkpoint and by the qualifier list
+# being cheap to widen, but NOT reliably by the rest of WORD_REGEX: session
+# expiry prose genuinely carries no auth, cookie, login, credential, password,
+# secret or permission, which is what made the expiry qualifiers necessary.
 # ---------------------------------------------------------------------------
-WORD_KEYWORDS='auth|authn|authz|authentication|(un|re|de|pre)authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|cookie|login|credential|password|secret|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission'
+WORD_KEYWORDS='auth|authn|authz|authentication|(un|re|de|pre)authoriz(e|ed|es|ing|ation|ations|er|ers)?|(un|re|de|pre)?authenticat(e|ed|es|ing|ion|ions|or|ors)?|cookie|login|credential|password|secret|payment|billing|migrat(e|ed|es|ing|ion|ions)|schema|security|encrypt|decrypt|permission|injection'
 WORD_REGEX="(${WORD_KEYWORDS})(s|es|ed|ing|ion|ions)?"
 PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]]+mutation|public[[:space:]]+exposure|breaking[[:space:]]+change)(s|es|ed|ing|ion|ions)?'
 # Ambiguous heads and the qualifiers that make them risk terms. A head also
@@ -215,7 +252,7 @@ PHRASE_REGEX='(access[[:space:]]+control|data[[:space:]]+deletion|bulk[[:space:]
 # entry only ever ADDS a hit, so lengthening it is the cheap direction and
 # shortening it is what needs the evidence.
 AMBIG_HEADS='sessions?|tokens?|uids?|identity|identities|authoriz(e|ed|es|ing|ation|ations|er|ers)?'
-AMBIG_QUALIFIERS='auth|authn|authz|authenticat(e|ed|es|ing|ion|ions|or|ors)?|unauthenticated|unauthorized|login|logins|logged|signin|sso|oauth|jwt|saml|csrf|xsrf|bearer|refresh|access|api|invite|reset|pairing|rotat(e|ed|es|ing|ion)|revoke|revoked|revocation|expiry|expiration|cookie|cookies|credential|credentials|secret|secrets|password|passwords|key|keys|id|ids|identifier|identifiers|user|users|gate|gated|gating|guard|guards|check|checks|header|headers|middleware|endpoint|endpoints|route|routes|request|requests|role|roles|permission|permissions|privilege|privileges|policy|policies|bypass|enforce|enforced|enforcement|admin|hijack|hijacked|hijacking|fixation|spoof|spoofed|spoofing|store|provider|platform'
+AMBIG_QUALIFIERS='auth|authn|authz|authenticat(e|ed|es|ing|ion|ions|or|ors)?|unauthenticated|unauthorized|login|logins|logged|signin|sso|oauth|jwt|saml|csrf|xsrf|bearer|refresh|access|api|invite|reset|pairing|rotat(e|ed|es|ing|ion)|revoke|revoked|revocation|expiry|expiration|cookie|cookies|credential|credentials|secret|secrets|password|passwords|key|keys|id|ids|identifier|identifiers|user|users|gate|gated|gating|guard|guards|check|checks|header|headers|middleware|endpoint|endpoints|route|routes|request|requests|role|roles|permission|permissions|privilege|privileges|policy|policies|bypass|enforce|enforced|enforcement|admin|hijack|hijacked|hijacking|fixation|spoof|spoofed|spoofing|store|provider|platform|expire|expires|expired|expiring|logout|logouts|invalidate|invalidated|invalidation'
 PAIR_WINDOW=1
 
 # Scan only the task-specific body of the brief (the # Task section up to the

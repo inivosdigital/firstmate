@@ -276,6 +276,29 @@ EOF
   pass "fm-risk-tripwire still trips on session and token credential work"
 }
 
+# Session-expiry prose is the one realistic authentication shape that carries no
+# other match-set term at all: no auth, cookie, login, credential, password,
+# secret, permission or access control anywhere in it. Only the expiry qualifiers
+# make it trip, so this is what proves them load-bearing.
+test_session_expiry_brief_trips() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/session-expiry"
+  cat <<'EOF' | write_task_brief "$case_dir"
+Expire the session after an hour of inactivity.
+
+Today the record we write at sign-in never expires, so a shared workstation keeps the previous user's context alive indefinitely. Add an idle timeout and clear the server-side record when it lapses.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "session-expiry: an idle-timeout brief must trip"
+  assert_contains "$out" "expire session" "session-expiry: should surface the expiry pair"
+  pass "fm-risk-tripwire trips on session-expiry work carrying no other risk term"
+}
+
 # The pair rule's own boundary, asserted so it cannot quietly become a bare
 # word match again: the head alone stays quiet, the head plus its qualifier
 # trips, and the qualifier has to be inside the pair window to count.
@@ -317,6 +340,34 @@ test_ambiguous_head_without_a_qualifier_stays_quiet() {
   expect_code 0 "$status" "head-distant-qualifier: a qualifier outside the pair window must not trip"
   [ -z "$out" ] || fail "head-distant-qualifier: expected no RISK output, got: $out"
   pass "fm-risk-tripwire pairs an ambiguous head only with a qualifier inside the window"
+}
+
+# injection is a standalone word rather than a pair head: three of the four
+# briefs carrying it are a real injection surface, and the sense that is not
+# (dependency injection, test-shim injection patterns) is rare enough that the
+# widening is the cheap direction. Each row below carries no other match-set
+# term, so only the standalone word can make it trip.
+test_injection_word_trips() {
+  local work case_dir out status i=0
+  while IFS= read -r work; do
+    [ -n "$work" ] || continue
+    i=$((i + 1))
+    case_dir="$TMP_ROOT/injection-word-$i"
+    printf '%s\n' "$work" | write_task_brief "$case_dir"
+
+    set +e
+    out=$(run_brief_only "$case_dir")
+    status=$?
+    set -e
+
+    expect_code 1 "$status" "injection-word-$i: '$work' must trip the wire"
+    assert_contains "$out" "injection" "injection-word-$i: should surface the term"
+  done <<'EOF'
+Quote the launch string so a crafted worktree path cannot reach the shell as an injection.
+Serialize the value safely before writing it, to close the control-character injection risk.
+Prefix an exported cell that starts with an equals sign so it cannot become a formula injection.
+EOF
+  pass "fm-risk-tripwire trips on injection as a standalone word"
 }
 
 # Terms deliberately left out of the match set, each pinned by the vocabulary
@@ -2257,7 +2308,9 @@ test_approval_sense_authorize_stays_quiet
 test_access_control_authorize_still_trips
 test_parsing_and_supervision_words_stay_quiet
 test_credential_session_and_token_work_still_trips
+test_session_expiry_brief_trips
 test_ambiguous_head_without_a_qualifier_stays_quiet
+test_injection_word_trips
 test_rejected_standalone_terms_stay_quiet
 test_cookie_path_trips
 test_scaffolded_brief_boilerplate_does_not_trip
