@@ -390,12 +390,13 @@ path_is_risky() {
 #       changing") opens an excluded region, closed by the next heading at the
 #       same or shallower depth.
 #   D2  a prohibition BLOCK. A PROSE list item or paragraph whose OPENING
-#       SENTENCE is prohibitive in every one of its clauses is dropped whole,
-#       because what follows an all-prohibitive opening elaborates the
-#       prohibition rather than the task. This is what reaches a matching word
-#       that sits in a positively phrased sentence inside an otherwise
-#       prohibitive bullet ("... A live supervision cycle is active for this
-#       session.").
+#       SENTENCE is prohibitive in every one of its clauses is dropped, keeping
+#       only those later sentences that read as instructions to change
+#       something, because what else follows an all-prohibitive opening
+#       elaborates the prohibition rather than the task. This is what reaches a
+#       matching word that sits in a positively phrased sentence inside an
+#       otherwise prohibitive bullet ("... A live supervision cycle is active
+#       for this session.").
 #   D3  a prohibition CLAUSE. Any surviving clause that is itself a prohibition
 #       or an explicit non-change assertion is dropped on its own.
 #
@@ -407,10 +408,11 @@ path_is_risky() {
 # across the 613 briefs, 1661 sentences read as prohibitions taken whole yet
 # keep at least one clause once split.
 #
-# D2's two qualifiers above - PROSE, and OPENING SENTENCE rather than opening
-# clause - are what stop one prohibition from taking unrelated work text down
-# with it. Both replace an earlier rule that dropped any block whose opening
-# CLAUSE was a prohibition, and both only ever return text to the scan:
+# D2's three qualifiers above - PROSE, OPENING SENTENCE rather than opening
+# clause, and the WORK-SENTENCE RESCUE - are what stop one prohibition from
+# taking unrelated work text down with it. All three replace an earlier rule
+# that dropped any block whose opening CLAUSE was a prohibition, and all three
+# only ever return text to the scan:
 #
 #   - PROSE. "Is this block's opening clause a prohibition?" presumes the block
 #     is one authored prose point, which a paragraph or a list item is and a
@@ -436,13 +438,34 @@ path_is_risky() {
 #     all-prohibitive and the block survives to be judged clause by clause.
 #     For this to reach the example, "but" and "instead" split a clause the way
 #     a deontic marker does (see clause_split below).
+#   - WORK-SENTENCE RESCUE. The qualifier above closes that direction only
+#     within one sentence. Put the same two thoughts either side of a full stop
+#     ("Do not touch the report queries. Do add a session index.") and the
+#     opening sentence is all-prohibitive again, so D2 drops the block and takes
+#     the work sentence with it. So when D2 fires, the block is not returned
+#     immediately: its LATER sentences are still scanned, and a later sentence
+#     survives if it reads as an instruction to change something and is not
+#     itself a prohibition (see work_sentence below). The rescue is per
+#     SENTENCE, never per block: one work sentence returns itself and nothing
+#     else, so a block that mixes an instruction with a statement about what is
+#     already true keeps only the instruction.
+#     This is a closed verb list, and this file rejects a closed verb list
+#     elsewhere (see the change-verb entry among the rejected alternatives). The
+#     difference is which side of the test the open word class sits on. As a
+#     CORROBORATION test - requiring a change verb near a term before it may
+#     trip - every phrasing the list misses becomes a new silence, which is the
+#     dangerous direction. As a RESCUE inside a block that is already being
+#     dropped, every phrasing it misses is one that is dropped today anyway, so
+#     an incomplete list is a partial improvement and can never be a new miss.
+#     The list is incomplete by construction and always will be.
 #
 # Every step above is strictly permissive AS A NARROWING STEP: D2 now fires on a
-# subset of the blocks it used to fire on, and splitting a clause can only turn
-# one dropped clause into a dropped clause plus a kept one, never the reverse
-# (any prohibition pattern matching a fragment also matches the clause it came
-# from, since normalisation puts a space at both ends of each). So the text this
-# narrowing hands on can only grow, never shrink.
+# subset of the blocks it used to fire on, it keeps a subset of what it used to
+# drop when it does fire, and splitting a clause can only turn one dropped clause
+# into a dropped clause plus a kept one, never the reverse (any prohibition
+# pattern matching a fragment also matches the clause it came from, since
+# normalisation puts a space at both ends of each). So the text this narrowing
+# hands on can only grow, never shrink.
 #
 # That is a claim about the narrowing, and NOT about the scan end to end. Read
 # only that far and it licenses "any increase in permissiveness is free", which
@@ -460,8 +483,25 @@ path_is_risky() {
 # scanner read. The trip set therefore stays inside that scanner's, never past
 # it, however permissive the narrowing becomes.
 #
-# Measured over the 613 briefs on disk when this was written, brief half only,
-# by running each version over every data/<id>/brief.md with no worktree.
+# Measured in two steps, because the PROSE and OPENING SENTENCE qualifiers
+# landed before the work-sentence rescue and each was measured against the rule
+# in front of it. Both runs are the brief half only, running each version over
+# every data/<id>/brief.md with no worktree, and both state their corpus size
+# because the fleet's brief count grows between runs.
+#
+# The rescue, over the 617 briefs on disk when it was added. Against the rule
+# without it: 1 brief goes from clean to tripping, 0 go from tripping to clean,
+# and at token level 0 briefs lose a term while 6 gain one, so nothing was
+# traded for the residual it closes. Trip rate moves from 361 briefs to 362,
+# against 413 unnarrowed. Against the pre-narrowing scan: 0 briefs trip that it
+# did not and no brief's hit list carries a term the unnarrowed scan did not
+# also find, so the subset bound above holds at token level and not just at
+# verdict level; 51 of the briefs the unnarrowed scan tripped stay clean, one
+# fewer than before the rescue. Both residual phrasings close, all nine recorded
+# false fires stay clean, and the emptiness fallback still fires on 0 of the 617.
+#
+# The PROSE and OPENING SENTENCE qualifiers, over the 613 briefs on disk when
+# they were added.
 # Against the previous rule: 1 brief goes from clean to tripping and 0 go from
 # tripping to clean. Checked at token level and not only at verdict level,
 # because a brief can keep its verdict while quietly losing a term: that same
@@ -522,15 +562,23 @@ path_is_risky() {
 #     whose later sentence reads positively ("... A live supervision cycle is
 #     active for this session."). D1 and D3 clear the other eight on their own,
 #     so D2's entire remaining job is that one shape, and it cannot be given up
-#     without giving that up. Whole-corpus effect against the rule below: 364
-#     briefs trip against 359, and two of the five that return are the briefs
-#     behind recorded false fires 4 and 7 themselves.
+#     without giving that up. Whole-corpus effect, re-measured against the rule
+#     below as it now stands, over the same 617 briefs: 366 briefs trip against
+#     362, four more than the rule keeps, and recorded false fire 7 trips on
+#     "session" again. The work-sentence rescue above is what makes this trade a
+#     bad one rather than a close call: it recovers the work text dropping D2
+#     was wanted for, at one brief instead of four, and leaves that false fire
+#     suppressed. (When first measured, before the rescue, the same comparison
+#     read 364 against 359 over the 613 briefs then on disk, with two of the five
+#     returning briefs being the ones behind recorded false fires 4 and 7.)
 #   - Requiring EVERY clause in the whole BLOCK to be a prohibition, rather than
-#     every clause of its opening sentence. Measured to be the same trade as
-#     dropping D2 and no better: 364 briefs, the same five returning, the same
-#     recorded false fire back. Its later sentences are exactly the
-#     non-prohibitions the rule would require to be absent, so the one shape D2
-#     still exists for is the one shape this cannot express.
+#     every clause of its opening sentence. Measured on the 613-brief corpus,
+#     against the rule as it stood before the work-sentence rescue, to be the
+#     same trade as dropping D2 and no better: 364 briefs, the same five
+#     returning, the same recorded false fire back. Its later sentences are
+#     exactly the non-prohibitions the rule would require to be absent, so the
+#     one shape D2 still exists for is the one shape this cannot express, and
+#     the rescue reaches that text without giving the shape up.
 #   - Giving a comment line its own block boundary, one comment syntax at a
 #     time. This is what the previous round did for "#" and what the next one
 #     would have done for "--" and "//", and it measurably does not converge: a
@@ -540,10 +588,17 @@ path_is_risky() {
 #     block boundary promotes a D3 clause-drop into a D2 whole-block drop. The
 #     PROSE qualifier above closes all of them without naming any.
 #   - Ending D2's drop at the first later sentence that reads as a work
-#     instruction. Rejected on the same word-class grounds as the change-verb
-#     entry below: recognising work is an open class, so every phrasing the
-#     detector misses stays silently suppressed, and nothing in the rule tells a
-#     reader which ones those are.
+#     instruction. This WAS rejected here, on the same word-class grounds as the
+#     change-verb entry below, and the rejection was wrong. It carried that
+#     entry's conclusion across without re-checking its premise: what makes the
+#     change-verb test unsafe is not that recognising work is an open class, it
+#     is that a CORROBORATION test puts the open class on the SUPPRESSION side.
+#     A rescue puts the same open class on the trip side, where this file's own
+#     stated rule says it belongs, and the argument reverses with it. It is now
+#     the work-sentence rescue above. Recorded rather than deleted because the
+#     mistake is worth more to the next reader than the tidy list is: an
+#     argument about an open word class is only as good as the direction it is
+#     pointed in, and this one was reused pointing the wrong way.
 #   - Never letting the narrowing remove the LAST match-set token from a brief,
 #     so no brief can go from tripping to clean. It sounds like a free safety
 #     net and it is not: it was implemented and measured, and it restores the
@@ -556,7 +611,11 @@ path_is_risky() {
 #     are an open word class ("move the session token out of localStorage" uses
 #     none of the obvious ones), while prohibition phrasings are a closed one.
 #     The open class must sit on the trip side, so this is a suppression test
-#     and never a corroboration test.
+#     and never a corroboration test. Note carefully what this rejects and what
+#     it does not: the same change-verb list is used above as a RESCUE, where a
+#     match returns text to the scan rather than withholding it, which puts the
+#     open class on the trip side and is admissible for that reason alone. What
+#     is rejected here is the list deciding whether a term may trip at all.
 #   - Counting bare negation, or scope qualifiers like "with no downtime" and
 #     "without breaking X", as prohibitions. Those mark negative polarity, not a
 #     prohibition, and firstmate's two commonest registers are both negative
@@ -570,20 +629,25 @@ path_is_risky() {
 #     a prohibition that concedes no work on it ("Never touch the session
 #     store.", in a brief that otherwise describes its session work in words the
 #     match set does not carry) is not caught by the prose scan.
-#   - Half of the one-directional asymmetry above survives, across sentences
-#     rather than within one. "Do not touch the report queries, but do add a
-#     session index." now trips; "Do not touch the report queries. Do add a
-#     session index." still does not, because the opening sentence is
-#     all-prohibitive and D2 drops the block. This residual is left deliberately
-#     and it is not an oversight: it is the SAME SHAPE as the recorded false
-#     fire D2 exists for, an all-prohibitive opening followed by a positively
-#     phrased later sentence in one block, and the two want opposite verdicts on
-#     text a structural rule cannot tell apart. Closing it means dropping D2,
-#     which was measured to bring that false fire straight back (see the
-#     rejected list above). Preferring the noisier reading is the standing bias
-#     here and it was taken everywhere it did not reopen a recorded false fire;
-#     this is the one place it did, so the quieter reading is kept and named
-#     rather than hidden.
+#   - A work instruction whose verb is not on the rescue's closed list, sitting
+#     in a later sentence of a block D2 dropped. "Do not touch the report
+#     queries. Do add a session index." trips, because "add" is listed;
+#     "... Set up a session index." does not, because "set" is not. This is the
+#     residual the rescue leaves rather than the one it removes, and it is
+#     bounded in the one way that matters: it is exactly the text a block drop
+#     already suppressed before the rescue existed, so widening the list is a
+#     free improvement and no phrasing can be made worse by being absent from
+#     it. Widen it on the same evidence any other list here is widened on.
+#     A previous version of this file argued no rescue was possible at all,
+#     because an all-prohibitive opening followed by a positively phrased later
+#     sentence is also the shape of recorded false fire 7, so the two want
+#     opposite verdicts on text a structural rule cannot tell apart. That claim
+#     was too strong. The two shapes ARE distinguishable, just not by structure:
+#     the false fire's later sentence states what is already true ("A live
+#     supervision cycle is active for this session"), while the missed brief's
+#     instructs a change. Measured, the rescue closes both residual phrasings,
+#     leaves all nine recorded false fires clean, and costs 1 brief on the
+#     corpus, against the 5 and the reopened false fire that dropping D2 costs.
 #   - A brief whose task body the narrowing would previously have emptied, and
 #     now leaves one surviving fragment instead. The emptiness fallback below
 #     restores the whole unnarrowed body only when narrowing leaves NOTHING, so
@@ -692,6 +756,20 @@ brief_scan_text() {
       span = substr(t, RSTART, RLENGTH)
       return (span !~ / to /)
     }
+    # A later sentence in a block D2 dropped, reading as an instruction to CHANGE
+    # something. Used ONLY as a rescue inside an already-dropped block, never as
+    # a condition for tripping, and that is exactly what makes a closed verb list
+    # admissible here when the header rejects one elsewhere. As a corroboration
+    # test (requiring a change verb before a term may trip) it would put an open
+    # word class on the suppression side and silence every phrasing it misses.
+    # As a rescue, every phrasing it misses is one that is already suppressed
+    # today, so an incomplete list is a partial improvement and never a new miss.
+    # It is incomplete by construction and always will be; widen it on the same
+    # evidence any other list here is widened on.
+    function work_sentence(s,   t) {
+      t = norm(s)
+      return (t ~ / (add|build|chang|creat|delet|fix|implement|migrat|mov|port|remov|renam|replac|rotat|switch|updat|wir|writ)(e|es|ed|s|ing)? /)
+    }
     function prohibition(s,   t) {
       t = norm(s)
       if (t ~ / (never|avoid|avoids|avoiding|forbidden|prohibited) /) return 1
@@ -756,13 +834,14 @@ brief_scan_text() {
       if (buf ~ /[a-z0-9]/) out[++n] = buf
       return n
     }
-    # Emit a finished block: dropped whole when it is prose and every clause of
-    # its opening sentence is a prohibition (D2), otherwise clause by clause
-    # (D3). A concession is judged per SENTENCE, not per clause, so "do not
+    # Emit a finished block. When it is prose and every clause of its opening
+    # sentence is a prohibition, D2 fires and only later sentences that read as
+    # work instructions survive it; otherwise the block is emitted clause by
+    # clause (D3). A concession is judged per SENTENCE, not per clause, so "do not
     # break the login cookie while you change the handler, and do not touch the
     # session middleware" keeps the surface the concession covers instead of
     # losing it at the comma.
-    function flush(   ns, nc, i, j, sents, frags, conc, first, allproh) {
+    function flush(   ns, nc, i, j, sents, frags, conc, first, allproh, d2) {
       if (block ~ /^[[:space:]]*$/) { block = ""; blockfence = 0; return }
       gsub(/[[:space:]]+/, " ", block)
       # Everything this function emits is lowercased by the caller before it is
@@ -772,6 +851,7 @@ brief_scan_text() {
       block = tolower(block)
       ns = split(block, sents, /[.!?;] +/)
       first = 1
+      d2 = 0
       for (i = 1; i <= ns; i++) {
         if (sents[i] !~ /[a-z0-9]/) continue
         conc = concedes_work(sents[i])
@@ -783,8 +863,15 @@ brief_scan_text() {
           if (!blockfence && !conc) {
             allproh = 1
             for (j = 1; j <= nc; j++) if (!prohibition(frags[j])) allproh = 0
-            if (allproh) { block = ""; blockfence = 0; return }
+            if (allproh) d2 = 1
           }
+          # The opening sentence is what made D2 fire, so it never survives it.
+          # Redundant while allproh means every clause of it is a prohibition,
+          # since D3 below would drop all of them anyway; kept explicit so the
+          # rule stays right if that condition is ever loosened.
+          if (d2) continue
+        } else if (d2 && !work_sentence(sents[i])) {
+          continue
         }
         for (j = 1; j <= nc; j++) {
           if (conc || !prohibition(frags[j])) print frags[j]

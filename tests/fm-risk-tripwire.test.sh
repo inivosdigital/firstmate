@@ -1756,6 +1756,55 @@ EOF
   pass "fm-risk-tripwire still drops a block whose opening sentence is all prohibition"
 }
 
+test_work_sentence_after_a_prohibitive_opening_is_rescued() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/rescued-work-sentence"
+  # The cross-sentence half of the asymmetry. Its within-sentence twin ("Do not
+  # touch the report queries, but do add ...") is pinned above; both orderings
+  # must survive or the rescue is decided by where the writer put the full stop.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Make the reports page stop timing out.
+
+Do not touch the report queries. Do add an index on the credential table.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "rescued-work-sentence: a work sentence after an all-prohibitive opening must still be scanned"
+  assert_contains "$out" "credential" "rescued-work-sentence: the work sentence must reach the scan"
+  pass "fm-risk-tripwire rescues a work sentence from a block its opening sentence dropped"
+}
+
+test_rescue_is_per_sentence_and_does_not_lift_the_block() {
+  local case_dir out status
+  case_dir="$TMP_ROOT/rescue-per-sentence"
+  # The rescue above must not turn into "one work sentence reopens the whole
+  # block". A block can hold both registers at once: an instruction to change
+  # something, and a statement about what is already true. Only the first is
+  # work, and the second is the shape the block rule exists to suppress, so
+  # "credential" must come back from this block and "migration" must not.
+  cat <<'EOF' | write_task_brief "$case_dir"
+Make the reports page stop timing out.
+
+Do not touch the report queries. The nightly migration already runs on that box. Do add an index on the credential table.
+EOF
+
+  set +e
+  out=$(run_brief_only "$case_dir")
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "rescue-per-sentence: the work sentence must still be scanned"
+  assert_contains "$out" "credential" "rescue-per-sentence: the work sentence must reach the scan"
+  case "$out" in
+    *migration*) fail "rescue-per-sentence: a rescued work sentence must not carry the rest of its block back, got: $out" ;;
+  esac
+  pass "fm-risk-tripwire rescues a work sentence without reopening its whole block"
+}
+
 test_fence_delimiter_starts_a_new_block() {
   local case_dir out status
   case_dir="$TMP_ROOT/fence-boundary"
@@ -2557,6 +2606,8 @@ test_in_fence_comment_boundary_no_longer_costs_the_block
 test_work_clause_after_a_leading_prohibition_still_trips
 test_instead_splits_a_clause_that_turns_back_to_work
 test_all_prohibitive_opening_sentence_still_drops_its_block
+test_work_sentence_after_a_prohibitive_opening_is_rescued
+test_rescue_is_per_sentence_and_does_not_lift_the_block
 test_fence_delimiter_starts_a_new_block
 test_fenced_task_heading_does_not_fool_the_has_task_section_check
 test_fenced_setup_heading_does_not_truncate_the_task_body
