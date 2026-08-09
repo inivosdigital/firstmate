@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,10 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. The third is _fm_status_strip_timestamp, which returns its
+# result in the _FM_STATUS_NORMALIZED global rather than printing it, so the
+# three status-line parsers do not fork a subshell per call; the reason and the
+# rule that keeps it safe are recorded at that function.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -249,7 +252,8 @@ status_is_paused_or_captain_held() {  # <status-line>
 # see the same "<verb>[ key-token]: <note>" shape whether or not the worker
 # stamped its line. Accepts the bare and bracketed forms of a date, optionally
 # followed by a time (T-, t- or space-separated, seconds and fractional seconds
-# optional) and a zone (Z or an offset). Pure read, prints the normalized line.
+# optional) and a zone (Z or an offset). Assigns the normalized line to
+# _FM_STATUS_NORMALIZED rather than printing it; see the cost note below.
 #
 # Anchoring is what makes this safe rather than a second guess: the prefix must
 # begin with a full YYYY-MM-DD date, which no status verb can, AND be followed
@@ -261,23 +265,22 @@ status_is_paused_or_captain_held() {  # <status-line>
 # expensive direction, so none of them may be relaxed without replacing the
 # assertion that holds it.
 #
-# Cost, so the next reader does not have to re-measure it. Printing the result
-# means each of the three parsers forks a subshell per call: on this ARM host
-# roughly 266us -> 2988us for status_line_verb, and a whole-file
-# status_open_decisions over 500 lines goes from about 7.4s to about 11.5s.
-# That is not material where it is actually paid: the poll loop calls these a
-# handful of times per task per cycle (tens of ms per 15s poll), and the
-# per-wake drain uses the cursor-bounded incremental fold, so it pays only for
-# new appends; the whole-file folds are all one-shot commands. A fork-free form
-# exists and was prototyped and verified byte-identical over a 500-line corpus:
-# have this helper assign to a named scratch global instead of printing, and
-# have the three parsers read it. One function would still own the rule, so
-# verb, note and key still could not disagree. It was not taken because the
-# printing form is simpler and keeps this helper a pure read, matching the
-# character the file header claims. Revisit that trade only if a consumer starts
-# folding long status files INSIDE the poll loop, which is the one condition
-# that would make the fork cost matter.
-_fm_status_strip_timestamp() {  # <status-line> -> line with a leading timestamp removed
+# Cost, so the next reader does not have to re-measure it, and why this helper
+# writes a global instead of printing its result. Printing would keep it a pure
+# read, but each of the three parsers would then fork a subshell per call:
+# measured on this ARM host, roughly 266us -> 2988us for status_line_verb, with
+# a whole-file status_open_decisions over 500 lines going from about 7.4s to
+# about 11.5s. Assigning to _FM_STATUS_NORMALIZED and having the parsers read it
+# costs about 216us to 468us per call instead, and one function still owns the
+# rule, so verb, note and key still cannot disagree about where the status line
+# really starts. It stays bash-3.2 safe, using no local -n.
+#
+# The trade paid for that is this helper being the third documented exception to
+# the pure-read character claimed in the file header, and one rule every caller
+# owes: read _FM_STATUS_NORMALIZED immediately after the call, before any other
+# parser call can overwrite it. All three callers below do, and each sets it on
+# every return path, so no caller can read a value left by an earlier line.
+_fm_status_strip_timestamp() {  # <status-line> -> sets _FM_STATUS_NORMALIZED
   local rest bracketed=''
   rest=$1
   rest=${rest#"${rest%%[![:space:]]*}"}
@@ -286,7 +289,7 @@ _fm_status_strip_timestamp() {  # <status-line> -> line with a leading timestamp
   esac
   case "$rest" in
     [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*) rest=${rest#??????????} ;;
-    *) printf '%s' "$1"; return 0 ;;
+    *) _FM_STATUS_NORMALIZED=$1; return 0 ;;
   esac
   case "$rest" in
     [Tt][0-9][0-9]:[0-9][0-9]*|' '[0-9][0-9]:[0-9][0-9]*)
@@ -307,20 +310,20 @@ _fm_status_strip_timestamp() {  # <status-line> -> line with a leading timestamp
   if [ -n "$bracketed" ]; then
     case "$rest" in
       \]*) rest=${rest#?} ;;
-      *) printf '%s' "$1"; return 0 ;;
+      *) _FM_STATUS_NORMALIZED=$1; return 0 ;;
     esac
   fi
   case "$rest" in
     [[:space:]]*) ;;
-    *) printf '%s' "$1"; return 0 ;;
+    *) _FM_STATUS_NORMALIZED=$1; return 0 ;;
   esac
-  printf '%s' "${rest#"${rest%%[![:space:]]*}"}"
+  _FM_STATUS_NORMALIZED=${rest#"${rest%%[![:space:]]*}"}
 }
 
 status_line_verb() {  # <status-line> -> leading verb word
   local v
-  v=$(_fm_status_strip_timestamp "$1")
-  v=${v%%:*}
+  _fm_status_strip_timestamp "$1"
+  v=${_FM_STATUS_NORMALIZED%%:*}
   v=${v%%\[key=*}
   v=${v#"${v%%[![:space:]]*}"}
   v=${v%"${v##*[![:space:]]}"}
@@ -328,7 +331,8 @@ status_line_verb() {  # <status-line> -> leading verb word
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
   local line
-  line=$(_fm_status_strip_timestamp "$1")
+  _fm_status_strip_timestamp "$1"
+  line=$_FM_STATUS_NORMALIZED
   case "$line" in
     *:*) local n=${line#*:}; printf '%s' "${n#"${n%%[![:space:]]*}"}" ;;
     *) printf '%s' "$line" ;;
@@ -336,8 +340,8 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
   local prefix k
-  prefix=$(_fm_status_strip_timestamp "$1")
-  prefix=${prefix%%:*}
+  _fm_status_strip_timestamp "$1"
+  prefix=${_FM_STATUS_NORMALIZED%%:*}
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
