@@ -10,7 +10,15 @@ TEARDOWN="$ROOT/bin/fm-teardown.sh"
 KIMI_HOOK="$ROOT/bin/fm-kimi-turnend-hook.sh"
 TMP_ROOT=$(fm_test_tmproot fm-kimi-harness)
 KIMI_RUNTIME_TASK_TMP=
-PYTHON_BIN=$(command -v python3) || fail "test needs python3"
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
+# The same resolver fm-kimi-turnend-hook.sh uses, so this test runs the real
+# hook under whatever interpreter it would actually pick - the newest
+# available python3, not necessarily bare "python3". A host with only a
+# 3.10-era python3 resolves to that same bare python3 and the test below
+# still skips on it exactly as before; a host that also has a newer
+# interpreter installed now runs for real instead of skipping.
+PYTHON_BIN=$(command -v "$(fm_python_bin)") || fail "test needs python3"
 PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 "$PYTHON_BIN" -c 'import tomllib' >/dev/null 2>&1 \

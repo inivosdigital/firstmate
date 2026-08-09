@@ -23,6 +23,12 @@ set -eu
 
 PROTOCOL=1
 DOCTOR_SHA256=7bb13d9fad8455978bf109d4681a3aa3cb170565c8a74be4ec7b520427db14c2
+# Bare python3, not bin/fm-python-lib.sh's resolver: this is the single fixed
+# file installed standalone on the remote account's PATH (see the file header),
+# so the rest of this repo's bin/ is not guaranteed to be alongside it here,
+# and this is also the line computing this script's own real path, before
+# SCRIPT_DIR - which a resolver lookup would need - exists. realpath(), the
+# very next fallback, only needs the standard library either way.
 REAL_SOURCE=$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=$(realpath "${BASH_SOURCE[0]}" 2>/dev/null) ||
   REAL_SOURCE=${BASH_SOURCE[0]}

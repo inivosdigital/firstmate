@@ -15,6 +15,10 @@
 # Usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]
 set -eu
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=bin/fm-python-lib.sh
+. "$SCRIPT_DIR/fm-python-lib.sh"
+
 usage() {
   echo "usage: fm-ensure-agents-md.sh [repo-or-worktree-dir]" >&2
 }
@@ -99,8 +103,10 @@ is_correct_claude_symlink() {
     "$AGENTS"|"./$AGENTS") return 0 ;;
   esac
   [ -e "$AGENTS" ] || return 1
-  if command -v python3 >/dev/null 2>&1; then
-    python3 - "$CLAUDE" "$AGENTS" <<'PY'
+  local py
+  py=$(fm_python_bin)
+  if command -v "$py" >/dev/null 2>&1; then
+    "$py" - "$CLAUDE" "$AGENTS" <<'PY'
 import os
 import sys
 sys.exit(0 if os.path.realpath(sys.argv[1]) == os.path.realpath(sys.argv[2]) else 1)

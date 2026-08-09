@@ -10,8 +10,10 @@
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
 cd "$ROOT"
-exec python3 - "$@" <<'PY'
+exec "$(fm_python_bin)" - "$@" <<'PY'
 from __future__ import annotations
 
 import argparse

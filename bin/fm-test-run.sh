@@ -73,6 +73,9 @@ set -eu
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT" || exit 1
 
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
+
 MODE=
 LIST_ONLY=0
 LIST_FAMILIES=0
@@ -120,10 +123,12 @@ now_iso() {
 }
 
 now_ms() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
+  local py
+  py=$(fm_python_bin)
+  if command -v "$py" >/dev/null 2>&1; then
+    "$py" -c 'import time; print(int(time.time() * 1000))'
   else
-    # Second precision only when python3 is unavailable.
+    # Second precision only when no python3 is available.
     echo $(($(date +%s) * 1000))
   fi
 }
@@ -135,7 +140,7 @@ family_for_basename() {
     fm-arm-pretool-check.test.sh|fm-ask-user-authority.test.sh|\
     fm-brief.test.sh|fm-vendor-auth-probe.test.sh|\
     fm-calm-pi-extension.test.sh|fm-cd-pretool-check.test.sh|\
-    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|\
+    fm-composer-ghost.test.sh|fm-composer-lib.test.sh|fm-python-lib.test.sh|\
     fm-crew-state.test.sh|fm-decision-hold-lifecycle.test.sh|\
     fm-documentation-audiences.test.sh|fm-ensure-agents-md.test.sh|fm-grok-harness.test.sh|\
     fm-kimi-harness.test.sh|fm-muse-harness.test.sh|fm-herdr-lab.test.sh|fm-lint.test.sh|\
@@ -692,11 +697,12 @@ run_coverage_guard() {
 }
 
 aggregate_timing_json() {
-  local out=$1
+  local out=$1 py
   shift
   [ "$#" -gt 0 ] || die "--aggregate-json requires at least one input timing JSON"
-  command -v python3 >/dev/null 2>&1 || die "--aggregate-json requires python3"
-  python3 - "$out" "$@" <<'PY'
+  py=$(fm_python_bin)
+  command -v "$py" >/dev/null 2>&1 || die "--aggregate-json requires python3"
+  "$py" - "$out" "$@" <<'PY'
 import json, sys
 from pathlib import Path
 
@@ -1113,12 +1119,14 @@ write_json_artifact() {
   local selection=$9
   local records_file=${10}
   local families_file=${11}
+  local py
+  py=$(fm_python_bin)
 
-  if ! command -v python3 >/dev/null 2>&1; then
+  if ! command -v "$py" >/dev/null 2>&1; then
     die "--json requires python3 to emit a valid timing artifact"
   fi
 
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
+  "$py" - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$skipped" "$duration" "$selection" "$records_file" "$families_file" <<'PY'
 import json, sys
 
 out, started, finished, run_id, total, failed, skipped, duration, selection, records_file, families_file = sys.argv[1:]

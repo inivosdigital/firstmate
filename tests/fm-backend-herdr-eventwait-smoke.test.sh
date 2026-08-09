@@ -14,13 +14,16 @@
 set -u
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
+PYTHON_BIN=$(fm_python_bin)
 
 fail() { printf 'not ok - %s\n' "$1" >&2; cleanup_all; exit 1; }
 pass() { printf 'ok - %s\n' "$1"; }
 
 command -v herdr >/dev/null 2>&1 || { echo "skip: herdr not found"; exit 0; }
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found (required by the herdr adapter)"; exit 0; }
-command -v python3 >/dev/null 2>&1 || { echo "skip: python3 not found (required by the event subscriber)"; exit 0; }
+command -v "$PYTHON_BIN" >/dev/null 2>&1 || { echo "skip: python3 not found (required by the event subscriber)"; exit 0; }
 
 # shellcheck source=tests/herdr-test-safety.sh
 . "$ROOT/tests/herdr-test-safety.sh"
@@ -97,15 +100,15 @@ OUT="$SCRATCH/out"; RCF="$SCRATCH/rc"
 WPID=$!
 sleep 0.5   # let it connect, subscribe, and reconcile the idle baseline
 
-START=$(python3 -c 'import time; print(time.time())')
+START=$("$PYTHON_BIN" -c 'import time; print(time.time())')
 fm_herdr_lab_cli "$SESSION" pane report-agent "$PANE_ID" --source fm-evwait-test --agent claude --state blocked >/dev/null 2>&1 \
   || fail "could not drive the pane's agent to blocked"
 wait "$WPID"
-END=$(python3 -c 'import time; print(time.time())')
+END=$("$PYTHON_BIN" -c 'import time; print(time.time())')
 
 RC=$(cat "$RCF" 2>/dev/null || echo "")
 REC=$(cat "$OUT" 2>/dev/null || echo "")
-ELAPSED=$(python3 -c "print(f'{($END)-($START):.3f}')" 2>/dev/null || echo "?")
+ELAPSED=$("$PYTHON_BIN" -c "print(f'{($END)-($START):.3f}')" 2>/dev/null || echo "?")
 
 [ "$RC" = 0 ] || fail "wait_transition should return 0 on a real idle->blocked transition, got rc='$RC' rec='$REC'"
 REC_PANE=$(fm_transition_pane_id "$REC")
@@ -113,7 +116,7 @@ REC_TO=$(fm_transition_to_status "$REC")
 [ "$REC_PANE" = "$PANE_ID" ] || fail "the returned record's pane_id ('$REC_PANE') must match the driven pane ('$PANE_ID')"
 [ "$REC_TO" = "blocked" ] || fail "the returned record's to_status must be 'blocked', got '$REC_TO'"
 # Sub-second: comfortably under the ~240s stale-pane wedge timer this replaces.
-UNDER_ONE=$(python3 -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/dev/null || echo "no")
+UNDER_ONE=$("$PYTHON_BIN" -c "print('yes' if (($END)-($START)) < 1.0 else 'no')" 2>/dev/null || echo "no")
 [ "$UNDER_ONE" = yes ] || echo "note: idle->blocked wake took ${ELAPSED}s (>1s; still far under the 240s wedge timer, not fatal)" >&2
 pass "real herdr ($HERDR_VERSION): a driven idle->blocked transition returns the blocked record in ${ELAPSED}s (pane $PANE_ID)"
 

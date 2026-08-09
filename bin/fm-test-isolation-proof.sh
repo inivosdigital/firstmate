@@ -46,6 +46,8 @@
 set -eu
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
 cd "$ROOT" || exit 1
 
 JOBS=4
@@ -75,8 +77,10 @@ now_iso() {
 }
 
 now_ms() {
-  if command -v python3 >/dev/null 2>&1; then
-    python3 -c 'import time; print(int(time.time() * 1000))'
+  local py
+  py=$(fm_python_bin)
+  if command -v "$py" >/dev/null 2>&1; then
+    "$py" -c 'import time; print(int(time.time() * 1000))'
   else
     echo $(($(date +%s) * 1000))
   fi
@@ -219,7 +223,9 @@ global_git_snapshot() {
 
 write_json_artifact() {
   local out=$1 started=$2 finished=$3 run_id=$4 total=$5 failed=$6 concurrency=$7 duration=$8 records=$9
-  python3 - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" <<'PY'
+  local py
+  py=$(fm_python_bin)
+  "$py" - "$out" "$started" "$finished" "$run_id" "$total" "$failed" "$concurrency" "$duration" "$records" <<'PY'
 import json, sys
 out, started, finished, run_id, total, failed, concurrency, duration, records_path = sys.argv[1:10]
 scripts = []

@@ -17,6 +17,12 @@
 #   fm-kimi-turnend-hook.sh remove
 set -u
 
+# cd/pwd, not dirname: this hook's own PATH-minimal test fixtures exercise it
+# with only bash and python3 on PATH, before jq or coreutils are confirmed.
+SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" && pwd)"
+# shellcheck source=bin/fm-python-lib.sh
+. "$SCRIPT_DIR/fm-python-lib.sh"
+
 case "${1:-}" in
   install|remove) ACTION=$1 ;;
   -h|--help)
@@ -33,7 +39,8 @@ if [ -z "${HOME:-}" ]; then
   printf 'fm-kimi-turnend-hook: refused: HOME is unset.\n' >&2
   exit 1
 fi
-if ! command -v python3 >/dev/null 2>&1; then
+PYTHON_BIN=$(fm_python_bin)
+if ! command -v "$PYTHON_BIN" >/dev/null 2>&1; then
   printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
   exit 1
 fi
@@ -42,7 +49,7 @@ if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
   exit 1
 fi
 
-python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
+"$PYTHON_BIN" - "$ACTION" "$HOME/.kimi-code" <<'PY'
 import os
 import re
 import shutil

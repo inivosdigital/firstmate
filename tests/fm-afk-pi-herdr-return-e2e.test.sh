@@ -19,13 +19,15 @@ set -u
 . "$ROOT/bin/fm-supervise-daemon.sh"
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-backend.sh"
+# shellcheck source=bin/fm-python-lib.sh
+. "$ROOT/bin/fm-python-lib.sh"
 
 if [ "${FM_AFK_PI_HERDR_E2E:-0}" != 1 ]; then
   echo "skip: set FM_AFK_PI_HERDR_E2E=1 to run the real Pi/Herdr away-return regression"
   exit 0
 fi
 
-for tool in herdr jq pi python3; do
+for tool in herdr jq pi "$(fm_python_bin)"; do
   command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
 done
 

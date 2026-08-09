@@ -86,6 +86,14 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 # shellcheck source=bin/fm-transition-lib.sh
 . "$FM_BACKEND_HERDR_ROOT/bin/fm-transition-lib.sh"
 
+# The newest-available "python3" resolver (bin/fm-python-lib.sh), used only
+# where this file invokes an interpreter by name itself (the raw-socket event
+# reader below). The workspace-move helper is invoked by its own path and
+# picks its interpreter through its `#!/usr/bin/env python3` shebang instead,
+# so its capability gates deliberately keep testing bare `python3`.
+# shellcheck source=bin/fm-python-lib.sh
+. "$FM_BACKEND_HERDR_ROOT/bin/fm-python-lib.sh"
+
 FM_BACKEND_HERDR_MIN_PROTOCOL=14
 # events.subscribe (the native pane.agent_status_changed push stream) and its
 # subscription_event schema first shipped at protocol 16 (verified: herdr
@@ -959,6 +967,10 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {  # <session> <pane-i
 # workspace.move request is possible in <session>: python3 for the transport,
 # the minimum protocol, and the exact whitelisted method and parameter
 # schema. Silent; each caller owns its own warning wording.
+# The transport is herdr-workspace-move.py, invoked by path through its own
+# `#!/usr/bin/env python3` shebang rather than through bin/fm-python-lib.sh's
+# resolver, so this gate deliberately keeps testing bare `python3`: that is
+# the exact interpreter the shebang will resolve to.
 # Return codes: 1 python3 missing, 2 protocol unreadable, 3 protocol too old,
 # 4 schema unreadable, 5 method or parameter schema unsupported.
 fm_backend_herdr_workspace_move_capable() {  # <session>
@@ -3285,7 +3297,7 @@ fm_backend_herdr_events_capable() {  # <session>
   esac
   fm_backend_herdr_tool_check || return 1
   if [ -z "${FM_BACKEND_HERDR_EVENT_READER:-}" ]; then
-    command -v python3 >/dev/null 2>&1 || return 1
+    command -v "$(fm_python_bin)" >/dev/null 2>&1 || return 1
   fi
   protocol=$(herdr status --json 2>/dev/null | jq -r '.client.protocol // empty' 2>/dev/null)
   case "$protocol" in ''|*[!0-9]*) return 1 ;; esac
@@ -3307,7 +3319,8 @@ fm_backend_herdr_normalize_event() {  # <pane_id> <workspace_id> <agent_status> 
 }
 
 # fm_backend_herdr_event_reader_cmd: emit the reader argv (one word per line) for
-# the raw-socket subscriber. Default: `python3 <this dir>/herdr-eventwait.py`.
+# the raw-socket subscriber. Default: the newest available python3
+# (bin/fm-python-lib.sh) running <this dir>/herdr-eventwait.py.
 # FM_BACKEND_HERDR_EVENT_READER overrides it with a whitespace-split command so
 # tests can substitute a fake reader that replays canned stream lines.
 fm_backend_herdr_event_reader_cmd() {
@@ -3318,7 +3331,7 @@ fm_backend_herdr_event_reader_cmd() {
     done
     return 0
   fi
-  printf 'python3\n'
+  fm_python_bin
   printf '%s\n' "$FM_BACKEND_HERDR_ROOT/bin/backends/herdr-eventwait.py"
 }
 
