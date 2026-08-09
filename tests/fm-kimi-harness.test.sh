@@ -178,6 +178,20 @@ $1
 EOF
 }
 
+# Every launch fm-spawn.sh sends is wrapped in bin/fm-memcap.sh (AGENTS.md's
+# spawn-memory-cap; bin/fm-memcap-lib.sh owns the default). These kimi cases
+# spawn a ship (the default kind, none pass --scout/--secondmate) with no
+# config/spawn-memory-cap file, so the ceiling is always the built-in ship
+# default, 40%. The --label value embeds this task's own id, which the test
+# already knows because it is the same id passed to fm-spawn, so this checks
+# the exact expected value rather than a loosened substring match: an extra
+# argument or a relative binary path still fails it.
+assert_kimi_memcap_launch() {
+  local launch=$1 label_id=$2 real_cmd=$3 desc=$4 expected
+  expected="'$ROOT/bin/fm-memcap.sh' --max '40%' --label 'firstmate $label_id' -- $real_cmd"
+  [ "$launch" = "$expected" ] || fail "$desc: $launch"
+}
+
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
   id="kimi-success-z1-$$"
@@ -194,8 +208,8 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" ] \
-    || fail "kimi launch did not use the absolute binary, model, and --auto only: $launch"
+  assert_kimi_memcap_launch "$launch" "$id" "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" \
+    "kimi launch did not use the memcap-wrapped absolute binary, model, and --auto only"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
   assert_not_contains "$launch" "__TURNEND__" "kimi launch retained a turn-end placeholder"
@@ -451,8 +465,8 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  [ "$launch" = "'$fallback' --auto" ] \
-    || fail "Kimi fallback did not expand HOME into an absolute executable: $launch"
+  assert_kimi_memcap_launch "$launch" "$id" "'$fallback' --auto" \
+    "Kimi fallback did not expand HOME into an absolute executable under the memcap wrapper"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
 
