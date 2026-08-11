@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # Tests for bin/fm-ultracode-guard.sh: an ultracode-flagged task must not reach
-# PR-ready until a genuinely separate, independently-dispatched task recorded
-# itself as having reviewed the finished diff - never a self-reference or a
-# made-up id - and that review must still cover the code as it stands now.
+# PR-ready until a review has been recorded against it, naming an id that is
+# neither the task's own nor unknown to this home, and that record must still
+# cover the code as it stands now. Whether the recorded reviewer was
+# genuinely separate is firstmate's assertion when it runs `reviewed`; these
+# tests pin what the script checks, which is narrower. The guard's header says
+# where that line falls.
 #
 # The second half is the class that shipped a hand-written rewrite past this
 # guard: a review recorded once satisfied check forever, so commits landing
-# afterwards were never covered by any independent pass. A recorded review is
-# therefore pinned to the diff it covered, and check refuses once that diff
-# moves. Pinning is by diff CONTENT, not commit id, so the rebases and squashes
-# this fleet does routinely do not manufacture false refusals.
+# afterwards were covered by nothing. A recorded review is therefore pinned to
+# the diff it covered, and check refuses once that diff moves. Pinning is by
+# diff CONTENT, not commit id, so the rebases and squashes this fleet does
+# routinely do not manufacture false refusals.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -21,8 +24,9 @@ TMP_ROOT=$(fm_test_tmproot fm-ultracode-guard-tests)
 
 # new_case <name>: a case dir holding state/, a bare origin, a project clone and
 # a task worktree on branch fm/task-x1, plus meta for the task and for a second
-# separately-dispatched task (task-x2) that can act as the reviewer. Mirrors the
-# fixture the sibling guardrail suites use (tests/fm-tier-guard.test.sh).
+# task (task-x2) whose id can therefore be recorded as the reviewer - that meta
+# file is all the script looks for. Mirrors the fixture the sibling guardrail
+# suites use (tests/fm-tier-guard.test.sh).
 new_case() {
   local name=$1 case_dir
   case_dir="$TMP_ROOT/$name"
@@ -176,7 +180,7 @@ test_reviewed_by_unknown_task_is_refused() {
   pass "fm-ultracode-guard reviewed refuses a reviewer id with no recorded meta"
 }
 
-test_reviewed_by_distinct_dispatched_task_passes_check() {
+test_reviewed_by_a_distinct_id_with_meta_passes_check() {
   local case_dir status
   case_dir=$(new_case distinct-reviewer)
   commit_work "$case_dir" "base
@@ -190,8 +194,8 @@ implementation" "implementation"
   status=$?
   set -e
 
-  expect_code 0 "$status" "distinct-reviewer: a genuinely separate reviewer must satisfy check"
-  pass "fm-ultracode-guard check passes once a distinct dispatched task recorded the review"
+  expect_code 0 "$status" "distinct-reviewer: a distinct id with a meta file must satisfy check"
+  pass "fm-ultracode-guard check passes once a review is recorded against a distinct known id"
 }
 
 test_reviewed_without_flag_is_refused() {
@@ -302,7 +306,7 @@ implementation" "implementation"
 # --- review currency --------------------------------------------------------
 
 test_check_refuses_once_commits_land_past_the_review() {
-  # The exact observed failure: the independent review passed, four more commits
+  # The exact observed failure: a review was recorded at one commit, four more
   # landed afterwards including a hand-written rewrite, and check stayed silent.
   local case_dir out status reviewed_commit tip i
   case_dir=$(new_case commits-past-review)
@@ -835,7 +839,7 @@ test_flag_then_check_fails_until_reviewed
 test_flag_custom_role_reported_in_check
 test_reviewed_by_self_is_refused
 test_reviewed_by_unknown_task_is_refused
-test_reviewed_by_distinct_dispatched_task_passes_check
+test_reviewed_by_a_distinct_id_with_meta_passes_check
 test_reviewed_without_flag_is_refused
 test_reflag_clears_prior_review
 test_flag_rejects_newline_injection_in_role

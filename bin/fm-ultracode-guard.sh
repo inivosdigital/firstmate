@@ -28,6 +28,19 @@
 #   plainly because an overclaim in a safety guard's own documentation is its
 #   own hazard: a reader who believes independence is machine-checked stops
 #   checking it.
+#   Re-checking that boundary later: the wording drifts back toward the
+#   overclaim on its own, because "the independent review" is the shorter
+#   phrase. Sweep for it rather than re-reading:
+#     grep -nEi 'genuinely|independent|dispatched|second pass|actually reviewed' \
+#       bin/fm-ultracode-guard.sh tests/fm-ultracode-guard.test.sh \
+#       | grep -vE 'independent-review|ultracode_role'
+#   Every hit must be one of: the NOT-enforced list above, an instruction
+#   telling a supervisor what to go do, or prose naming firstmate as the
+#   asserter. A hit that makes the SCRIPT the subject of dispatch provenance,
+#   reviewer independence, or "a review happened" is the defect. (It is a
+#   documented sweep, not a test, because tests here must not assert
+#   implementation-source bytes.)
+#
 #   Making independence mechanical would need provenance recorded when the
 #   reviewer is dispatched (its own metadata binding it to the task it reviews),
 #   which is a change to the flagging and dispatch path rather than to this
@@ -105,10 +118,9 @@
 #     docs/examples/crew-dispatch.json). Firstmate runs this right after
 #     spawning the task.
 #   fm-ultracode-guard.sh reviewed <task-id> <reviewer-task-id>
-#     The supervisor's assertion that <reviewer-task-id> - a distinct,
-#     separately dispatched task (its own state/<reviewer-task-id>.meta must
-#     exist) - independently reviewed <task-id>'s finished diff and its findings
-#     were addressed; this pins that assertion to the diff as it stands now.
+#     The supervisor's assertion that <reviewer-task-id> was a separate task,
+#     independent of <task-id>, and reviewed its finished diff with the findings
+#     addressed; this pins that assertion to the diff as it stands now.
 #     What it checks is above under "What this guard proves": the assertion that
 #     a review happened is the caller's, and only its pinning is mechanical.
 #     Refuses if <reviewer-task-id> equals <task-id>, or if no file exists at
@@ -253,11 +265,15 @@ cmd_reviewed() {
   [ -n "$reviewer" ] || { echo "error: reviewed requires a reviewer-task-id" >&2; exit 1; }
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
-    echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot independently review itself" >&2
+    echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot review itself" >&2
     exit 1
   fi
   if [ ! -f "$STATE/$reviewer.meta" ]; then
-    echo "error: $reviewer has no recorded state/$reviewer.meta - it must be a genuinely, separately dispatched task, not a made-up id or a sub-task $ID spawned itself" >&2
+    {
+      echo "error: $reviewer has no recorded state/$reviewer.meta, so this home has no record of that task at all."
+      echo "  That path check is the whole test here; it catches an invented id and nothing more."
+      echo "  That the reviewer was separately dispatched, and reviewed anything, is what you assert by running this - neither is checked."
+    } >&2
     exit 1
   fi
   # The reviewer id is the last field of a review record, so a newline in it is
@@ -276,7 +292,7 @@ cmd_reviewed() {
 
   record="review=$fingerprint $tip $reviewer"
   grep -qxF "$record" "$MARKER" 2>/dev/null || printf '%s\n' "$record" >> "$MARKER"
-  echo "recorded $reviewer as the independent review of $ID, pinned to the diff at $tip"
+  echo "recorded your assertion that $reviewer reviewed $ID, pinned to the diff at $tip"
 }
 
 cmd_check() {
@@ -292,7 +308,7 @@ cmd_check() {
   unpinned=$(grep '^reviewed_by=' "$MARKER" || true)
 
   if [ -z "$records" ] && [ -z "$unpinned" ]; then
-    echo "error: $ID is ultracode-flagged (role=$role) but has no recorded independent review yet - dispatch a genuinely separate task to review the finished diff, then run: fm-ultracode-guard.sh reviewed $ID <reviewer-task-id>" >&2
+    echo "error: $ID is ultracode-flagged (role=$role) but has no review recorded yet - dispatch a genuinely separate task to review the finished diff, then run: fm-ultracode-guard.sh reviewed $ID <reviewer-task-id>" >&2
     exit 1
   fi
 
@@ -300,7 +316,7 @@ cmd_check() {
     reviewer=$(printf '%s\n' "$unpinned" | tail -1 | cut -d= -f2-)
     {
       echo "error: $ID is ultracode-flagged (role=$role) and its review was recorded before reviews were pinned to the diff they covered:"
-      echo "  reviewed by:  $reviewer"
+      echo "  reviewed by:  $reviewer (recorded by whoever ran reviewed; not verified here)"
       echo "  Nothing in that record shows whether the review still matches the current code, so it cannot stand in for one that does."
       echo "  Have the reviewer confirm the current diff (bin/fm-review-diff.sh $ID), then re-run: fm-ultracode-guard.sh reviewed $ID $reviewer"
     } >&2
@@ -332,14 +348,14 @@ EOF
   reviewer=${body#* }
   tip=$(current_tip "$wt") || tip="<unresolved>"
   {
-    echo "error: $ID is ultracode-flagged (role=$role) and the recorded independent review no longer covers the current diff:"
-    echo "  reviewed by:  $reviewer"
+    echo "error: $ID is ultracode-flagged (role=$role) and the recorded review no longer covers the current diff:"
+    echo "  reviewed by:  $reviewer (recorded by whoever ran reviewed; not verified here)"
     echo "  reviewed at:  $reviewed_commit"
     echo "  current tip:  $tip"
     if [ "$reviewed_commit" = "$tip" ]; then
       echo "  The local tip is unchanged, so the compared diff itself moved - typically the open PR head advanced past this worktree."
     else
-      echo "  The code has changed since that review, so no independent pass covers what would ship."
+      echo "  The code has changed since that review, so nothing recorded covers what would ship."
     fi
     extra=$(printf '%s\n' "$records" | grep -c '^review=' || true)
     if [ "${extra:-1}" -gt 1 ]; then
