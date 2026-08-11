@@ -151,10 +151,20 @@ This matters for the `until` wait idiom, which is the supported way to poll for 
 
 The boundary is what consumes the text.
 A here-document body counts as data only when the command consuming it can be named and does nothing else with it, so `cat <<EOF | bash` and `cat <<EOF > /tmp/o` keep their bodies in view.
-A quoted run counts as data only when it is an argument, never the command word or a prefix assignment, and only when its command is one of a small allowlist that prints its arguments or ignores them: `echo`, `printf`, `:`, `true`, and `false`.
+A quoted run counts as data only when it is an argument, never the command word or a prefix assignment, and only when its command is a bare name from a small allowlist of builtins that print their arguments or ignore them: `echo`, `:`, `true`, and `false`.
 That list is an allowlist of data sinks rather than a list of consumers that execute what they are handed, because the executing ones are unbounded, and a name missing from a list of those would be a permit while a name missing from this one is only friction.
+`printf` is absent from it: `printf -v NAME` assigns its result instead of printing it, and a list whose entry needs an exception has the wrong membership rule.
+The command must be a bare name because the list describes builtins, so `/bin/echo '...'` and `./echo '...'` are whatever sits at those paths and keep their text in view.
 So `eval '...'`, `bash -c '...'`, `sh -c '...'`, `sh '...'`, `'pkill' -f fm-watch`, `echo '...' | bash`, `echo '...' > /tmp/o`, `xargs -I{} sh -c '...'`, and any command the parser cannot vouch for all keep their quoted text in view and stay denied.
-A quoted run containing a substitution or an expansion is not literal text and is never cut, so `echo "$(pkill -f fm-watch)"` stays denied too.
+
+The word holding a quoted run must itself be literal, not merely unchanged across the run, because a word can assign while it is expanded.
+`echo ${P:="fm-watch"}` and `echo $X"fm-watch"` both contain a literal-looking run inside a word that is not literal text, and the command in front of such a word says nothing about that, so neither is cut and `echo "$(pkill -f fm-watch)"` stays denied on the same rule.
+
+A name is the builtin it spells only while nothing has rebound it, so the allowlist is withdrawn from the whole program when the program contains a function definition, `alias`, `unalias`, `enable`, `hash`, `eval`, `source`, `.`, `trap`, an assignment to `PATH` wherever it sits, or a command word the parser cannot read.
+Groups are read with the same lexer rather than assumed either way, so `{ alias echo=eval; }` counts and an ordinary `(date)` does not.
+A subshell is treated the same as a brace group even though its bindings die with it, because reading it costs one pass and refusing `(alias echo=eval)` costs nothing anyone writes.
+Membership follows that rule alone: `export`, `declare`, `set`, and `shopt` are absent because none of them can give a name a new meaning, and a program that sets a variable or a shell option keeps reading its quoted text as text.
+This cannot see a definition made before the command runs - a shell that already has `echo` defined as a function will run that function - which is outside what a classifier reading one command string can establish.
 
 Block syntax the scanner cannot fit into a well-formed construct - an unclosed loop, a stray `done` or `esac`, an arithmetic `for`, a substitution in a `case` subject or pattern - keeps the whole command on the conservative path above.
 The regression suite pins two guarantees.

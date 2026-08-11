@@ -1113,7 +1113,67 @@ function seedBlockTaint(program, context, command) {
 // `-e` - so a name missing from a list of those would be a permit. A name
 // missing from this list is only friction: its quoted text stays in view and
 // the command is refused inside a construct.
-const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo", "printf"]);
+//
+// `printf` is deliberately absent. `printf -v NAME` assigns its result instead
+// of printing it, and a list whose entry needs an exception has the wrong
+// membership rule; `echo` covers the same example forms.
+const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo"]);
+
+// Commands that change what a name resolves to. A sink name is the builtin it
+// looks like only while nothing has rebound it, and an alias, a disabled
+// builtin, a hashed path, a sourced file, or a string kept to be evaluated
+// later all rebind it silently. The parser cannot follow any of those, so their
+// presence anywhere in the program withdraws the allowlist's claim rather than
+// being reasoned around.
+//
+// This one is a blocklist, unavoidably, but over a closed and small domain -
+// the shell's own name-resolution builtins - rather than over every program on
+// the machine that might execute an argument. Membership is by that rule alone:
+// `export`, `declare`, `set` and `shopt` are absent because none of them can
+// give a name a new meaning, and a program that sets a variable or a shell
+// option keeps reading its quoted text as text.
+const NAME_REBINDING_COMMANDS = new Set(["alias", "unalias", "enable", "hash", "eval", "source", ".", "trap"]);
+
+// Whether this program does anything that could make a sink name mean something
+// other than the builtin it spells: a function definition, one of the commands
+// above, or a new PATH, which `assignmentName` sees wherever the assignment
+// sits - on its own, as a prefix, or as an argument to `export`.
+//
+// A group is searched rather than assumed guilty. `(date)` and `{ date; }`
+// rebind nothing, and reading their contents with the same lexer costs one pass
+// and keeps ordinary programs out of the raw check. A group that cannot be read
+// counts as rebinding, like every other thing the parser cannot see. A
+// subshell's bindings would die with it, but it is searched like a brace group
+// rather than scoped, because refusing `(alias echo=eval)` costs nothing.
+function programRebindsNames(program, depth = 0) {
+  if (depth > 12) return true;
+  for (const tokens of program.nodes) {
+    for (let index = 0; index < tokens.length; index += 1) {
+      const token = tokens[index];
+      if (token.type === "word" && assignmentName(token) === "PATH") return true;
+      if (token.type !== "group") continue;
+      // `name()` - an empty subshell after a word is a function definition and
+      // is never anything else, since `( )` alone is not a command.
+      if (token.kind === "subshell" && token.content.trim() === "" && tokens[index - 1]?.type === "word") return true;
+      if (groupRebindsNames(token, depth)) return true;
+    }
+    const position = commandPosition(tokens);
+    if (!position.command) continue;
+    // A command word the parser cannot read is not a name it can clear: `$C`
+    // expands to `source` as easily as to anything else.
+    if (!position.command.literal || position.command.subs.length > 0) return true;
+    if (NAME_REBINDING_COMMANDS.has(basename(position.command.value))) return true;
+  }
+  return false;
+}
+
+function groupRebindsNames(group, depth) {
+  const lexed = new Lexer(group.content, { blocks: true }).tokenize();
+  if (lexed.error) return true;
+  const program = splitBlockProgram(lexed.tokens);
+  if (program.error) return true;
+  return programRebindsNames(program, depth + 1);
+}
 
 // The preconditions for reading any part of a node as data. The parser has to
 // be able to name the command, that command must not be a shell, and the node
@@ -1135,11 +1195,25 @@ function nodeConsumesItsInput(tokens, adjacent) {
 // Quoted runs this node reads as data. Only argument words qualify: a quoted
 // run that is the command word, a wrapper, or a prefix assignment is either
 // what runs or what a later command runs, so it stays in the text.
+//
+// The word around the run has to be literal in its own right, not merely
+// unchanged across it. A run is recorded per run, so an innocent-looking one
+// can sit inside a word that assigns while it expands - `${NAME:="..."}` binds
+// NAME, and `$X"..."` is not literal text either - and the command in front of
+// it says nothing about that.
+//
+// The command word must also be a bare name. The allowlist describes builtins,
+// and `/bin/echo` or `./echo` is whatever is at that path. Anyone able to place
+// such a binary can simply run it, so this is not a defence; it is what makes
+// the sentence about builtins true.
 function dataArgumentRanges(tokens, adjacent) {
   const position = nodeConsumesItsInput(tokens, adjacent);
-  if (!position || !DATA_SINK_COMMANDS.has(basename(position.command.value))) return [];
+  if (!position) return [];
+  const command = position.command.value;
+  if (command.includes("/") || !DATA_SINK_COMMANDS.has(command)) return [];
   const ranges = [];
   for (const word of position.words.slice(position.index + 1)) {
+    if (!word.literal || word.subs.length > 0) continue;
     for (const range of word.quotedRanges || []) ranges.push(range);
   }
   return ranges;
@@ -1156,6 +1230,7 @@ function dataArgumentRanges(tokens, adjacent) {
 // command; the unchanged raw check simply reads what is left.
 function executableProgramText(command, program, comments) {
   const ranges = [...comments];
+  const sinksAreTrustworthy = !programRebindsNames(program);
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const adjacent = program.adjacency?.[nodeIndex];
@@ -1163,6 +1238,7 @@ function executableProgramText(command, program, comments) {
     if (heredocs.length > 0 && nodeConsumesItsInput(tokens, adjacent)) {
       for (const token of heredocs) ranges.push(token.heredocRange);
     }
+    if (!sinksAreTrustworthy) continue;
     for (const range of dataArgumentRanges(tokens, adjacent)) ranges.push(range);
   }
   if (ranges.length === 0) return command;

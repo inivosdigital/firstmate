@@ -292,8 +292,14 @@ test_block_construct_inert_text_allowed() {
     assert_policy "block-$shape-quoted-protected" allow "$(block_wrap "$shape" "echo 'bin/fm-watch.sh'")"
   done
   assert_policy block-until-double-quoted-data allow "$(block_wrap until 'echo "pkill -f fm-watch"')"
-  assert_policy block-until-printf-data allow "$(block_wrap until "printf '%s\\n' 'pkill -f fm-watch'")"
   assert_policy block-until-ansi-quoted-data allow "$(block_wrap until "echo \$'pkill -f fm-watch'")"
+  # Setting a variable or a shell option cannot give a name a new meaning, and
+  # neither can an ordinary group, so none of them withdraws the allowlist. This
+  # pins how narrow that withdrawal is: widen it and these stop being allowed.
+  assert_policy block-until-with-export allow "$(block_wrap until "echo 'pkill -f fm-watch'")"$'\nexport TZ=UTC'
+  assert_policy block-until-with-set allow $'set -e\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
+  assert_policy block-until-with-subshell allow $'(date)\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
+  assert_policy block-until-with-brace-group allow $'{ date; }\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
 }
 
 # The boundary on that. A quoted literal that is the command, or that reaches a
@@ -325,6 +331,52 @@ test_block_construct_executed_quoted_payload_denied() {
   assert_policy block-until-quoted-then-eval $'deny\tbroad-watcher-kill' "$(block_wrap until "Q='pkill -f fm-watch'; eval \$Q")"
   # A substitution inside double quotes is not literal text, so it stays in view.
   assert_policy block-until-quoted-substitution $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo "$(pkill -f fm-watch)"')"
+}
+
+# The defect this suite missed in its second round: reading a quoted argument as
+# data is a claim about that argument and about the name in front of it, and both
+# halves can be false. An argument can assign while it expands, and a name can
+# have been rebound to something that runs what it is handed.
+test_block_construct_sink_name_defeated_denied() {
+  # An argument that assigns while it is expanded. The word is not literal, so
+  # nothing in it is read as data whatever command it is handed to.
+  assert_policy block-until-printf-v-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'printf -v P "fm-watch"; pkill -f "$P"')"
+  assert_policy block-if-printf-v-protected $'deny\tunclassifiable-protected-command' 'if true; then printf -v A "bin/fm-watch.sh"; fi; $A'
+  assert_policy block-until-default-assign $'deny\tbroad-watcher-kill' "$(block_wrap until ': ${P:="fm-watch"}; pkill -f "$P"')"
+  assert_policy block-until-echo-default-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${P:="fm-watch"}; pkill -f "$P"')"
+  assert_policy block-until-echo-plain-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${P="fm-watch"}; pkill -f "$P"')"
+  assert_policy block-until-echo-array-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${A[0]:="fm-watch"}; pkill -f "${A[0]}"')"
+  # A literal run beside an expansion is not a literal word.
+  assert_policy block-until-adjacent-expansion $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo $X"fm-watch"; pkill -f "$X"')"
+  # `printf` is not on the list at all, because `printf -v` assigns rather than
+  # prints and the list must not need an exception to be true.
+  assert_policy block-until-printf-data $'deny\tbroad-watcher-kill' "$(block_wrap until "printf '%s\\n' 'pkill -f fm-watch'")"
+  # The list describes builtins, so a path is not one of its names.
+  assert_policy block-until-absolute-echo $'deny\tbroad-watcher-kill' "$(block_wrap until "/bin/echo 'pkill -f fm-watch'")"
+  assert_policy block-until-relative-echo $'deny\tbroad-watcher-kill' "$(block_wrap until "./echo 'pkill -f fm-watch'")"
+  # A name is the builtin it spells only while nothing has rebound it.
+  assert_policy rebind-function $'deny\tbroad-watcher-kill' "$(printf 'echo() { eval "$1"; }\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-function-colon $'deny\tbroad-watcher-kill' "$(printf ':() { eval "$1"; }\n%s' "$(block_wrap until ": 'pkill -f fm-watch'")")"
+  assert_policy rebind-alias $'deny\tbroad-watcher-kill' "$(printf 'alias echo=eval\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-enable $'deny\tbroad-watcher-kill' "$(printf 'enable -n echo\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-hash $'deny\tbroad-watcher-kill' "$(printf 'hash -p /tmp/x echo\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-source $'deny\tbroad-watcher-kill' "$(printf '. /tmp/defs.sh\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-eval $'deny\tbroad-watcher-kill' "$(printf 'eval "$SETUP"\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-trap $'deny\tbroad-watcher-kill' "$(printf "trap '\$SETUP' DEBUG\n%s" "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-path $'deny\tbroad-watcher-kill' "$(printf 'PATH=/tmp/x\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-path-prefix $'deny\tbroad-watcher-kill' "$(block_wrap until "PATH=/tmp/x echo 'pkill -f fm-watch'")"
+  assert_policy rebind-path-via-env $'deny\tbroad-watcher-kill' "$(block_wrap until "env PATH=/tmp/x echo 'pkill -f fm-watch'")"
+  assert_policy rebind-unreadable-command $'deny\tbroad-watcher-kill' "$(printf '$SETUP\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  # A rebinding hidden inside a group counts. The group is read with the same
+  # lexer rather than assumed innocent or assumed guilty. A subshell's own
+  # bindings would die with it; it is refused anyway rather than scoped, which
+  # costs nothing anyone writes.
+  assert_policy rebind-inside-subshell $'deny\tbroad-watcher-kill' "$(printf '(alias echo=eval)\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-inside-brace $'deny\tbroad-watcher-kill' "$(printf '{ echo() { eval "$1"; }; }\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy rebind-inside-nested-group $'deny\tbroad-watcher-kill' "$(printf '({ (PATH=/tmp/x); })\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  # Order does not matter: the rebinding is a property of the program, not of
+  # what precedes the sink.
+  assert_policy rebind-after-use $'deny\tbroad-watcher-kill' "$(printf '%s\n. /tmp/defs.sh' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
 }
 
 # The defect this suite missed in its first round: a name bound in one part of a
@@ -720,6 +772,7 @@ test_direct_policy_contract
 test_block_construct_inert_data_allowed
 test_block_construct_inert_text_allowed
 test_block_construct_executed_quoted_payload_denied
+test_block_construct_sink_name_defeated_denied
 test_block_construct_binding_outlives_its_branch
 test_block_construct_unmodelled_input_is_tainted
 test_block_construct_executed_kill_denied
