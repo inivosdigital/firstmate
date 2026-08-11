@@ -2703,11 +2703,15 @@ test_repeated_unknown_verdicts_do_not_move_the_start() {
   pass "repeated unknown verdicts neither move the start nor exempt a ticking pane from the bound"
 }
 
-# The boundary of that path. Bounding an unreadable pane must not turn every
-# declared external wait on such a harness into a wedge alarm: the declared
-# pause and captain-hold handling in the same branch clears the timer on every
-# poll of that pane, so the crew stays with the ordinary pause handling and
-# never accumulates a wedge escalation.
+# The boundary of that path, and a no-regression guard rather than a
+# discriminator: it passes against every revision in this series, so it proves
+# nothing about the change that added the bounded-unknown path. It exists so a
+# later change to that path cannot silently start alarming on declared external
+# waits. Bounding an unreadable pane must not turn every declared external wait
+# on such a harness into a wedge alarm: the declared pause and captain-hold
+# handling in the same branch clears the timer on every poll of that pane, so
+# the crew stays with the ordinary pause handling and never accumulates a wedge
+# escalation.
 test_unknown_verdict_under_a_declared_pause_is_not_wedged() {
   local dir state fakebin out capture_file window key sig pid ticker n
   dir=$(make_case busy-unknown-paused); state="$dir/state"; fakebin="$dir/fakebin"
