@@ -70,7 +70,9 @@ make_absent_pipeline_head() {  # <wt-dir> <clone-dir> -> echoes absent sha
 # runs --limit N`, which is plain text - no run id, no quoting - serving
 # FM_FAKE_RUNS_LIST verbatim. FM_FAKE_RUNS_HANG_SECS makes the runs command
 # hang after those rows and then emit FM_FAKE_RUNS_LIST_AFTER_HANG, modeling a
-# query the reader's hard timeout kills with a partial prefix on stdout.
+# query the reader's hard timeout kills with a partial prefix on stdout;
+# FM_FAKE_RUNS_TORN_TAIL instead emits a single row cut mid-record with no
+# trailing newline before the hang, modeling a kill mid-write.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -90,6 +92,15 @@ case "${1:-}" in
     esac
     ;;
   runs)
+    # Torn-row shape: emit a row cut mid-record - NO trailing newline - then
+    # hang, so the reader's hard timeout kills the query with a torn tail on
+    # stdout; the rest of the record would only ever arrive after the hang.
+    if [ -n "${FM_FAKE_RUNS_TORN_TAIL:-}" ]; then
+      printf '%s' "${FM_FAKE_RUNS_TORN_TAIL}"
+      sleep "${FM_FAKE_RUNS_HANG_SECS:-8}"
+      printf ' 2026-08-10 22:05\n'
+      exit 0
+    fi
     printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
     # Timed-out-query shape: emit the rows above, hang past the reader's
     # query timeout, and only then emit the remaining rows - so the reader's
@@ -198,9 +209,10 @@ reset_fakes() {
   FM_FAKE_CI_LOGS=""
   FM_FAKE_RUNS_HANG_SECS=""
   FM_FAKE_RUNS_LIST_AFTER_HANG=""
+  FM_FAKE_RUNS_TORN_TAIL=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
-  export FM_FAKE_RUNS_HANG_SECS FM_FAKE_RUNS_LIST_AFTER_HANG
+  export FM_FAKE_RUNS_HANG_SECS FM_FAKE_RUNS_LIST_AFTER_HANG FM_FAKE_RUNS_TORN_TAIL
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -812,6 +824,46 @@ test_timed_out_runs_query_refuses_absent_head_dispensation() {
     *) fail "a completed short runs query no longer binds the sole live run: $out" ;;
   esac
   pass "a timed-out runs query refuses the absent-head dispensation"
+}
+
+# Fourth-review blocking regression: a timed-out producer can stop mid-ROW -
+# no trailing newline, cut after a resolvable SHA prefix - and `<<<` still
+# hands that tail to `read` as a line. A short resolvable prefix classifies
+# as a strict head-identity match, and strict matches were exempt from the
+# round-3 refusal, so the torn row bound on the coarse path. A killed byte
+# stream proves nothing about token or row integrity, so a nonzero-exit
+# query's rows must feed NO row-derived binding, strict matches included,
+# while the same row as a whole record from a clean query keeps binding.
+test_torn_match_row_from_timed_out_query_stays_unbound() {
+  reset_fakes
+  local d out
+  d=$(new_case torn-match-row)
+  make_repo_on_branch "$d/wt" fm/feat-tn
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-tn.meta" "window=fm:fm-feat-tn" "worktree=$d/wt" "kind=ship"
+  # Torn tail: status and branch complete, sha cut to a 7-hex prefix of the
+  # worktree HEAD (resolvable, so it would classify as a strict match), no
+  # date columns, no trailing newline - then the producer hangs and is killed.
+  FM_FAKE_RUNS_TORN_TAIL="  running    fm/feat-tn $(git -C "$d/wt" rev-parse --short=7 HEAD)"
+  FM_FAKE_RUNS_HANG_SECS=8
+  # Coarse path: axi status answers for another branch, so only the torn runs
+  # output speaks for this branch. It must not bind.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 run_crew_progress "$d" feat-tn)
+  [ "$out" = "progress: none" ] \
+    || fail "torn strict-match row from a timed-out query bound on the coarse path: $out"
+  # Control: the SAME row as a whole record from a query that returns in time
+  # is a genuine strict match and still binds, so the refusal above is
+  # attributable to the taint, not to the row's content.
+  FM_FAKE_RUNS_TORN_TAIL=
+  FM_FAKE_RUNS_HANG_SECS=
+  FM_FAKE_RUNS_LIST="  running    fm/feat-tn $(git -C "$d/wt" rev-parse --short=7 HEAD)  2026-08-10 22:05"
+  out=$(run_crew_progress "$d" feat-tn)
+  case "$out" in
+    "progress: working/coarse/running/"*) ;;
+    *) fail "an intact strict-match row from a clean query no longer binds: $out" ;;
+  esac
+  pass "a torn strict-match row from a timed-out query stays unbound"
 }
 
 # ---------------------------------------------------------------------------
@@ -1950,5 +2002,6 @@ test_two_live_unresolvable_candidates_fail_closed
 test_gated_running_run_on_absent_head_stays_unattributed
 test_truncated_runs_view_refuses_absent_head_dispensation
 test_timed_out_runs_query_refuses_absent_head_dispensation
+test_torn_match_row_from_timed_out_query_stays_unbound
 
 echo "all fm-crew-state tests passed"

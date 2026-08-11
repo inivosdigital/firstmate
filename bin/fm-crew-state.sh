@@ -412,14 +412,28 @@ nm_ci_checks_state() {
 #                         their head relation
 #   NM_RUNS_LIVE_SHA      the LAST-counted running row's short-sha; meaningful
 #                         only when NM_RUNS_LIVE_N is exactly 1
-#   NM_RUNS_INCOMPLETE    1 when the view cannot be proven complete: the query
-#                         exited nonzero (timed out or failed, so any rows
-#                         already on stdout are a partial - possibly torn -
-#                         prefix of the real list), or the returned row count
+#   NM_RUNS_ROWS_TAINTED  1 when the query exited nonzero (timed out or
+#                         failed): a killed byte stream can cut a line
+#                         mid-token, so nothing row-derived is trustworthy
+#                         and the partial output is DISCARDED UNPARSED
+#   NM_RUNS_INCOMPLETE    1 when the view cannot be proven complete: the rows
+#                         are tainted (above), or the returned row count
 #                         filled the requested limit and more rows could sit
 #                         beyond the slice
 # An empty/unavailable list leaves the first three at their empty defaults,
 # which every consumer reads as "cannot bind".
+# THE DISTINCTION THE TWO FLAGS CARRY - the line that kept being got wrong
+# across three review rounds, so it is stated once, here, explicitly:
+#   - a NONZERO EXIT poisons the ROWS themselves. No token in a killed byte
+#     stream is provably whole (a cut SHA prefix can still resolve, and `<<<`
+#     hands a newline-less tail to `read` as a line), so it gates EVERY
+#     row-derived binding, strict head-identity matches included.
+#   - a FILLED LIMIT only un-proves COMPLETENESS of the list. Every row a
+#     cleanly-exited producer wrote is whole, and newest-first ordering means
+#     truncation can only HIDE match rows, never corrupt one - so it gates
+#     only the count-based uniqueness dispensation, and an intact strict
+#     match keeps binding: head identity is ownership proof on its own and
+#     needs row integrity, not global completeness.
 # The installed `no-mistakes runs` (v1.31.2) documents --limit only as
 # "maximum number of runs to display", orders by creation time, and emits no
 # truncation signal, so a full slice is the only honest incompleteness signal
@@ -427,24 +441,27 @@ nm_ci_checks_state() {
 # query would let the consumers prove the active set instead of refusing on
 # possible truncation.
 # Unlike every other no-mistakes read in this file, this call site keeps the
-# query's exit status (fm_nm_run_checked, not the fail-open fm_nm_run): by
-# row count alone a short complete list and the partial stdout of a killed
-# query are indistinguishable, and the discarded status was the only signal
-# telling them apart. Rows that DID arrive are still parsed - a strict-match
-# row binds on head identity, which needs no completeness proof - but the
-# count-based dispensation must not trust them.
+# query's exit status (fm_nm_run_checked, not the fail-open fm_nm_run): the
+# discarded status was the only signal separating a short complete list from
+# a killed query's partial - possibly torn - prefix.
 NM_RUNS_MATCH_STATUS=''
 NM_RUNS_LIVE_N=0
 NM_RUNS_LIVE_SHA=''
+NM_RUNS_ROWS_TAINTED=0
 NM_RUNS_INCOMPLETE=0
 nm_scan_runs_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha total=0
   NM_RUNS_MATCH_STATUS=''
   NM_RUNS_LIVE_N=0
   NM_RUNS_LIVE_SHA=''
+  NM_RUNS_ROWS_TAINTED=0
   NM_RUNS_INCOMPLETE=0
-  out=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" "$NM_KILL_AFTER" \
-    runs --limit "$FM_CREW_STATE_RUNS_LIMIT") || NM_RUNS_INCOMPLETE=1
+  if ! out=$(fm_nm_run_checked "$WT" "$NM_TIMEOUT" "$NM_KILL_AFTER" \
+    runs --limit "$FM_CREW_STATE_RUNS_LIMIT"); then
+    NM_RUNS_ROWS_TAINTED=1
+    NM_RUNS_INCOMPLETE=1
+    return 0
+  fi
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
@@ -484,12 +501,17 @@ nm_scan_runs_for_branch() {  # <branch>
 # row is then a coarser view of the very run the detailed surface just refused
 # (gated, terminal, ambiguous, or diverged), and binding it here would launder
 # the rejection through the fallback. A possibly-incomplete view
-# (NM_RUNS_INCOMPLETE: a failed or timed-out query, or a slice that filled its
-# limit) also refuses the dispensation: a sole-live count from an incomplete
-# view proves nothing. Strict-match rows still bind - head identity is
-# ownership proof on its own.
+# (NM_RUNS_INCOMPLETE) also refuses the dispensation: a sole-live count from
+# an incomplete view proves nothing. An intact strict-match row from an
+# untainted view still binds even when the slice filled its limit - head
+# identity is ownership proof on its own. A tainted query's rows never reach
+# the returns below twice over: the scan discards them unparsed, AND the
+# explicit taint check here keeps the strict-match return refusing even if
+# that discard were ever loosened - the round-4 torn-row bind was exactly an
+# unstated precondition on this return, so it is stated in code.
 nm_runs_status_for_branch() {  # <branch> <allow-unresolvable:1|0>
   nm_scan_runs_for_branch "$1"
+  [ "$NM_RUNS_ROWS_TAINTED" = 0 ] || return 0
   if [ -n "$NM_RUNS_MATCH_STATUS" ]; then
     printf '%s' "$NM_RUNS_MATCH_STATUS"
     return 0
@@ -546,12 +568,19 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 #     stdout is indistinguishable from a short complete list by count alone -
 #     the scan keeps the query's exit status for exactly this reason (see
 #     nm_scan_runs_for_branch).
-# STATED RESIDUAL, deliberately not papered over: a stale-but-agreeing view -
-# one whose snapshot still shows the corresponding sole live row while
-# omitting a second candidate that went live after the snapshot was taken -
-# passes every condition above, and no freshness or generation signal exists
-# on the installed CLI to rule it out. The truncation refusal does not cover
-# it; it is accepted as the residual risk of the dispensation.
+# STATED RESIDUALS, deliberately not papered over - what the code actually
+# leaves open, not what it was meant to leave open:
+#   - a stale-but-agreeing view: a snapshot that still shows the
+#     corresponding sole live row while omitting a second candidate that
+#     went live after the snapshot was taken passes every condition above,
+#     and no freshness or generation signal exists on the installed CLI to
+#     rule it out. Neither the incompleteness nor the taint refusal covers
+#     it; it is accepted as the residual risk of the dispensation.
+#   - row integrity on a zero-exit query is trusted, not verified: the row
+#     format carries no terminator or checksum, so a producer that emitted
+#     corrupted-but-well-formed-looking rows and still exited zero would be
+#     believed, strict matches included. Only a nonzero exit marks rows
+#     untrustworthy.
 # The refusal direction is deliberately NOISY, never silent: whenever
 # corroboration is empty, unavailable, failed or timed out mid-list,
 # ambiguous, mismatched, or possibly truncated, a genuinely healthy mid-flight
