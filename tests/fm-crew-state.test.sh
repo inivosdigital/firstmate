@@ -68,7 +68,9 @@ make_absent_pipeline_head() {  # <wt-dir> <clone-dir> -> echoes absent sha
 # `axi` surface - no runs-listing subcommand exists under it, verified against
 # the real CLI), and the actual top-level run-listing command, `no-mistakes
 # runs --limit N`, which is plain text - no run id, no quoting - serving
-# FM_FAKE_RUNS_LIST verbatim.
+# FM_FAKE_RUNS_LIST verbatim. FM_FAKE_RUNS_HANG_SECS makes the runs command
+# hang after those rows and then emit FM_FAKE_RUNS_LIST_AFTER_HANG, modeling a
+# query the reader's hard timeout kills with a partial prefix on stdout.
 make_fakebin() {  # <dir> -> echoes fakebin path
   local dir=$1 fb="$1/fakebin"
   mkdir -p "$fb"
@@ -88,7 +90,14 @@ case "${1:-}" in
     esac
     ;;
   runs)
-    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}" ;;
+    printf '%s\n' "${FM_FAKE_RUNS_LIST:-}"
+    # Timed-out-query shape: emit the rows above, hang past the reader's
+    # query timeout, and only then emit the remaining rows - so the reader's
+    # hard timeout kills the query with a partial prefix on stdout.
+    if [ -n "${FM_FAKE_RUNS_HANG_SECS:-}" ]; then
+      sleep "${FM_FAKE_RUNS_HANG_SECS}"
+      printf '%s\n' "${FM_FAKE_RUNS_LIST_AFTER_HANG:-}"
+    fi ;;
 esac
 exit 0
 SH
@@ -187,8 +196,11 @@ reset_fakes() {
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
+  FM_FAKE_RUNS_HANG_SECS=""
+  FM_FAKE_RUNS_LIST_AFTER_HANG=""
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
+  export FM_FAKE_RUNS_HANG_SECS FM_FAKE_RUNS_LIST_AFTER_HANG
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -755,6 +767,51 @@ test_truncated_runs_view_refuses_absent_head_dispensation() {
   esac
   unset FM_CREW_STATE_RUNS_LIMIT
   pass "a runs view that filled its limit refuses the absent-head dispensation"
+}
+
+# Third-review blocking regression: a timed-out (or otherwise failed) `runs`
+# query can leave PARTIAL rows on stdout before the hard timeout kills it. By
+# row count alone that prefix is indistinguishable from a short complete
+# list, and the fail-open query wrapper discarded the one signal - the exit
+# status - telling them apart, so the visible candidate bound while the
+# task's actual live run sat in the unemitted remainder. The scan must keep
+# the status and refuse the dispensation on both paths; the same short view
+# from a query that returns in time still binds.
+test_timed_out_runs_query_refuses_absent_head_dispensation() {
+  reset_fakes
+  local d absent out
+  d=$(new_case timedout-runs-query)
+  make_repo_on_branch "$d/wt" fm/feat-to
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-to.meta" "window=fm:fm-feat-to" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  # The fake emits the corresponding live row, hangs past the query timeout,
+  # and would emit a SECOND live same-branch row afterwards - the killed
+  # query's stdout is a genuine partial prefix, not a complete short list.
+  FM_FAKE_RUNS_LIST="  running    fm/feat-to $(printf '%.7s' "$absent")  2026-08-10 22:05"
+  FM_FAKE_RUNS_HANG_SECS=8
+  FM_FAKE_RUNS_LIST_AFTER_HANG="  running    fm/feat-to deadbee  2026-08-10 22:01"
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-to)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 run_crew_progress "$d" feat-to)
+  [ "$out" = "progress: none" ] \
+    || fail "full path trusted partial stdout from a timed-out runs query: $out"
+  # Coarse path: only the runs list speaks for this branch - same refusal.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  out=$(FM_CREW_STATE_NM_TIMEOUT=1 FM_CREW_STATE_NM_KILL_AFTER=1 run_crew_progress "$d" feat-to)
+  [ "$out" = "progress: none" ] \
+    || fail "coarse path trusted partial stdout from a timed-out runs query: $out"
+  # Control: the SAME single-row view from a query that returns in time is
+  # complete, so the refusals above are attributable to the timeout alone.
+  FM_FAKE_RUNS_HANG_SECS=
+  FM_FAKE_RUNS_LIST_AFTER_HANG=
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-to)"
+  out=$(run_crew_progress "$d" feat-to)
+  case "$out" in
+    "progress: working/"*) ;;
+    *) fail "a completed short runs query no longer binds the sole live run: $out" ;;
+  esac
+  pass "a timed-out runs query refuses the absent-head dispensation"
 }
 
 # ---------------------------------------------------------------------------
@@ -1892,5 +1949,6 @@ test_run_progress_defers_wedge_on_absent_rebased_head
 test_two_live_unresolvable_candidates_fail_closed
 test_gated_running_run_on_absent_head_stays_unattributed
 test_truncated_runs_view_refuses_absent_head_dispensation
+test_timed_out_runs_query_refuses_absent_head_dispensation
 
 echo "all fm-crew-state tests passed"
