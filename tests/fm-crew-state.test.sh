@@ -833,7 +833,9 @@ test_timed_out_runs_query_refuses_absent_head_dispensation() {
 # round-3 refusal, so the torn row bound on the coarse path. A killed byte
 # stream proves nothing about token or row integrity, so a nonzero-exit
 # query's rows must feed NO row-derived binding, strict matches included,
-# while the same row as a whole record from a clean query keeps binding.
+# while the same row as a whole record from a clean query keeps binding -
+# even from a view that filled its limit, which is the paired contrast pin
+# at the end of this test.
 test_torn_match_row_from_timed_out_query_stays_unbound() {
   reset_fakes
   local d out
@@ -863,7 +865,23 @@ test_torn_match_row_from_timed_out_query_stays_unbound() {
     "progress: working/coarse/running/"*) ;;
     *) fail "an intact strict-match row from a clean query no longer binds: $out" ;;
   esac
-  pass "a torn strict-match row from a timed-out query stays unbound"
+  # Contrast pin for the taint-versus-incompleteness split: the same intact
+  # strict-match row from a CLEANLY-EXITED view that FILLED its limit must
+  # ALSO still bind. Incompleteness gates only the count-based dispensation,
+  # never a strict match - a clean filled slice holds whole rows, and
+  # newest-first truncation can only hide match rows, not corrupt one. This
+  # assertion exists to catch one specific future tidy-up: moving the
+  # NM_RUNS_INCOMPLETE check above the strict-match return in
+  # nm_runs_status_for_branch (the round-4 reviewer's minimal patch, rejected
+  # for exactly this cost) would fail HERE and nowhere else in the suite,
+  # because that move permanently kills coarse match attribution on any repo
+  # whose run history reaches the scan limit.
+  out=$(FM_CREW_STATE_RUNS_LIMIT=1 run_crew_progress "$d" feat-tn)
+  case "$out" in
+    "progress: working/coarse/running/"*) ;;
+    *) fail "an intact strict-match row from a clean filled-limit view no longer binds: $out" ;;
+  esac
+  pass "a torn strict-match row stays unbound; an intact one binds even from a filled view"
 }
 
 # ---------------------------------------------------------------------------
