@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # Ultracode enforcement (guardrail #3): holds an ultracode-flagged task back
-# from PR-ready until an independent second pass on its finished diff has been
-# recorded, and until that record still covers the code as it stands
-# (data/research-resource-tiering-synthesis.md). Tracks state via a plain
+# from PR-ready until firstmate has recorded a review against its finished
+# diff, and until that record still covers the code as it stands
+# (data/research-resource-tiering-synthesis.md). That the review was a genuine
+# second pass is firstmate's judgment, not this script's finding; the section
+# below draws the line exactly. Tracks state via a plain
 # marker file, state/<task-id>.ultracode, the same convention as other
 # firstmate state/ markers (state/.afk, state/<id>.turn-ended); it never
 # touches fm-spawn.sh or the task's own meta.
@@ -30,16 +32,23 @@
 #   checking it.
 #   Re-checking that boundary later: the wording drifts back toward the
 #   overclaim on its own, because "the independent review" is the shorter
-#   phrase. Sweep for it rather than re-reading:
-#     grep -nEi 'genuinely|independent|dispatched|second pass|actually reviewed' \
-#       bin/fm-ultracode-guard.sh tests/fm-ultracode-guard.test.sh \
+#   phrase. Sweep for it rather than re-reading, across every surface that
+#   describes this guard, not just this file:
+#     grep -nEi 'genuinely|independent|dispatched|second pass|certif|actually reviewed' \
+#       bin/fm-ultracode-guard.sh tests/fm-ultracode-guard.test.sh docs/scripts.md \
 #       | grep -vE 'independent-review|ultracode_role'
+#     grep -nEi 'ultracode' AGENTS.md docs/architecture.md \
+#       | grep -Ei 'genuinely|independent|dispatched|second pass|certif|actually reviewed'
 #   Every hit must be one of: the NOT-enforced list above, an instruction
 #   telling a supervisor what to go do, or prose naming firstmate as the
 #   asserter. A hit that makes the SCRIPT the subject of dispatch provenance,
 #   reviewer independence, or "a review happened" is the defect. (It is a
 #   documented sweep, not a test, because tests here must not assert
 #   implementation-source bytes.)
+#   The sweep only works if its output is read against that rule INCLUDING the
+#   lines of this header - the round-3 pass printed its own overclaiming
+#   summary line at the top of this file and shipped it anyway, which is how a
+#   fourth review still found three of these in the docs above.
 #
 #   Making independence mechanical would need provenance recorded when the
 #   reviewer is dispatched (its own metadata binding it to the task it reviews),
@@ -88,8 +97,8 @@
 #   either can match while unreviewed commits sit on the PR. Both fallbacks are
 #   therefore refusals here, not warnings, which does mean an ultracode check
 #   cannot be satisfied offline once a PR exists. That cost is deliberate: this
-#   guard's entire job is refusing to certify code nobody reviewed, and it
-#   cannot do that from a head it was unable to confirm.
+#   guard exists to keep a recorded review bound to the code it covered, and a
+#   head it was unable to confirm cannot anchor that binding.
 #
 #   Residual gaps, stated rather than implied: an identical diff rebased onto a
 #   different base can still interact badly with what landed underneath it, and
@@ -112,8 +121,9 @@
 #
 # Usage:
 #   fm-ultracode-guard.sh flag <task-id> [<role>]
-#     Records that <task-id> was dispatched under a crew-dispatch rule whose
-#     resolved profile set ultracode=true. <role> defaults to
+#     Records firstmate's decision that <task-id> owes an ultracode review,
+#     taken from the dispatch profile that set ultracode=true; nothing about
+#     that dispatch is read here. <role> defaults to
 #     "independent-review" (the only role this fleet's rules use today; see
 #     docs/examples/crew-dispatch.json). Firstmate runs this right after
 #     spawning the task.
@@ -149,6 +159,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
 usage() {
   echo "usage: fm-ultracode-guard.sh flag <task-id> [<role>]" >&2
   echo "       fm-ultracode-guard.sh reviewed <task-id> <reviewer-task-id>" >&2
@@ -166,6 +179,28 @@ if [ -z "$CMD" ] || [ -z "$ID" ]; then
   usage
   exit 1
 fi
+
+# Both identifiers become state/ paths, and the reviewer id is additionally
+# compared against the task id to stop a task being recorded as its own
+# reviewer. An id carrying / or .. defeats both at once: "../state/<task>" is a
+# different string from "<task>", so the distinctness comparison passes, while
+# "$STATE/../state/<task>.meta" resolves back to the task's OWN metadata - a
+# clean pass with no second task in existence. Validate at entry,
+# before any comparison or path construction, so no later code sees a value
+# whose string form and path form disagree.
+# fm_task_id_path_safe is bin/fm-pr-lib.sh's existing predicate for exactly
+# this; it is deliberately reused rather than restated here.
+reject_unsafe_id() {
+  local kind=$1 value=$2
+  fm_task_id_path_safe "$value" && return 0
+  {
+    echo "error: $kind must be a plain task id - letters, digits, '.', '_' and '-' only, and not starting with '.'"
+    echo "  got: $value"
+    echo "  It is used to build a path under state/, so a value containing '/' or '..' could reach a file outside it."
+  } >&2
+  exit 1
+}
+reject_unsafe_id "task-id" "$ID"
 
 MARKER="$STATE/$ID.ultracode"
 
@@ -260,9 +295,13 @@ cmd_flag() {
 }
 
 cmd_reviewed() {
-  local reviewer=${3:-} nl wt tip fingerprint record
+  local reviewer=${3:-} wt tip fingerprint record
   [ $# -eq 3 ] || { usage; exit 1; }
   [ -n "$reviewer" ] || { echo "error: reviewed requires a reviewer-task-id" >&2; exit 1; }
+  # Before the distinctness comparison below, which a path alias would other-
+  # wise walk straight past. This also covers the newline that could forge a
+  # second review= record, since the marker file is line-based.
+  reject_unsafe_id "reviewer-task-id" "$reviewer"
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
     echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot review itself" >&2
@@ -270,22 +309,12 @@ cmd_reviewed() {
   fi
   if [ ! -f "$STATE/$reviewer.meta" ]; then
     {
-      echo "error: $reviewer has no recorded state/$reviewer.meta, so this home has no record of that task at all."
-      echo "  That path check is the whole test here; it catches an invented id and nothing more."
+      echo "error: nothing is present at state/$reviewer.meta."
+      echo "  That one path check is the whole test here. It rejects an invented id, and equally a real task whose metadata was retired or never written."
       echo "  That the reviewer was separately dispatched, and reviewed anything, is what you assert by running this - neither is checked."
     } >&2
     exit 1
   fi
-  # The reviewer id is the last field of a review record, so a newline in it is
-  # the one shape that could still forge a second, matching record behind it.
-  nl=$'\n'
-  case "$reviewer" in
-    *"$nl"*)
-      echo "error: reviewer-task-id must not contain a newline" >&2
-      exit 1
-      ;;
-  esac
-
   wt=$(task_worktree) || exit 1
   tip=$(current_tip "$wt") || exit 1
   fingerprint=$(diff_fingerprint "$wt") || exit 1

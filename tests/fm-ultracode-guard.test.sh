@@ -160,9 +160,9 @@ test_reviewed_by_self_is_refused() {
   status=$?
   set -e
 
-  expect_code 1 "$status" "self-review: a task cannot review itself"
+  expect_code 1 "$status" "self-review: the reviewer id must differ from the task id"
   assert_contains "$out" "distinct from task-x1" "self-review: should explain the refusal"
-  pass "fm-ultracode-guard reviewed refuses a task naming itself as its own reviewer"
+  pass "fm-ultracode-guard reviewed refuses a reviewer id equal to the task's own id"
 }
 
 test_reviewed_by_unknown_task_is_refused() {
@@ -176,8 +176,8 @@ test_reviewed_by_unknown_task_is_refused() {
   set -e
 
   expect_code 1 "$status" "unknown-reviewer: a made-up reviewer id must be refused"
-  assert_contains "$out" "no recorded state/made-up-id.meta" "unknown-reviewer: should explain the refusal"
-  pass "fm-ultracode-guard reviewed refuses a reviewer id with no recorded meta"
+  assert_contains "$out" "nothing is present at state/made-up-id.meta" "unknown-reviewer: should explain the refusal"
+  pass "fm-ultracode-guard reviewed refuses a reviewer id with no file at its metadata path"
 }
 
 test_reviewed_by_a_distinct_id_with_meta_passes_check() {
@@ -297,10 +297,85 @@ implementation" "implementation"
   set -e
 
   expect_code 1 "$status" "reviewer-newline: a reviewer id containing a newline must be refused"
-  assert_contains "$out" "must not contain a newline" "reviewer-newline: should explain the refusal"
+  assert_contains "$out" "must be a plain task id" "reviewer-newline: should explain the refusal"
   assert_no_grep "evil-task" "$case_dir/state/task-x1.ultracode" \
     "reviewer-newline: no forged review record should reach the marker"
   pass "fm-ultracode-guard reviewed refuses a reviewer id containing a newline"
+}
+
+# --- identifiers are used to build state/ paths -----------------------------
+
+test_reviewed_refuses_a_reviewer_id_that_aliases_the_task_itself() {
+  # The certification bypass: "../state/task-x1" is a different STRING from
+  # "task-x1", so the distinctness comparison passes, but it resolves to the
+  # task's OWN meta, so the existence check passes too. Before validation this
+  # recorded a review and check returned a clean pass with no second task in
+  # existence - the exact outcome this guard exists to prevent.
+  local case_dir out status
+  case_dir=$(new_case reviewer-self-alias)
+  commit_work "$case_dir" "base
+implementation" "implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+
+  set +e
+  out=$(run_guard "$case_dir" reviewed task-x1 "../state/task-x1" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "reviewer-self-alias: a path alias for the task itself must be refused"
+  assert_contains "$out" "must be a plain task id" "reviewer-self-alias: should explain the refusal"
+  assert_no_grep "^review=" "$case_dir/state/task-x1.ultracode" \
+    "reviewer-self-alias: no review record should reach the marker"
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+  expect_code 1 "$status" "reviewer-self-alias: check must still refuse the task"
+  pass "fm-ultracode-guard reviewed refuses a reviewer id that path-aliases the task itself"
+}
+
+test_reviewed_refuses_a_reviewer_id_escaping_the_state_directory() {
+  # The same alias reaching a .meta OUTSIDE state/ entirely, so a file the fleet
+  # never wrote can satisfy the reviewer check.
+  local case_dir out status
+  case_dir=$(new_case reviewer-escape)
+  commit_work "$case_dir" "base
+implementation" "implementation"
+  mkdir -p "$case_dir/outside"
+  : > "$case_dir/outside/planted.meta"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+
+  set +e
+  out=$(run_guard "$case_dir" reviewed task-x1 "../outside/planted" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "reviewer-escape: a reviewer id reaching outside state/ must be refused"
+  assert_contains "$out" "must be a plain task id" "reviewer-escape: should explain the refusal"
+  assert_no_grep "planted" "$case_dir/state/task-x1.ultracode" \
+    "reviewer-escape: no review record should reach the marker"
+  pass "fm-ultracode-guard reviewed refuses a reviewer id resolving outside state/"
+}
+
+test_flag_refuses_a_task_id_escaping_the_state_directory() {
+  # The task id is interpolated into state/<id>.ultracode the same way, so it
+  # could plant a marker anywhere the process can write.
+  local case_dir out status
+  case_dir=$(new_case flag-id-escape)
+  mkdir -p "$case_dir/outside"
+
+  set +e
+  out=$(run_guard "$case_dir" flag "../outside/escaped" 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "flag-id-escape: a task id reaching outside state/ must be refused"
+  assert_contains "$out" "must be a plain task id" "flag-id-escape: should explain the refusal"
+  if [ -e "$case_dir/outside/escaped.ultracode" ]; then
+    fail "flag-id-escape: a marker was written outside state/"
+  fi
+  pass "fm-ultracode-guard flag refuses a task id resolving outside state/"
 }
 
 # --- review currency --------------------------------------------------------
@@ -757,7 +832,7 @@ implementation" "implementation"
   pass "fm-ultracode-guard reviewed refuses to pin a review to an unconfirmable PR head"
 }
 
-test_reviewer_metadata_alone_satisfies_the_identity_check() {
+test_reviewer_metadata_path_alone_satisfies_the_reviewer_check() {
   # A DOCUMENTED LIMIT, pinned so it stays deliberate. The reviewer check is a
   # distinct id plus a file existing at the expected metadata path, and nothing
   # more: the file here is EMPTY and still satisfies it. Dispatch provenance,
@@ -766,7 +841,7 @@ test_reviewer_metadata_alone_satisfies_the_identity_check() {
   # `reviewed` (see the script header). Anything that makes independence
   # mechanical has to change this test knowingly rather than by accident.
   local case_dir status
-  case_dir=$(new_case reviewer-identity-limit)
+  case_dir=$(new_case reviewer-path-limit)
   commit_work "$case_dir" "base
 implementation" "implementation"
   : > "$case_dir/state/unrelated-helper.meta"
@@ -779,8 +854,8 @@ implementation" "implementation"
   status=$?
   set -e
 
-  expect_code 0 "$status" "reviewer-identity-limit: metadata alone is what the identity check enforces"
-  pass "fm-ultracode-guard treats reviewer metadata as identity, not as proof a review happened"
+  expect_code 0 "$status" "reviewer-path-limit: a file at the metadata path is all the reviewer check enforces"
+  pass "fm-ultracode-guard treats a file at the reviewer metadata path as the whole reviewer check"
 }
 
 test_check_refuses_when_the_current_diff_cannot_be_determined() {
@@ -846,6 +921,9 @@ test_flag_rejects_newline_injection_in_role
 test_flag_rejects_role_with_disallowed_characters
 test_flag_accepts_role_with_digits_and_underscore
 test_reviewed_refuses_a_reviewer_id_containing_a_newline
+test_reviewed_refuses_a_reviewer_id_that_aliases_the_task_itself
+test_reviewed_refuses_a_reviewer_id_escaping_the_state_directory
+test_flag_refuses_a_task_id_escaping_the_state_directory
 test_check_refuses_once_commits_land_past_the_review
 test_check_passes_when_the_review_is_current
 test_check_passes_after_a_rebase_that_preserves_the_diff
@@ -863,7 +941,7 @@ test_check_passes_against_a_freshly_resolved_pr_head
 test_check_refuses_when_only_the_recorded_pr_head_remains
 test_check_refuses_when_the_pr_head_is_unreachable
 test_reviewed_refuses_to_pin_against_an_unconfirmable_pr_head
-test_reviewer_metadata_alone_satisfies_the_identity_check
+test_reviewer_metadata_path_alone_satisfies_the_reviewer_check
 test_check_refuses_when_the_current_diff_cannot_be_determined
 test_reviewed_refuses_when_the_diff_cannot_be_determined
 test_reviewed_reports_the_commit_it_pinned
