@@ -271,7 +271,10 @@ test_block_construct_inert_data_allowed() {
   for shape in "${BLOCK_SHAPES[@]}"; do
     assert_policy "block-$shape-cat-heredoc" allow "$(block_wrap "$shape" "$data")"
   done
-  assert_policy block-until-python-heredoc allow "$(block_wrap until $'python3 <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  # `python3` used to be allowed here on the grounds that this particular body
+  # is a Python syntax error. That reasoning does not survive a body that is
+  # valid Python, and an interpreter runs what it reads, so it is not a reader.
+  assert_policy block-until-python-heredoc $'deny\tbroad-watcher-kill' "$(block_wrap until $'python3 <<\'EOF\'\npkill -f fm-watch\nEOF')"
   # A here-document body is data only when the command consuming it can be named
   # and does nothing else with it. Piping it into a shell or storing it in a file
   # both put the body back in play, so both stay refused.
@@ -333,6 +336,81 @@ test_block_construct_executed_quoted_payload_denied() {
   assert_policy block-until-quoted-substitution $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo "$(pkill -f fm-watch)"')"
 }
 
+# Every command trusted to read a here-document body and do nothing else, each
+# asked what it does with a body that would run if the command ran anything.
+# One assertion per name, so the list is a set of visible claims that a reader
+# can challenge one at a time rather than a set in the source.
+HEREDOC_READERS=(cat head tail wc nl rev tr cut fold grep egrep fgrep cksum md5sum sha1sum sha256sum sha512sum base64)
+
+test_block_construct_heredoc_reader_allowlist() {
+  local reader
+  for reader in "${HEREDOC_READERS[@]}"; do
+    assert_policy "heredoc-reader-$reader" allow "$(block_wrap until "$reader <<EOF"$'\npkill -f fm-watch\nEOF')"
+  done
+}
+
+# The defect this suite missed in its third round: the here-document rule asked
+# whether the consumer was one of three shell names, so every other command that
+# runs what it reads got its body cut. The question is what the consumer does
+# with its input, and only an allowlist can answer it.
+test_block_construct_heredoc_non_reader_denied() {
+  local consumer
+  # Shells that are simply not spelled `sh`, `bash` or `zsh`.
+  for consumer in dash ksh ksh93 mksh yash posh "busybox sh"; do
+    assert_policy "heredoc-shell-${consumer// /-}" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+  done
+  # Interpreters, which run what they read. The python body is valid python.
+  assert_policy heredoc-python-executing $'deny\tbroad-watcher-kill' \
+    "$(block_wrap until $'python3 <<EOF\nimport os\nos.system("pkill -f fm-watch")\nEOF')"
+  for consumer in perl ruby node php lua tclsh expect "gawk -f -" "sed -f -"; do
+    assert_policy "heredoc-interpreter-${consumer%% *}" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+  done
+  # Commands that write what they read where it can be run later. The doc already
+  # promised this for `cat <<EOF > /tmp/o`; it has to hold for a writer too.
+  # `sort -o FILE` and `uniq - FILE` name an output file as an ordinary
+  # argument, so the redirection rule never sees it. Neither looks like a writer,
+  # which is why both are off the reader list.
+  for consumer in "tee /tmp/o" "dd of=/tmp/o" "cp /dev/stdin /tmp/o" "sponge /tmp/o" "crontab -" "at now" batch "sort -o /tmp/o" "uniq - /tmp/o" sort uniq; do
+    assert_policy "heredoc-writer-${consumer%% *}" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+  done
+  # Commands that hand the body to another machine or another process.
+  for consumer in "ssh host" "ssh -T host" "docker exec -i c sh" "kubectl exec -i pod --" "systemd-run --pipe bash" "xargs -I{} sh -c {}" parallel "make -f -" gdb ed patch; do
+    assert_policy "heredoc-elsewhere-${consumer%% *}" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+  done
+  # A command the parser has never heard of, and a reader's name at a path or
+  # behind a wrapper, which is not that reader.
+  assert_policy heredoc-unknown-consumer $'deny\tbroad-watcher-kill' "$(block_wrap until $'notes-tool <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-absolute-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'/bin/cat <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-relative-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'./cat <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-sudo-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'sudo cat <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-env-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'env cat <<EOF\npkill -f fm-watch\nEOF')"
+  # The protected-path side of the same rule, so this is not specific to kills.
+  assert_policy heredoc-dash-protected $'deny\tunclassifiable-protected-command' "$(block_wrap until $'dash <<EOF\nbin/fm-watch.sh\nEOF')"
+}
+
+# One withdrawal has to govern the whole cut. A program that can give a name a
+# new meaning cannot be trusted about `cat` either, and `cat` is the half where
+# PATH actually bites, because every reader on the list is an external program.
+test_block_construct_withdrawal_covers_heredocs() {
+  local prefix
+  local body
+  body=$(block_wrap until $'cat <<EOF\npkill -f fm-watch\nEOF')
+  for prefix in 'PATH=/tmp/x' 'PATH+=:/tmp/x' 'export PATH=/tmp/x' 'alias cat=bash' 'hash -p /tmp/x/bash cat' 'eval "$SETUP"' '. /tmp/defs.sh' 'trap "$SETUP" DEBUG' '{ alias cat=bash; }' 'builtin alias cat=bash'; do
+    assert_policy "heredoc-withdrawn-${prefix%% *}" $'deny\tbroad-watcher-kill' "$(printf '%s\n%s' "$prefix" "$body")"
+  done
+  assert_policy heredoc-withdrawn-function $'deny\tbroad-watcher-kill' "$(printf 'cat() { bash; }\n%s' "$body")"
+  assert_policy heredoc-withdrawn-protected $'deny\tunclassifiable-protected-command' \
+    "$(printf 'PATH=/tmp/x\n%s' "$(block_wrap until $'cat <<EOF\nbin/fm-watch.sh\nEOF')")"
+  # A comment is not a claim about any command, so the withdrawal leaves it alone.
+  assert_policy comment-survives-withdrawal allow "$(printf '. /tmp/defs.sh\n%s' "$(block_wrap until ': # pkill -f fm-watch')")"
+  # And an ordinary program still gets the here-document idiom the branch exists for.
+  assert_policy heredoc-idiom-still-allowed allow "$(printf 'export TZ=UTC\n%s' "$body")"
+}
+
 # The defect this suite missed in its second round: reading a quoted argument as
 # data is a claim about that argument and about the name in front of it, and both
 # halves can be false. An argument can assign while it expands, and a name can
@@ -377,6 +455,37 @@ test_block_construct_sink_name_defeated_denied() {
   # Order does not matter: the rebinding is a property of the program, not of
   # what precedes the sink.
   assert_policy rebind-after-use $'deny\tbroad-watcher-kill' "$(printf '%s\n. /tmp/defs.sh' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  # `builtin` reaches every one of those names without being the name itself, so
+  # the command word has to resolve through it.
+  local rebinder
+  for rebinder in 'eval "$S"' '. /tmp/x' 'alias echo=eval' 'hash -p /tmp/x echo' 'enable -n echo' 'trap "$S" DEBUG'; do
+    assert_policy "rebind-builtin-${rebinder%% *}" $'deny\tbroad-watcher-kill' \
+      "$(printf 'builtin %s\n%s' "$rebinder" "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  done
+}
+
+# Every name still reachable as a sink, against each form that should stop it
+# being one. The allowlist names four builtins; a path, a wrapper that runs the
+# external program, an argument that assigns while it expands, and an output
+# that goes somewhere it can run are the ways a program can spell one of those
+# four names and not get one.
+test_block_construct_sink_forms_denied() {
+  local sink
+  local wrapper
+  for sink in : true false echo; do
+    # The bare form is what the allowlist is for, and it stays permitted.
+    assert_policy "sinkform-$sink-bare" allow "$(block_wrap until "$sink 'pkill -f fm-watch'")"
+    # `command` and `builtin` do resolve to the builtin; they are refused with
+    # the rest rather than carved out, because an exception is how this went
+    # wrong before. That costs `command echo '<text>'` and is the price.
+    for wrapper in env exec nohup sudo command builtin "timeout 5"; do
+      assert_policy "sinkform-$sink-${wrapper%% *}" $'deny\tbroad-watcher-kill' "$(block_wrap until "$wrapper $sink 'pkill -f fm-watch'")"
+    done
+    assert_policy "sinkform-$sink-path" $'deny\tbroad-watcher-kill' "$(block_wrap until "/usr/bin/${sink/:/true} 'pkill -f fm-watch'")"
+    assert_policy "sinkform-$sink-assigning-arg" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink \${P:=\"fm-watch\"}; pkill -f \"\$P\"")"
+    assert_policy "sinkform-$sink-into-shell" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink 'pkill -f fm-watch' | bash")"
+    assert_policy "sinkform-$sink-to-file" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink 'pkill -f fm-watch' > /tmp/o")"
+  done
 }
 
 # The defect this suite missed in its first round: a name bound in one part of a
@@ -772,7 +881,11 @@ test_direct_policy_contract
 test_block_construct_inert_data_allowed
 test_block_construct_inert_text_allowed
 test_block_construct_executed_quoted_payload_denied
+test_block_construct_heredoc_reader_allowlist
+test_block_construct_heredoc_non_reader_denied
+test_block_construct_withdrawal_covers_heredocs
 test_block_construct_sink_name_defeated_denied
+test_block_construct_sink_forms_denied
 test_block_construct_binding_outlives_its_branch
 test_block_construct_unmodelled_input_is_tainted
 test_block_construct_executed_kill_denied

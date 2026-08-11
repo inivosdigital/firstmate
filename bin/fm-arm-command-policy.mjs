@@ -758,6 +758,7 @@ const WRAPPER_OPTIONS = {
   env: { noArgument: new Set(["0", "i", "P", "v"]), takesArgument: new Set(["a", "C", "S", "u"]) },
   exec: { noArgument: new Set(["c", "l"]), takesArgument: new Set(["a"]) },
   nohup: { noArgument: new Set(), takesArgument: new Set() },
+  builtin: { noArgument: new Set(), takesArgument: new Set() },
   sudo: { noArgument: new Set(["A", "B", "b", "E", "e", "H", "i", "K", "k", "l", "N", "n", "P", "S", "s", "v", "V"]), takesArgument: new Set(["C", "D", "g", "h", "p", "r", "R", "t", "T", "u", "U"]) },
   timeout: { noArgument: new Set(["f", "p", "v"]), takesArgument: new Set(["k", "s"]) },
 };
@@ -767,6 +768,7 @@ const WRAPPER_LONG_OPTIONS = {
   env: { noArgument: new Set(["ignore-environment", "null", "help", "version"]), takesArgument: new Set(["argv0", "block-signal", "chdir", "default-signal", "ignore-signal", "split-string", "unset"]) },
   exec: { noArgument: new Set(), takesArgument: new Set() },
   nohup: { noArgument: new Set(["help", "version"]), takesArgument: new Set() },
+  builtin: { noArgument: new Set(), takesArgument: new Set() },
   sudo: { noArgument: new Set(["askpass", "background", "bell", "edit", "help", "login", "non-interactive", "preserve-env", "preserve-groups", "remove-timestamp", "reset-timestamp", "set-home", "shell", "stdin", "validate", "version"]), takesArgument: new Set(["chdir", "chroot", "close-from", "command-timeout", "group", "host", "other-user", "prompt", "role", "type", "user"]) },
   timeout: { noArgument: new Set(["foreground", "preserve-status", "verbose", "help", "version"]), takesArgument: new Set(["kill-after", "signal"]) },
 };
@@ -831,7 +833,10 @@ export function commandPosition(tokens) {
   let command = words[index];
   while (command) {
     const name = basename(command.value);
-    if (name === "exec" || name === "command" || name === "sudo" || name === "nohup") {
+    // `builtin` is here because `builtin eval "$S"` is `eval "$S"`. Without it
+    // the command word reads as `builtin` and everything that inspects a
+    // command name - the kill rules, the rebinding list - looks past what runs.
+    if (name === "exec" || name === "command" || name === "sudo" || name === "nohup" || name === "builtin") {
       wrappers.push(name);
       const options = consumeWrapperOptions(name, words, index + 1);
       unresolvedWrapperOption ||= options.unresolved;
@@ -1119,12 +1124,37 @@ function seedBlockTaint(program, context, command) {
 // membership rule; `echo` covers the same example forms.
 const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo"]);
 
-// Commands that change what a name resolves to. A sink name is the builtin it
-// looks like only while nothing has rebound it, and an alias, a disabled
-// builtin, a hashed path, a sourced file, or a string kept to be evaluated
-// later all rebind it silently. The parser cannot follow any of those, so their
-// presence anywhere in the program withdraws the allowlist's claim rather than
-// being reasoned around.
+// Commands whose standard input the parser is confident is read and nothing
+// else: each copies, counts, filters or digests its input, and none of them
+// interprets any of it as a program or writes it anywhere it could be run.
+//
+// The same direction as the list above, for the same reason, and this one was
+// a blocklist of three shell names until it was found to admit `dash`, `ksh`,
+// `python3`, `ssh host`, `at now`, `tee /tmp/o` and thirty others. A list of
+// the commands that execute what they read cannot be finished, so this one
+// names the commands that do not.
+//
+// `sed` and `awk` are absent because `-f -` makes the input a program, `tee`
+// and `dd` because they write it to a file, and every interpreter because
+// running its input is what it is for. Their bodies stay in view.
+//
+// `sort` and `uniq` are absent for the same reason as `tee`, which is easy to
+// miss because neither looks like a writer: `sort -o FILE` and `uniq - FILE`
+// both take an output file as an ordinary argument, with no shell redirection
+// for the redirection rule to catch. A name earns a place here by having no way
+// at all to put its input somewhere it can be run later, not by usually not
+// doing so.
+const INPUT_READER_COMMANDS = new Set([
+  "cat", "head", "tail", "wc", "nl", "rev", "tr", "cut", "fold",
+  "grep", "egrep", "fgrep", "cksum", "md5sum", "sha1sum", "sha256sum", "sha512sum", "base64",
+]);
+
+// Commands that change what a name resolves to. Every entry in either list
+// above is the command it spells only while nothing has rebound it, and an
+// alias, a disabled builtin, a hashed path, a sourced file, or a string kept to
+// be evaluated later all rebind it silently. The parser cannot follow any of
+// those, so their presence anywhere in the program withdraws both allowlists
+// rather than being reasoned around.
 //
 // This one is a blocklist, unavoidably, but over a closed and small domain -
 // the shell's own name-resolution builtins - rather than over every program on
@@ -1134,10 +1164,13 @@ const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo"]);
 // option keeps reading its quoted text as text.
 const NAME_REBINDING_COMMANDS = new Set(["alias", "unalias", "enable", "hash", "eval", "source", ".", "trap"]);
 
-// Whether this program does anything that could make a sink name mean something
-// other than the builtin it spells: a function definition, one of the commands
-// above, or a new PATH, which `assignmentName` sees wherever the assignment
-// sits - on its own, as a prefix, or as an argument to `export`.
+// Whether this program does anything that could make a command name mean
+// something other than the name it spells: a function definition, one of the
+// commands above, or a new PATH, seen wherever the assignment sits - on its
+// own, as a prefix, or as an argument to `export`.
+//
+// PATH matters most to the reader allowlist, whose members are all external
+// programs, so `PATH+=` counts exactly as `PATH=` does.
 //
 // A group is searched rather than assumed guilty. `(date)` and `{ date; }`
 // rebind nothing, and reading their contents with the same lexer costs one pass
@@ -1150,7 +1183,7 @@ function programRebindsNames(program, depth = 0) {
   for (const tokens of program.nodes) {
     for (let index = 0; index < tokens.length; index += 1) {
       const token = tokens[index];
-      if (token.type === "word" && assignmentName(token) === "PATH") return true;
+      if (token.type === "word" && /^PATH\+?=/.test(token.value)) return true;
       if (token.type !== "group") continue;
       // `name()` - an empty subshell after a word is a function definition and
       // is never anything else, since `( )` alone is not a command.
@@ -1175,21 +1208,41 @@ function groupRebindsNames(group, depth) {
   return programRebindsNames(program, depth + 1);
 }
 
-// The preconditions for reading any part of a node as data. The parser has to
-// be able to name the command, that command must not be a shell, and the node
-// must not hand what it holds to anything else: `cat <<EOF` prints its body,
-// but `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a
-// body attached to `done` goes wherever the loop sends its input, which is not
+// The preconditions for reading any part of a node as data, shared by both
+// halves of the cut so that one answer governs the whole of it.
+//
+// The parser has to be able to name the command, and the node must not hand
+// what it holds to anything else: `cat <<EOF` prints its body, but
+// `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a body
+// attached to `done` goes wherever the loop sends its input, which is not
 // modelled. Anything short of a positive answer leaves the bytes in the text.
+//
+// The command must be a bare name with no wrapper in front of it, because both
+// allowlists below name specific commands and neither `/tmp/x/cat` nor
+// `env echo` is the command it spells: the first is whatever sits at that path,
+// and `env`, `exec`, `nohup`, `timeout` and `sudo` all run the external program
+// rather than the builtin. `command` and `builtin` do resolve to the builtin,
+// but they are excluded with the rest rather than carved out, because a list
+// whose entry needs an exception is how the last two rounds went wrong.
 function nodeConsumesItsInput(tokens, adjacent) {
   const position = commandPosition(tokens);
   if (!position.command || !position.command.literal || position.command.subs.length > 0) return null;
-  if (position.unresolvedWrapperOption || shellInvocation(position)) return null;
+  if (position.wrappers.length > 0 || position.command.value.includes("/")) return null;
   for (const side of [adjacent?.before, adjacent?.after]) {
     if (side === "|" || side === "|&") return null;
   }
   if (!tokens.every((token) => token.type !== "redir" || Array.isArray(token.heredocRange))) return null;
   return position;
+}
+
+// Here-document bodies this node reads as data. The command has to be on the
+// reader allowlist; every other command keeps its body in the text, including
+// the shells, every other interpreter, anything that writes what it reads to a
+// file, and anything the parser has never heard of.
+function dataHeredocRanges(tokens, adjacent) {
+  const position = nodeConsumesItsInput(tokens, adjacent);
+  if (!position || !INPUT_READER_COMMANDS.has(position.command.value)) return [];
+  return tokens.filter((token) => token.type === "redir" && Array.isArray(token.heredocRange)).map((token) => token.heredocRange);
 }
 
 // Quoted runs this node reads as data. Only argument words qualify: a quoted
@@ -1202,15 +1255,11 @@ function nodeConsumesItsInput(tokens, adjacent) {
 // NAME, and `$X"..."` is not literal text either - and the command in front of
 // it says nothing about that.
 //
-// The command word must also be a bare name. The allowlist describes builtins,
-// and `/bin/echo` or `./echo` is whatever is at that path. Anyone able to place
-// such a binary can simply run it, so this is not a defence; it is what makes
-// the sentence about builtins true.
+// The bare-name and no-wrapper requirements that make the allowlist's sentence
+// about builtins true live in the shared precondition above.
 function dataArgumentRanges(tokens, adjacent) {
   const position = nodeConsumesItsInput(tokens, adjacent);
-  if (!position) return [];
-  const command = position.command.value;
-  if (command.includes("/") || !DATA_SINK_COMMANDS.has(command)) return [];
+  if (!position || !DATA_SINK_COMMANDS.has(position.command.value)) return [];
   const ranges = [];
   for (const word of position.words.slice(position.index + 1)) {
     if (!word.literal || word.subs.length > 0) continue;
@@ -1230,15 +1279,15 @@ function dataArgumentRanges(tokens, adjacent) {
 // command; the unchanged raw check simply reads what is left.
 function executableProgramText(command, program, comments) {
   const ranges = [...comments];
-  const sinksAreTrustworthy = !programRebindsNames(program);
-  for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
+  // One withdrawal over the whole cut. Both halves read a command name and
+  // conclude something about bytes from it, so a program that can give a name a
+  // new meaning takes the claim away from both. Comments survive it: they are
+  // not a claim about any command.
+  const namesAreTrustworthy = !programRebindsNames(program);
+  for (let nodeIndex = 0; namesAreTrustworthy && nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const adjacent = program.adjacency?.[nodeIndex];
-    const heredocs = tokens.filter((token) => token.type === "redir" && Array.isArray(token.heredocRange));
-    if (heredocs.length > 0 && nodeConsumesItsInput(tokens, adjacent)) {
-      for (const token of heredocs) ranges.push(token.heredocRange);
-    }
-    if (!sinksAreTrustworthy) continue;
+    for (const range of dataHeredocRanges(tokens, adjacent)) ranges.push(range);
     for (const range of dataArgumentRanges(tokens, adjacent)) ranges.push(range);
   }
   if (ranges.length === 0) return command;
