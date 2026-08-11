@@ -27,6 +27,16 @@
 #   What genuinely keeps the gate useful is the list below being small, true,
 #   and cheap enough that nobody routes around it.
 #
+#   Timing windows are that same argument wearing a stopwatch, so they end the
+#   same way. A process that can swap the marker path between two of this
+#   script's syscalls is a same-user process, and it can equally rewrite the
+#   marker outright in one unhurried call, with no timing at all. Binding the
+#   write to its destination would move the wall, not remove it. So the shape
+#   here is deliberately the plain one: publication refuses a non-regular
+#   destination it can see, and does not defend the window between looking and
+#   moving. If you are about to add a syscall to defend the gap between two
+#   other syscalls, that is the phantom again.
+#
 # What this guard establishes, and what it does not
 #   Mechanically enforced, and this list is exhaustive:
 #     - a flagged task cannot pass with no review recorded at all;
@@ -51,8 +61,9 @@
 #     - the marker is published by rename, so a half-written one is never
 #       observable, and a marker that is a symlink is replaced rather than
 #       written through - including a link to a directory;
-#     - a marker path that exists but is not a regular file is refused by flag,
-#       reviewed and check alike, rather than read as "absent, so not flagged".
+#     - a marker path that is in place and not a regular file when the command
+#       looks is refused by flag, reviewed and check alike, rather than read as
+#       "absent, so not flagged" (the window above is the stated limit).
 #       Absence is the one permissive state, and it stays permissive; a
 #       directory or other object sitting at that path is a different state and
 #       is reported, not repaired and not passed.
@@ -301,28 +312,6 @@ hold_marker_lock() {
 # other guard command can observe the gap, and check treats an absent marker as
 # "not flagged" - a gap another reader could misread. The lock is what makes
 # the two-step sound; do not lift this out from under it.
-# refuse_malformed_marker: a marker path that EXISTS but cannot be read as a
-# regular file is malformed, and malformed is not the same state as absent.
-# Absent rightly means "not flagged, nothing to enforce" and stays permissive.
-# Collapsing malformed into it meant a flagged task whose marker path was a
-# directory sailed through the gate that exists to refuse it. Readers refuse
-# instead, and deliberately do not repair: rearranging odd state on a caller's
-# behalf is the shape that put a stray file outside state/ two rounds ago.
-refuse_malformed_marker() {
-  if [ -f "$MARKER" ]; then
-    return 0
-  fi
-  if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
-    {
-      echo "error: $MARKER exists but is not a regular file, so $ID's ultracode state cannot be read."
-      echo "  It is left exactly as found - nothing here removes or repairs it."
-      echo "  Inspect it, clear it deliberately, then re-flag $ID if it still owes a review."
-    } >&2
-    exit 1
-  fi
-  return 0
-}
-
 write_marker() {
   local tmp
   # A symlink of any kind is replaced below, which is settled behaviour. A real
@@ -344,6 +333,37 @@ write_marker() {
     rm -f "$MARKER"
   fi
   mv -f "$tmp" "$MARKER"
+}
+
+# classify_marker: decide once what is at the marker path, for the readers.
+# Sets MARKER_STATE to `regular` or `absent`. It does not return at all for
+# anything else: a path that EXISTS but cannot be read as a regular file is
+# malformed, which is not the same state as absent, and the command stops
+# there. Absent rightly means "not flagged, nothing to enforce" and stays
+# permissive; collapsing malformed into it meant a flagged task whose marker
+# path was a directory sailed through the gate that exists to refuse it.
+# Nothing here repairs the path, deliberately: rearranging odd state on a
+# caller's behalf is the shape that put a stray file outside state/ two rounds
+# ago.
+#
+# The state is returned in a variable rather than on stdout because the refusal
+# is an exit: called as $(classify_marker) the exit would end the substitution's
+# subshell and the caller would sail on with an empty answer. Call it plainly.
+MARKER_STATE=
+classify_marker() {
+  if [ -f "$MARKER" ]; then
+    MARKER_STATE=regular
+    return 0
+  fi
+  if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    {
+      echo "error: $MARKER exists but is not a regular file, so $ID's ultracode state cannot be read."
+      echo "  It is left exactly as found - nothing here removes or repairs it."
+      echo "  Inspect it, clear it deliberately, then re-flag $ID if it still owes a review."
+    } >&2
+    exit 1
+  fi
+  MARKER_STATE=absent
 }
 
 # marker_generation: the token flag stamps when it (re)opens the requirement.
@@ -483,8 +503,8 @@ cmd_reviewed() {
   # Ahead of the absence message below, so a marker path that is there but
   # unreadable is not reported as "never flagged", which is a different problem
   # with a different fix.
-  refuse_malformed_marker
-  [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
+  classify_marker
+  [ "$MARKER_STATE" = regular ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
     echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot review itself" >&2
     exit 1
@@ -522,12 +542,12 @@ cmd_check() {
   # Taken before the marker is read, so the whole read-then-compare cannot
   # interleave with a flag or a reviewed on the same task.
   hold_marker_lock
-  refuse_malformed_marker
-  # Absent, which the line above has just told apart from malformed: this task
-  # was never flagged, so there is nothing to enforce. (Worded without the
-  # obvious adverb on purpose - it is one of the sweep words in the header, and
-  # a false positive there costs every later reader a triage.)
-  if [ ! -f "$MARKER" ]; then
+  classify_marker
+  # Absent, which the line above told apart from malformed: this task was never
+  # flagged, so there is nothing to enforce. (Worded without the obvious adverb
+  # on purpose - it is one of the sweep words in the header, and a false
+  # positive there costs every later reader a triage.)
+  if [ "$MARKER_STATE" = absent ]; then
     exit 0
   fi
   local role records unpinned wt current record body fingerprint latest gen
