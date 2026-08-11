@@ -1161,6 +1161,12 @@ effort_flag_for_harness() {
             gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna)
               printf -- '-c %s ' "$(shell_quote "model_reasoning_effort=\"max\"")"
               ;;
+            ''|default)
+              # No explicit model was passed, so acceptance can't be checked
+              # against the per-family table above; drop the flag rather than
+              # guess, but say so loudly instead of leaving a silent gap.
+              echo "fm-spawn: warning: codex effort=max requested with no explicit --model; omitting the reasoning-effort flag because acceptance is per-family (see .agents/skills/harness-adapters/SKILL.md's codex row)" >&2
+              ;;
           esac
           ;;
       esac

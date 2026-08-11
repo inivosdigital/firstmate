@@ -109,7 +109,9 @@ Use the fallback only when neither the captain nor applicable standing configura
 Use `low` for well-understood work with an explicit bounded path and `xhigh` for ambiguous investigation or design.
 Choose intermediate levels proportionally as complexity, uncertainty, blast radius, or open-ended reasoning increases.
 When a verified adapter lacks `xhigh`, cap the choice at its highest supported non-`max` level rather than omitting the intended effort silently.
-Never select `max` from this fallback; use it only when the captain has explicitly expressed that per-task or standing preference.
+`max` may be selected from this fallback on firstmate's own judgment, without a captain instruction, subject to two conditions.
+First, it stays proportional: `max` sits at the top of the same scale as the sentences above, so it belongs to work whose depth, ambiguity, or blast radius genuinely exceeds what `xhigh` serves, never to ordinary work and never as a default choice.
+Second, the target model has to accept it - acceptance is a per-family fact, not a per-harness one, per the launch-profile table below - and selecting `max` for a model that rejects it must behave exactly as that table and `bin/fm-spawn.sh` say, never silently degrading into no effort flag at all.
 
 The supported launch-profile flags below are verified locally; each row records its evidence.
 

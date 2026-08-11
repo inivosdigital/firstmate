@@ -460,6 +460,24 @@ test_codex_threads_max_effort_for_5_6_family() {
   pass "codex threads max effort for the gpt-5.6 family only"
 }
 
+test_codex_warns_instead_of_silently_dropping_max_without_model() {
+  local rec id out status launch
+  id=profile-codex-max-nomodel-z4c
+  rec=$(make_spawn_case profile-codex-max-nomodel codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with max effort and no explicit model should still succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex default max
+  assert_contains "$out" "codex effort=max requested with no explicit --model" \
+    "codex spawn dropped max without an explicit model but did not warn about it"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "model_reasoning_effort" \
+    "codex launch must omit max reasoning effort when no model can be checked against the accepted family"
+  pass "codex warns instead of silently dropping max effort when no model is given"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -733,6 +751,7 @@ test_only_claude_launch_carries_autocompact_window
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
 test_codex_threads_max_effort_for_5_6_family
+test_codex_warns_instead_of_silently_dropping_max_without_model
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
