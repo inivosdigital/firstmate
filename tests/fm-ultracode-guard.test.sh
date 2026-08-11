@@ -951,6 +951,53 @@ test_flag_replaces_a_marker_directory_symlink_instead_of_writing_into_it() {
   pass "fm-ultracode-guard flag replaces a marker directory symlink rather than writing into it"
 }
 
+test_flag_refuses_a_marker_path_that_is_a_directory() {
+  # A real directory at the marker path, rather than a link to one: `mv` reads
+  # the destination as a directory just the same and deposits the temp file
+  # inside it, so flag reported success with nothing published where check
+  # looks. Refusing is the answer, not repair - what it is doing sitting there
+  # is a question for a person.
+  local case_dir status output leftovers
+  case_dir=$(new_case marker-dirobject)
+  mkdir -p "$case_dir/state/task-x1.ultracode"
+
+  set +e
+  output=$(run_guard "$case_dir" flag task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "marker-dirobject: flag must refuse a directory at the marker path"
+  assert_contains "$output" "not a regular file" \
+    "marker-dirobject: the refusal should say what is wrong with the path"
+  assert_present "$case_dir/state/task-x1.ultracode" \
+    "marker-dirobject: flag must leave the directory exactly as it found it"
+  # First stray entry by name rather than a count, as above.
+  leftovers=$(find "$case_dir/state/task-x1.ultracode" -mindepth 1 -print -quit)
+  if [ -n "$leftovers" ]; then
+    fail "marker-dirobject: $leftovers was written inside the directory"
+  fi
+  pass "fm-ultracode-guard flag refuses a marker path that is a directory"
+}
+
+test_check_refuses_a_marker_path_that_is_a_directory() {
+  # The half that matters. Absent means "not flagged, nothing to enforce" and
+  # stays permissive; malformed is a different state, and reading it as absent
+  # let a flagged task clear the gate that exists to hold it.
+  local case_dir status output
+  case_dir=$(new_case marker-dircheck)
+  mkdir -p "$case_dir/state/task-x1.ultracode"
+
+  set +e
+  output=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "marker-dircheck: check must refuse a directory at the marker path, not pass it"
+  assert_contains "$output" "not a regular file" \
+    "marker-dircheck: the refusal should say what is wrong with the path"
+  pass "fm-ultracode-guard check refuses a marker path that is a directory"
+}
+
 # --- the diff must be established, never inferred ---------------------------
 
 test_check_passes_against_a_freshly_resolved_pr_head() {
@@ -1197,5 +1244,7 @@ test_check_refuses_after_a_rebase_over_a_same_file_base_advance
 test_reflagging_retires_a_review_recorded_against_the_old_requirement
 test_flag_replaces_a_marker_symlink_instead_of_writing_through_it
 test_flag_replaces_a_marker_directory_symlink_instead_of_writing_into_it
+test_flag_refuses_a_marker_path_that_is_a_directory
+test_check_refuses_a_marker_path_that_is_a_directory
 
 echo "# all fm-ultracode-guard tests passed"

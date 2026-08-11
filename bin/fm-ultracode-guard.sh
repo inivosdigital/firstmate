@@ -50,7 +50,12 @@
 #       run, so no two of them interleave;
 #     - the marker is published by rename, so a half-written one is never
 #       observable, and a marker that is a symlink is replaced rather than
-#       written through - including a link to a directory.
+#       written through - including a link to a directory;
+#     - a marker path that exists but is not a regular file is refused by flag,
+#       reviewed and check alike, rather than read as "absent, so not flagged".
+#       Absence is the one permissive state, and it stays permissive; a
+#       directory or other object sitting at that path is a different state and
+#       is reported, not repaired and not passed.
 #   NOT enforced: that the reviewer id names a task this home really dispatched,
 #   that it is independent of the task under review, or that it reviewed
 #   anything at all. Those three are assertions the caller makes by running
@@ -296,8 +301,42 @@ hold_marker_lock() {
 # other guard command can observe the gap, and check treats an absent marker as
 # "not flagged" - a gap another reader could misread. The lock is what makes
 # the two-step sound; do not lift this out from under it.
+# refuse_malformed_marker: a marker path that EXISTS but cannot be read as a
+# regular file is malformed, and malformed is not the same state as absent.
+# Absent rightly means "not flagged, nothing to enforce" and stays permissive.
+# Collapsing malformed into it meant a flagged task whose marker path was a
+# directory sailed through the gate that exists to refuse it. Readers refuse
+# instead, and deliberately do not repair: rearranging odd state on a caller's
+# behalf is the shape that put a stray file outside state/ two rounds ago.
+refuse_malformed_marker() {
+  if [ -f "$MARKER" ]; then
+    return 0
+  fi
+  if [ -e "$MARKER" ] || [ -L "$MARKER" ]; then
+    {
+      echo "error: $MARKER exists but is not a regular file, so $ID's ultracode state cannot be read."
+      echo "  It is left exactly as found - nothing here removes or repairs it."
+      echo "  Inspect it, clear it deliberately, then re-flag $ID if it still owes a review."
+    } >&2
+    exit 1
+  fi
+  return 0
+}
+
 write_marker() {
   local tmp
+  # A symlink of any kind is replaced below, which is settled behaviour. A real
+  # directory or other non-regular object is not: mv would infer directory
+  # semantics and deposit the marker inside it, leaving flag reporting success
+  # with no marker published. Refuse rather than guess at what belongs there.
+  if [ ! -L "$MARKER" ] && [ -e "$MARKER" ] && [ ! -f "$MARKER" ]; then
+    {
+      echo "error: $MARKER exists and is not a regular file, so the marker cannot be published there."
+      echo "  It is left exactly as found - nothing here removes or repairs it."
+      echo "  Inspect it and clear it deliberately, then re-run."
+    } >&2
+    return 1
+  fi
   tmp=$(mktemp "$STATE/.$ID.ultracode.XXXXXX") || return 1
   cat > "$tmp"
   chmod 0644 "$tmp"
@@ -428,7 +467,7 @@ cmd_flag() {
   # deliberately clears every prior review record, since those reviews were
   # against an earlier version of the diff and the requirement starts over. The
   # fresh generation is what makes that stick for a review already in flight.
-  printf 'role=%s\ngen=%s\n' "$role" "$(new_generation)" | write_marker
+  printf 'role=%s\ngen=%s\n' "$role" "$(new_generation)" | write_marker || exit 1
   echo "flagged $ID ultracode role=$role"
 }
 
@@ -441,6 +480,10 @@ cmd_reviewed() {
   # wise walk straight past. It also keeps a newline out of the marker, whose
   # line structure would otherwise gain a record nobody wrote.
   reject_unsafe_id "reviewer-task-id" "$reviewer"
+  # Ahead of the absence message below, so a marker path that is there but
+  # unreadable is not reported as "never flagged", which is a different problem
+  # with a different fix.
+  refuse_malformed_marker
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
     echo "error: reviewer-task-id must be a task distinct from $ID - a task cannot review itself" >&2
@@ -479,6 +522,11 @@ cmd_check() {
   # Taken before the marker is read, so the whole read-then-compare cannot
   # interleave with a flag or a reviewed on the same task.
   hold_marker_lock
+  refuse_malformed_marker
+  # Absent, which the line above has just told apart from malformed: this task
+  # was never flagged, so there is nothing to enforce. (Worded without the
+  # obvious adverb on purpose - it is one of the sweep words in the header, and
+  # a false positive there costs every later reader a triage.)
   if [ ! -f "$MARKER" ]; then
     exit 0
   fi
