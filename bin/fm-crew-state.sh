@@ -438,13 +438,20 @@ nm_ci_checks_state() {
 # "maximum number of runs to display", orders by creation time, and DOES mark
 # a cut listing with a human-oriented footer line, e.g. "(52 more runs, use
 # --limit to see more)". The refusal below stays count-based and does not
-# parse that footer (a separate change, deliberately not made here);
-# established empirically: the footer, when present, is counted by the loop
-# below as one ordinary row that can never match or read as live ("(52" is
-# no status, "more" is no branch), so its only possible effect is inflating
-# `total` toward the filled-limit refusal - the conservative direction. A
-# live-runs-only or completeness-marked query on a newer CLI would let the
-# consumers prove the active set instead of refusing on possible truncation.
+# parse that footer (a separate change, deliberately not made here). The
+# parser does NOT validate row shape - that is the durable fact - so the
+# footer parses as an ordinary row: it increments `total`, pushing the
+# filled-limit test toward refusal; it can never read as LIVE, because that
+# requires status exactly `running` and its first field is "(52"; but it is
+# not excluded from STRICT MATCHING, which ignores status entirely - under
+# contrived names (a branch literally named `more`, a ref named `runs,` at
+# HEAD) its second and third fields can produce a match, which renders the
+# unrecognised phase `unknown` rather than `working`, so the effect on stall
+# suppression stays conservative even then. What makes that unreachable in
+# practice is this fleet's `fm/*` branch naming - a property of our naming,
+# not of this code. A live-runs-only or completeness-marked query on a newer
+# CLI would let the consumers prove the active set instead of refusing on
+# possible truncation.
 # Unlike every other no-mistakes read in this file, this call site keeps the
 # query's exit status (fm_nm_run_checked, not the fail-open fm_nm_run): the
 # discarded status was the only signal separating a short complete list from
