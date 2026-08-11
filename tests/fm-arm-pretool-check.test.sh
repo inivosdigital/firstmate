@@ -63,6 +63,7 @@ matrix_case R16 allow $'# bin/fm-watch-arm.sh &\necho ok'
 matrix_case R17 allow "printf '%s\\n' 'fm-watch.sh; a && b || c > out' | sed -n '1p'"
 matrix_case R18 allow "sh -c 'tmux send-keys -t lab \"bin/fm-watch-arm.sh &\" Enter'"
 matrix_case R19 allow "eval 'printf \"%s\\n\" \"bin/fm-watch-arm.sh &\"'"
+matrix_case R20 allow $'until [ -f /tmp/fm-none ]; do\ncat <<\'EOF\'\npkill -f fm-watch\nEOF\ndone'
 
 matrix_case D01 deny 'bin/fm-watch-arm.sh &'
 matrix_case D02 deny 'nohup bin/fm-watch-arm.sh'
@@ -122,6 +123,8 @@ matrix_case D55 deny 'while true; do pkill -f fm-watch; done'
 matrix_case D56 deny 'for x in 1; do pkill -f fm-watch; done'
 matrix_case D57 deny 'case x in x) pkill -f fm-watch ;; esac'
 matrix_case D58 deny 'until false; do kill $(pgrep -f fm-watch); done'
+matrix_case D59 deny 'if true; then pkill -f fm-watch; fi'
+matrix_case D60 deny $'until false; do\nbash <<\'EOF\'\npkill -f fm-watch\nEOF\ndone'
 
 matrix_case E01 allow "bin/fm-watch-checkpoint.sh --seconds '180;still-one-arg'"
 matrix_case E02 allow "bin/fm-watch-checkpoint.sh --label 'fm-watch-arm.sh; literal argument'"
@@ -237,6 +240,130 @@ test_direct_policy_contract() {
   heredoc_watcher=$'bin/fm-watch-arm.sh <<\'EOF\'\ndata only\nEOF'
   assert_policy direct-heredoc-data allow "$heredoc_data"
   assert_policy direct-heredoc-watcher $'deny\twatcher-redirection' "$heredoc_watcher"
+}
+
+# --- block constructs --------------------------------------------------------
+#
+# The classifier models `if`, `for`, `while`, `until`, and `case`, so inside one
+# the same command-position analysis applies as outside it: a forbidden pattern
+# that is only inert heredoc data is allowed, and every executed broad kill is
+# denied. Block syntax the classifier cannot fit into a well-formed construct
+# stays on the conservative raw-match path instead.
+
+BLOCK_SHAPES=(until while for if case)
+
+block_wrap() {
+  local shape=$1 body=$2
+  case "$shape" in
+    until) printf 'until false; do\n%s\ndone' "$body" ;;
+    while) printf 'while false; do\n%s\ndone' "$body" ;;
+    for) printf 'for x in 1; do\n%s\ndone' "$body" ;;
+    if) printf 'if true; then\n%s\nfi' "$body" ;;
+    case) printf 'case x in\nx)\n%s\n;;\nesac' "$body" ;;
+    *) fail "unknown block shape: $shape" ;;
+  esac
+}
+
+test_block_construct_inert_data_allowed() {
+  local shape data
+  data=$'cat <<\'EOF\'\npkill -f fm-watch\nEOF'
+  assert_policy block-none-cat-heredoc allow "$data"
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-cat-heredoc" allow "$(block_wrap "$shape" "$data")"
+  done
+  assert_policy block-until-python-heredoc allow "$(block_wrap until $'python3 <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  assert_policy block-until-quoted-data allow "$(block_wrap until "echo 'pkill -f fm-watch'")"
+}
+
+test_block_construct_executed_kill_denied() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-pkill" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" 'pkill -f fm-watch')"
+    assert_policy "block-$shape-kill-pgrep" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" 'kill $(pgrep -f fm-watch)')"
+  done
+  assert_policy block-nested-while-if $'deny\tbroad-watcher-kill' "$(block_wrap while "$(block_wrap if 'pkill -f fm-watch')")"
+  assert_policy block-nested-for-case $'deny\tbroad-watcher-kill' "$(block_wrap for "$(block_wrap case 'pkill -f fm-watch')")"
+  assert_policy block-elif-branch $'deny\tbroad-watcher-kill' 'if false; then echo a; elif true; then pkill -f fm-watch; fi'
+  assert_policy block-else-branch $'deny\tbroad-watcher-kill' 'if false; then echo a; else pkill -f fm-watch; fi'
+  assert_policy block-case-alternation $'deny\tbroad-watcher-kill' 'case x in a|b) pkill -f fm-watch ;; esac'
+  assert_policy block-case-second-arm $'deny\tbroad-watcher-kill' 'case x in a) echo a ;; b) pkill -f fm-watch ;; esac'
+  # A loop variable inherits the watcher bindings of the list it iterates.
+  assert_policy block-for-variable-pid $'deny\tbroad-watcher-kill' 'for p in $(pgrep -f fm-watch); do kill $p; done'
+  assert_policy block-for-variable-pattern $'deny\tbroad-watcher-kill' 'for p in fm-watch; do pkill -f $p; done'
+}
+
+test_block_construct_shell_heredoc_denied() {
+  local shape
+  assert_policy block-none-bash-heredoc $'deny\tbroad-watcher-kill' $'bash <<\'EOF\'\npkill -f fm-watch\nEOF'
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-bash-heredoc" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap "$shape" $'bash <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  done
+  assert_policy block-until-sh-heredoc $'deny\tbroad-watcher-kill' "$(block_wrap until $'sh <<\'EOF\'\npkill -f fm-watch\nEOF')"
+}
+
+test_block_construct_protected_execution_unclassifiable() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-arm" $'deny\tunclassifiable-protected-command' "$(block_wrap "$shape" 'bin/fm-watch-arm.sh')"
+  done
+  assert_policy block-after-if $'deny\tunclassifiable-protected-command' 'if true; then echo hi; fi; bin/fm-watch-arm.sh'
+  assert_policy block-for-list-arm $'deny\tunclassifiable-protected-command' 'for x in $(bin/fm-watch-arm.sh); do echo x; done'
+}
+
+test_block_construct_malformed_falls_back() {
+  assert_policy block-unclosed-loop $'deny\tbroad-watcher-kill' 'while true; do pkill -f fm-watch'
+  assert_policy block-stray-done $'deny\tbroad-watcher-kill' 'done; pkill -f fm-watch'
+  assert_policy block-stray-esac $'deny\tbroad-watcher-kill' 'esac; pkill -f fm-watch'
+  assert_policy block-missing-arm-terminator $'deny\tbroad-watcher-kill' 'case x in x) pkill -f fm-watch esac'
+  assert_policy block-arithmetic-for $'deny\tbroad-watcher-kill' 'for ((i=0;i<3;i++)); do pkill -f fm-watch; done'
+  assert_policy block-quoted-keyword $'deny\tbroad-watcher-kill' "'while' true; do pkill -f fm-watch; done"
+  assert_policy block-unterminated-quote $'deny\tbroad-watcher-kill' "while true; do pkill -f fm-watch 'unterminated"
+  assert_policy block-case-subject-substitution $'deny\tbroad-watcher-kill' 'case $(echo x) in x) pkill -f fm-watch ;; esac'
+  assert_policy block-case-pattern-substitution $'deny\tbroad-watcher-kill' 'case x in $(echo x)) pkill -f fm-watch ;; esac'
+  # An arm terminator or pattern close with no `case` around it is malformed, so
+  # it is refused rather than treated as an ordinary list separator.
+  assert_policy block-stray-arm-terminator $'deny\tunclassifiable-protected-command' 'bin/fm-watch-arm.sh ;;'
+  assert_policy block-stray-pattern-close $'deny\tunclassifiable-protected-command' 'bin/fm-watch-arm.sh )'
+  assert_policy block-stray-terminator-kill $'deny\tbroad-watcher-kill' ';; pkill -f fm-watch'
+}
+
+# Wrapping a body in a block construct must never be more permissive than the
+# same body at top level. This is the guarantee that replaces the raw
+# whole-string fallback these constructs used to reach unconditionally.
+test_block_construct_never_more_permissive() {
+  local body shape bare wrapped
+  local bodies=(
+    'pkill -f fm-watch'
+    'kill $(pgrep -f fm-watch)'
+    'sudo pkill -f fm-watch'
+    'command pkill -f fm-watch'
+    '/usr/bin/pkill -f fm-watch'
+    'p=$(pgrep -f fm-watch); kill "$p"'
+    'pattern=fm-watch; pkill -f "$pattern"'
+    'bin/fm-watch.sh'
+    'bin/fm-watch-arm.sh | cat'
+    'nohup bin/fm-watch-arm.sh'
+  )
+  for body in "${bodies[@]}"; do
+    bare=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$body") \
+      || fail "symmetry corpus body failed to classify: $body"
+    case "$bare" in
+      deny*) : ;;
+      # Guards the corpus itself: a body that stopped denying at top level would
+      # make every wrapped assertion below pass without testing anything.
+      *) fail "symmetry corpus body must deny at top level, got '$bare': $body" ;;
+    esac
+    for shape in "${BLOCK_SHAPES[@]}"; do
+      wrapped=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$(block_wrap "$shape" "$body")") \
+        || fail "symmetry wrapped body failed to classify: $shape / $body"
+      case "$wrapped" in
+        deny*) : ;;
+        *) fail "$shape wrapping made '$body' more permissive: $wrapped" ;;
+      esac
+    done
+  done
+  pass "block constructs are never more permissive than the same body at top level"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -449,6 +576,12 @@ test_shellcheck_clean() {
 
 test_full_acceptance_matrix
 test_direct_policy_contract
+test_block_construct_inert_data_allowed
+test_block_construct_executed_kill_denied
+test_block_construct_shell_heredoc_denied
+test_block_construct_protected_execution_unclassifiable
+test_block_construct_malformed_falls_back
+test_block_construct_never_more_permissive
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors

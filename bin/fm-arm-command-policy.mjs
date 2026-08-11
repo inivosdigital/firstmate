@@ -10,7 +10,10 @@
 // commandPosition) are exported so the sibling cd-guard policy
 // (bin/fm-cd-command-policy.mjs) reuses the same proven parser instead of
 // duplicating shell lexing; see docs/cd-guard.md. The watcher-arm decision
-// procedure below stays private to this file. The CLI entry point at the bottom
+// procedure below stays private to this file, including splitBlockProgram,
+// which extends splitProgram with the `if`, `for`, `while`, `until`, and `case`
+// constructs so their bodies are classified by command position rather than
+// falling back to a raw whole-string match. The CLI entry point at the bottom
 // runs only when this module is invoked directly, never on import.
 
 import path from "node:path";
@@ -177,14 +180,22 @@ function decodeAnsiCQuoted(source, start) {
   return null;
 }
 
+const CONTROL_OPERATORS = ["&&", "||", "|&", ";;", ";", "&", "|"];
+const BLOCK_CONTROL_OPERATORS = [...CONTROL_OPERATORS, ")"];
+
 export class Lexer {
-  constructor(source) {
+  // options.blocks admits `)` as a control operator so `case` arm patterns
+  // tokenize. It is opt-in because the cd-guard deliberately fails open on
+  // input it cannot tokenize, so widening its tokenizer would silently move
+  // cd verdicts. Only the watcher policy below, which fails closed, asks for it.
+  constructor(source, options = {}) {
     this.source = source;
     this.index = 0;
     this.error = "";
     this.tokens = [];
     this.pendingHeredocs = [];
     this.expectHeredoc = null;
+    this.blocks = options.blocks === true;
   }
 
   tokenize() {
@@ -273,7 +284,7 @@ export class Lexer {
   }
 
   readControlOperator() {
-    for (const operator of ["&&", "||", "|&", ";;", ";", "&", "|"]) {
+    for (const operator of this.blocks ? BLOCK_CONTROL_OPERATORS : CONTROL_OPERATORS) {
       if (this.source.startsWith(operator, this.index)) {
         this.index += operator.length;
         return operator;
@@ -452,6 +463,219 @@ export function splitProgram(tokens) {
   if (current.length > 0) nodes.push(current);
   while (separators.length >= nodes.length && separators.at(-1) === "newline") separators.pop();
   return { nodes, separators };
+}
+
+// Reserved words that open, continue, or close a shell block construct.
+// They are only reserved in command position and only unquoted and unexpanded,
+// so `echo done` and `'while' x` stay ordinary commands.
+const BLOCK_WORDS = new Set(["if", "then", "elif", "else", "fi", "for", "while", "until", "do", "done", "case", "esac"]);
+
+function blockKeyword(token) {
+  if (!token || token.type !== "word" || token.quoted || !token.literal || token.subs.length > 0) return "";
+  return BLOCK_WORDS.has(token.value) ? token.value : "";
+}
+
+// splitProgram plus the block constructs `if/elif/else/fi`, `for/while/until
+// ... do ... done`, and `case ... esac`, including nesting.
+//
+// Structural keywords are consumed rather than emitted, so each construct's
+// condition, body, and arm commands arrive as ordinary simple-command nodes and
+// the consumer-aware analysis downstream applies to them unchanged. A `for`
+// header is emitted as a "for-list" node: a word list is not an executed
+// command, but its substitutions still run and its loop variable still binds.
+//
+// The scanner validates the construct's shape. Anything it cannot fit into a
+// well-formed construct sets `error` and returns the plain splitProgram result,
+// which leaves the caller on exactly the conservative path it uses today.
+function splitBlockProgram(tokens) {
+  const nodes = [];
+  const separators = [];
+  const roles = [];
+  const loopVariables = [];
+  const stack = [];
+  let current = [];
+  let header = null;
+  let subject = null;
+  let patternOpen = false;
+  let hasBlocks = false;
+  let error = "";
+
+  const fail = (message) => {
+    if (!error) error = message;
+  };
+  const top = () => stack.at(-1);
+  const emit = (role, loopVariable) => {
+    nodes.push(current);
+    roles.push(role);
+    loopVariables.push(loopVariable || "");
+    current = [];
+  };
+  const closeSimple = (separator) => {
+    if (current.length > 0) {
+      emit("command");
+      separators.push(separator);
+    } else if (separator !== "newline") {
+      separators.push(separator);
+    }
+  };
+
+  for (const token of tokens) {
+    if (error) break;
+
+    if (header) {
+      if (token.type === "op") {
+        if (token.value !== ";" && token.value !== "newline") {
+          fail("unsupported for header");
+          break;
+        }
+        current = header.words;
+        emit("for-list", header.variable);
+        separators.push(token.value);
+        header = null;
+        continue;
+      }
+      if (token.type !== "word") {
+        fail("unsupported for header");
+        break;
+      }
+      if (!header.variable) {
+        if (!token.literal || token.quoted || token.subs.length > 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(token.value)) {
+          fail("unsupported for variable");
+          break;
+        }
+        header.variable = token.value;
+        continue;
+      }
+      if (!header.sawIn) {
+        if (token.value !== "in" || token.quoted || !token.literal) {
+          fail("unsupported for header");
+          break;
+        }
+        header.sawIn = true;
+        continue;
+      }
+      header.words.push(token);
+      continue;
+    }
+
+    if (subject) {
+      if (token.type !== "word" || token.subs.length > 0) {
+        fail("unsupported case subject");
+        break;
+      }
+      if (!subject.word) {
+        subject.word = token;
+        continue;
+      }
+      if (token.value !== "in" || token.quoted || !token.literal) {
+        fail("unsupported case subject");
+        break;
+      }
+      subject = null;
+      patternOpen = true;
+      continue;
+    }
+
+    if (patternOpen) {
+      if (current.length === 0 && blockKeyword(token) === "esac") {
+        if (top()?.type !== "case") {
+          fail("unexpected esac");
+          break;
+        }
+        stack.pop();
+        patternOpen = false;
+        continue;
+      }
+      if (token.type === "op") {
+        if (token.value === ")") {
+          if (top()?.type !== "case") {
+            fail("unexpected )");
+            break;
+          }
+          current = [];
+          patternOpen = false;
+          top().phase = "body";
+          continue;
+        }
+        if (token.value === "newline" && current.length === 0) continue;
+        if (token.value === "|" && current.length > 0) continue;
+        fail("unsupported case pattern");
+        break;
+      }
+      if (token.type !== "word" || token.subs.length > 0) {
+        fail("unsupported case pattern");
+        break;
+      }
+      current.push(token);
+      continue;
+    }
+
+    if (token.type === "op") {
+      if (token.value === ";;") {
+        if (top()?.type !== "case" || top().phase !== "body") {
+          fail("unexpected ;;");
+          break;
+        }
+        closeSimple(";;");
+        patternOpen = true;
+        continue;
+      }
+      if (token.value === ")") {
+        fail("unexpected )");
+        break;
+      }
+      closeSimple(token.value);
+      continue;
+    }
+
+    const keyword = current.length === 0 ? blockKeyword(token) : "";
+    if (!keyword) {
+      current.push(token);
+      continue;
+    }
+    hasBlocks = true;
+    if (keyword === "if") {
+      stack.push({ type: "if", phase: "cond" });
+    } else if (keyword === "then" || keyword === "elif" || keyword === "else" || keyword === "fi") {
+      const expected = keyword === "then" ? ["cond"] : keyword === "elif" ? ["then"] : keyword === "else" ? ["then"] : ["then", "else"];
+      if (top()?.type !== "if" || !expected.includes(top().phase)) {
+        fail(`unexpected ${keyword}`);
+        break;
+      }
+      if (keyword === "fi") stack.pop();
+      else top().phase = keyword === "elif" ? "cond" : keyword;
+    } else if (keyword === "for" || keyword === "while" || keyword === "until") {
+      stack.push({ type: "loop", phase: "head" });
+      if (keyword === "for") header = { variable: "", words: [], sawIn: false };
+    } else if (keyword === "do" || keyword === "done") {
+      if (top()?.type !== "loop" || top().phase !== (keyword === "do" ? "head" : "body")) {
+        fail(`unexpected ${keyword}`);
+        break;
+      }
+      if (keyword === "do") top().phase = "body";
+      else stack.pop();
+    } else if (keyword === "case") {
+      stack.push({ type: "case", phase: "pattern" });
+      subject = { word: null };
+    } else if (keyword === "esac") {
+      if (top()?.type !== "case") {
+        fail("unexpected esac");
+        break;
+      }
+      stack.pop();
+    }
+  }
+
+  if (!error) {
+    if (header || subject || patternOpen || stack.length > 0) fail("unclosed block construct");
+    else if (current.length > 0) emit("command");
+  }
+  if (error) {
+    const plain = splitProgram(tokens);
+    return { ...plain, roles: plain.nodes.map(() => "command"), loopVariables: plain.nodes.map(() => ""), hasBlocks, error };
+  }
+  while (separators.length >= nodes.length && separators.at(-1) === "newline") separators.pop();
+  return { nodes, separators, roles, loopVariables, hasBlocks, error };
 }
 
 function isAssignment(value) {
@@ -713,6 +937,26 @@ function contextWithAssignments(context, words) {
   return { ...context, protectedVariables, watcherPatterns, watcherPids };
 }
 
+// A `for` loop variable takes its values from the header word list, so it earns
+// the same watcher bindings contextWithAssignments would give it, including a
+// pid binding from an executed watcher-wide pgrep in the list.
+function bindLoopVariable(context, name, words, substitutionResults) {
+  if (!name) return;
+  const referencesProtected = words.some((word) => rawMentionsProtected(word.value) || wordReferencesAny(word, context.protectedVariables));
+  const referencesPattern = words.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, context.watcherPatterns));
+  const referencesPid = words.some(
+    (word) => wordReferencesAny(word, context.watcherPids) || word.subs.some((substitution) => substitutionResults.get(substitution)?.pgrepWatcher),
+  );
+  for (const [matched, names] of [
+    [referencesProtected, context.protectedVariables],
+    [referencesPattern, context.watcherPatterns],
+    [referencesPid, context.watcherPids],
+  ]) {
+    if (matched) names.add(name);
+    else names.delete(name);
+  }
+}
+
 function nodeHasRedirection(tokens) {
   return tokens.some((token) => token.type === "redir");
 }
@@ -730,11 +974,11 @@ function analyzeProgram(command, context, depth = 0) {
   if (depth > 12) {
     return { error: "recursion limit", protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
-  const lexed = new Lexer(command).tokenize();
+  const lexed = new Lexer(command, { blocks: true }).tokenize();
   if (lexed.error) {
     return { error: lexed.error, protectedFound: rawMentionsProtected(command), broadKill: rawMentionsBroadKill(command), pgrepWatcher: false, watcherPids: new Set() };
   }
-  const program = splitProgram(lexed.tokens);
+  const program = splitBlockProgram(lexed.tokens);
   const nodeInfos = [];
   let nestedProtected = false;
   let broadKill = false;
@@ -747,10 +991,19 @@ function analyzeProgram(command, context, depth = 0) {
     watcherPids: new Set(context.watcherPids || []),
   };
   let unclassifiableProtected = false;
+  // Block syntax the scanner could not fit into a well-formed construct keeps
+  // the whole program on the conservative path, raw fallback included.
+  if (program.error) unsupported = true;
 
-  for (const tokens of program.nodes) {
+  for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
+    const tokens = program.nodes[nodeIndex];
+    const forList = program.roles?.[nodeIndex] === "for-list";
     const position = commandPosition(tokens);
-    const nodeContext = contextWithAssignments(activeContext, position.words);
+    // A `for` header carries no assignment, so it inherits the running context
+    // unchanged and contributes only its loop-variable binding below.
+    const nodeContext = forList
+      ? { ...activeContext, protectedVariables: new Set(activeContext.protectedVariables), watcherPatterns: new Set(activeContext.watcherPatterns), watcherPids: new Set(activeContext.watcherPids) }
+      : contextWithAssignments(activeContext, position.words);
     const firstName = basename(position.words[0]?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
       unsupported = true;
@@ -784,6 +1037,14 @@ function analyzeProgram(command, context, depth = 0) {
           if (nested.error && rawMentionsProtected(substitution.content)) unsupported = true;
         }
       }
+    }
+
+    if (forList) {
+      bindLoopVariable(nodeContext, program.loopVariables[nodeIndex], position.words, substitutionResults);
+      pgrepWatcher ||= nodePgrepWatcher;
+      nestedProtected ||= nodeNestedProtected;
+      activeContext = nodeContext;
+      continue;
     }
 
     const shell = shellInvocation(position);
@@ -847,6 +1108,10 @@ function analyzeProgram(command, context, depth = 0) {
   const directProtected = nodeInfos.some((info) => Boolean(info.protectedKind));
   const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
+  // A block construct can never be a blessed arm: arming is a standalone final
+  // command after approved setup nodes, so a protected execution reached
+  // through a condition, loop body, or case arm stays unclassifiable.
+  if (program.hasBlocks && protectedFound) unsupported = true;
   const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
     return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };

@@ -109,7 +109,8 @@ The final protected node may have one immediate `exec` wrapper.
 Its arguments are ordinary shell words and may contain quoted semicolons or watcher names.
 No other wrapper is approved.
 
-Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, and unsupported compound syntax are not blessed.
+Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, block constructs, and unsupported compound syntax are not blessed.
+A protected execution reached through an `if` condition or branch, a loop body, or a `case` arm is denied with `unclassifiable-protected-command`, because arming is only ever a standalone final command after approved setup nodes.
 
 ## Broad watcher kills
 
@@ -120,10 +121,21 @@ Path-qualified `pkill`, `command pkill`, and `sudo pkill` are recognized.
 A standalone read-only `pgrep` is allowed.
 Quoted text such as `echo 'pkill -f fm-watch'` is data and is allowed.
 
-Unsupported compound grammar - a loop, `case`, `if`, or other construct the classifier does not model - is failed closed for broad kills the same way it is for protected executions.
+Unsupported compound grammar - a construct the classifier does not model - is failed closed for broad kills the same way it is for protected executions.
 When the command carries such grammar and its raw bytes reference both a `fm-watch` target and a `pkill` or `kill` verb, the classifier cannot prove which command position the kill occupies, so it denies with `broad-watcher-kill` rather than allowing.
-This backstop mirrors the protected-execution fail-closed rule and covers forms like `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done`.
-It is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` and a loop that only names the watcher without a kill verb such as `for f in 1; do echo fm-watch; done` remain allowed.
+This backstop is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` remain allowed.
+
+### Block constructs
+
+The classifier models `if/then/elif/else/fi`, `for`, `while`, and `until` loops, and `case`, including nesting.
+Their conditions, bodies, and arms are analyzed as ordinary commands, so the same command-position rules apply inside a construct as outside it.
+An executed kill is still denied wherever it sits: `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done` all deny with `broad-watcher-kill`.
+A `for` loop variable inherits the watcher bindings of the list it iterates, so `for p in $(pgrep -f fm-watch); do kill $p; done` denies through the same executed-`pgrep` rule as its one-line form.
+Inert data is correspondingly allowed: a forbidden pattern that only ever reaches a `cat` heredoc body is allowed inside a construct exactly as it is outside one, while a `bash` heredoc carrying the same bytes is denied in both places.
+This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable.
+
+Block syntax the scanner cannot fit into a well-formed construct - an unclosed loop, a stray `done` or `esac`, an arithmetic `for`, a substitution in a `case` subject or pattern - keeps the whole command on the conservative path above.
+The regression suite pins the resulting guarantee directly: wrapping a body in any of these constructs never produces a more permissive verdict than the same body at top level.
 
 ## Stable reason codes
 
@@ -230,7 +242,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and their never-more-permissive-than-top-level guarantee, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 
