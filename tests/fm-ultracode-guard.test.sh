@@ -464,8 +464,9 @@ fix from the review" "fix from the review"
 }
 
 test_check_passes_when_a_reverted_diff_returns_to_a_reviewed_state() {
-  # Every retained record is a state some separate task actually reviewed, so
-  # returning to one of them is genuinely covered work, not an escape hatch.
+  # Every retained record is a state the supervisor asserted a review covered,
+  # so returning to one of them stays under that same assertion rather than
+  # slipping out from under it.
   local case_dir status
   case_dir=$(new_case revert-to-reviewed)
   commit_work "$case_dir" "base
@@ -681,16 +682,43 @@ unreviewed work nobody read" "unreviewed work"
 }
 
 test_check_refuses_when_the_pr_head_is_unreachable() {
-  local case_dir out status
+  # The other degraded shape: neither a fresh fetch nor the recorded pr_head
+  # resolves, so the diff helper falls back to the LOCAL BRANCH. The local
+  # branch still carries the reviewed content, so its fingerprint matches and
+  # the guard passed - while the PR itself carried unreviewed work.
+  #
+  # Only the PR head is made unresolvable here. The base remote stays reachable
+  # throughout, so the refusal comes from the path under test rather than from a
+  # changed base label incidentally moving the fingerprint.
+  local case_dir out status unreviewed_head
   case_dir=$(new_case pr-head-unreachable)
   commit_work "$case_dir" "base
 reviewed implementation" "reviewed implementation"
+  publish_pr_head "$case_dir"
+  record_pr_meta "$case_dir" "$(tip_of "$case_dir")"
   run_guard "$case_dir" flag task-x1 >/dev/null
   run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
 
-  # The PR opens after the review, then its remote becomes unreachable.
-  git -C "$case_dir/wt" remote remove origin
-  record_pr_meta "$case_dir" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+  # Unreviewed work reaches the PR from elsewhere, so its commit never becomes a
+  # local object here; then the PR ref stops resolving.
+  git clone -q "$case_dir/origin.git" "$case_dir/_pr"
+  git -C "$case_dir/_pr" fetch -q origin "+refs/pull/1/head:refs/heads/prwork"
+  git -C "$case_dir/_pr" checkout -q prwork
+  printf 'base\nreviewed implementation\nunreviewed work nobody read\n' > "$case_dir/_pr/feature.txt"
+  git -C "$case_dir/_pr" add feature.txt
+  git -C "$case_dir/_pr" commit -qm "unreviewed work pushed straight to the PR"
+  unreviewed_head=$(git -C "$case_dir/_pr" rev-parse HEAD)
+  git -C "$case_dir/_pr" push -q --force origin "prwork:refs/pull/1/head"
+  rm -rf "$case_dir/_pr"
+  record_pr_meta "$case_dir" "$unreviewed_head"
+  hide_pr_head "$case_dir"
+
+  if git -C "$case_dir/wt" cat-file -e "$unreviewed_head^{commit}" 2>/dev/null; then
+    fail "pr-head-unreachable: fixture leaked the PR-only commit locally, so this exercises the recorded-head path instead"
+  fi
+  if ! git -C "$case_dir/wt" remote get-url origin >/dev/null 2>&1; then
+    fail "pr-head-unreachable: fixture must keep the base remote reachable"
+  fi
 
   set +e
   out=$(run_guard "$case_dir" check task-x1 2>&1)
@@ -700,7 +728,7 @@ reviewed implementation" "reviewed implementation"
   expect_code 1 "$status" "pr-head-unreachable: an unresolvable PR head must refuse, never pass"
   assert_contains "$out" "could not be freshly resolved" \
     "pr-head-unreachable: should say the PR head could not be established"
-  pass "fm-ultracode-guard check refuses when the PR head cannot be resolved at all"
+  pass "fm-ultracode-guard check refuses when neither the PR head nor a recorded head resolves"
 }
 
 test_reviewed_refuses_to_pin_against_an_unconfirmable_pr_head() {
@@ -726,18 +754,18 @@ implementation" "implementation"
 }
 
 test_reviewer_metadata_alone_satisfies_the_identity_check() {
-  # A DOCUMENTED LIMIT, pinned so it stays deliberate. The guard enforces that
-  # the reviewer is a distinct id belonging to a really-dispatched task; it
-  # cannot observe whether that task read anything, so metadata alone passes.
-  # Independence rests on the supervisor who runs `reviewed`, not on this
-  # predicate (see the script header). Anything that makes independence
+  # A DOCUMENTED LIMIT, pinned so it stays deliberate. The reviewer check is a
+  # distinct id plus a file existing at the expected metadata path, and nothing
+  # more: the file here is EMPTY and still satisfies it. Dispatch provenance,
+  # independence from the reviewed task, and whether any review happened are
+  # none of them established mechanically; they rest on the supervisor who runs
+  # `reviewed` (see the script header). Anything that makes independence
   # mechanical has to change this test knowingly rather than by accident.
   local case_dir status
   case_dir=$(new_case reviewer-identity-limit)
   commit_work "$case_dir" "base
 implementation" "implementation"
-  fm_write_meta "$case_dir/state/unrelated-helper.meta" \
-    "window=fm-unrelated-helper" "worktree=$case_dir/wt" "project=$case_dir/project"
+  : > "$case_dir/state/unrelated-helper.meta"
   run_guard "$case_dir" flag task-x1 >/dev/null
 
   run_guard "$case_dir" reviewed task-x1 unrelated-helper >/dev/null

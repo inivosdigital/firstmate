@@ -361,7 +361,7 @@ A tier-guard or self-reported escalation above lifts the task off the Light veri
 
 **Ultracode confirmation.**
 Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`.
-A genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - must have reviewed the finished diff with its findings addressed; that judgment is firstmate's own, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`, and the guard checks only that the reviewer is a distinct dispatched task and pins the record to the diff it covered.
+A genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - must have reviewed the finished diff with its findings addressed; that judgment is firstmate's own and stays firstmate's own, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`, because the guard checks only that the reviewer id differs from the task and has a metadata file present, then pins the record to the diff it covered.
 Each recorded review covers only that diff, so code landing afterwards refuses again; re-record once the reviewer has covered the new work rather than treating the earlier pass as still standing.
 
 ### PR ready, landing, and teardown

@@ -200,7 +200,8 @@ All three reach the binding changed-path checkpoint rather than the pre-spawn on
 Each record is pinned to the diff the review covered, so the guard also refuses once the code moves past it - a review that satisfied the gate once cannot keep satisfying it for commits nobody reviewed.
 It pins by diff content rather than commit id, again reusing `bin/fm-review-diff.sh` as the one owner of what a task's diff is, so the rebases and squashes this fleet does routinely do not read as unreviewed work.
 Once a PR is recorded it refuses outright unless that PR's head resolves freshly, because both of `fm-review-diff.sh`'s degraded fallbacks (the local branch, and the `pr_head` recorded when the PR was first seen) can produce a diff that matches the recorded review while unreviewed commits sit on the PR.
-What it mechanically proves is bounded and its header says so: a distinct, really-dispatched reviewer id and a review pinned to established content, not that the named task read anything - `reviewed` is a supervisor-owned assertion and the independence guarantee rests there.
+What it mechanically proves is bounded and its header says so: a reviewer id distinct from the task, a file present at that id's metadata path, and a review pinned to established content.
+Neither dispatch provenance, independence, nor review activity is established mechanically - `reviewed` is a supervisor-owned assertion and those rest there.
 None of the three modify `fm-spawn.sh` or task meta.
 
 ## Optional secondmates

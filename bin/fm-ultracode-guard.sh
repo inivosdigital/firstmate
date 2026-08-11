@@ -8,27 +8,36 @@
 # touches fm-spawn.sh or the task's own meta.
 #
 # What this guard proves, and what it does not
-#   Mechanically enforced:
+#   Mechanically enforced, and this list is exhaustive:
 #     - a flagged task cannot pass with no review recorded at all;
-#     - the named reviewer is a different id from the task under review;
-#     - that id has recorded metadata in this home, so it names a task that was
-#       really dispatched rather than an invented id;
+#     - the named reviewer is a different string from the task's own id;
+#     - a file exists at state/<reviewer-task-id>.meta. Existence is the whole
+#       test: an empty file passes it. Contents, kind, provenance and any link
+#       to the reviewed task are neither read nor validated;
 #     - the record is pinned to the diff it was recorded against, and check
 #       refuses once the current diff no longer matches any recorded one;
 #     - the diff being compared is established, never inferred from a PR head
 #       that could not be freshly resolved.
-#   NOT enforced: that the named task actually reviewed anything. The metadata
-#   test proves a distinct dispatched task exists; nothing here can observe what
-#   that task read. `reviewed` is a SUPERVISOR-OWNED mutation - firstmate runs
-#   it after satisfying itself that a separately dispatched task reviewed the
-#   finished diff and its findings were addressed - and the independence
-#   guarantee rests there, not in this predicate. Stated plainly because an
-#   overclaim in a safety guard's own documentation is its own hazard: a reader
-#   who believes independence is machine-checked stops checking it.
+#   NOT enforced: that the reviewer id names a task this home really dispatched,
+#   that it is independent of the task under review, or that it reviewed
+#   anything at all. Those three are assertions the caller makes by running
+#   `reviewed`; nothing here can observe them. `reviewed` is a SUPERVISOR-OWNED
+#   mutation - firstmate runs it after satisfying itself that a separately
+#   dispatched task reviewed the finished diff and its findings were addressed -
+#   and the independence guarantee rests there, not in this predicate. Stated
+#   plainly because an overclaim in a safety guard's own documentation is its
+#   own hazard: a reader who believes independence is machine-checked stops
+#   checking it.
 #   Making independence mechanical would need provenance recorded when the
 #   reviewer is dispatched (its own metadata binding it to the task it reviews),
 #   which is a change to the flagging and dispatch path rather than to this
 #   guard. That is reported, deliberately not built here.
+#
+#   Note for the next reader: bin/fm-tier-guard.sh recognises only the older
+#   "PR head unavailable" marker, so it still sizes a possibly-stale recorded
+#   head silently. Pre-existing and tracked separately as
+#   fm-tier-guard-swallows-degraded-pr-head; do not assume both guards treat a
+#   degraded PR head alike.
 #
 # A recorded review is pinned to the diff it covered, so it goes stale when the
 # code moves. Without that binding a review recorded once satisfied check
@@ -102,16 +111,18 @@
 #     were addressed; this pins that assertion to the diff as it stands now.
 #     What it checks is above under "What this guard proves": the assertion that
 #     a review happened is the caller's, and only its pinning is mechanical.
-#     Refuses if <reviewer-task-id> equals <task-id> or has no recorded meta, so
-#     a sub-task the same crewmate spawned itself cannot satisfy this; refuses
-#     too if the current diff cannot be established, since an unpinnable record
-#     would be indistinguishable from the unpinned ones above.
+#     Refuses if <reviewer-task-id> equals <task-id>, or if no file exists at
+#     state/<reviewer-task-id>.meta, which catches a bare invented id but not a
+#     real id that reviewed nothing; refuses too if the current diff cannot be
+#     established, since an unpinnable record would be indistinguishable from
+#     the unpinned ones above.
 #     Re-running it after a fix APPENDS a record and keeps the earlier ones, so
 #     a reviewer who only needs to read the delta can be recorded without
 #     discarding the review of everything before it, and the marker keeps the
 #     whole review chain. check accepts a match against any retained record:
-#     each one is a state some separate task actually reviewed, so work that
-#     returns to one (a backed-out experiment) is covered, not smuggled.
+#     each one is a state the supervisor asserted a review covered, so work that
+#     returns to one (a backed-out experiment) is covered by the same assertion
+#     rather than escaping it.
 #   fm-ultracode-guard.sh check <task-id>
 #     Exits 0 if <task-id> was never flagged, or was flagged and a recorded
 #     review still covers the current diff. Exits 1 with an explanatory message
