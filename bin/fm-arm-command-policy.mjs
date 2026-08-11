@@ -204,6 +204,10 @@ export class Lexer {
     this.pendingHeredocs = [];
     this.expectHeredoc = null;
     this.blocks = options.blocks === true;
+    // Where the comments were. They are dropped rather than tokenized, so a
+    // caller that wants to know which bytes of the source do not run has to be
+    // told; nothing else can recover them afterwards.
+    this.comments = [];
   }
 
   tokenize() {
@@ -258,11 +262,13 @@ export class Lexer {
       }
     }
     if (this.expectHeredoc) this.error = "missing heredoc delimiter";
-    return { tokens: this.tokens, error: this.error };
+    return { tokens: this.tokens, comments: this.comments, error: this.error };
   }
 
   skipComment() {
+    const start = this.index;
     while (this.index < this.source.length && this.source[this.index] !== "\n") this.index += 1;
+    this.comments.push([start, this.index]);
   }
 
   skipHeredocBodies() {
@@ -333,12 +339,17 @@ export class Lexer {
           return null;
         }
         word.value += this.source.slice(this.index + 1, end);
+        this.recordQuoted(word, this.index, end + 1);
         this.index = end + 1;
         continue;
       }
       if (char === '"') {
         word.quoted = true;
+        const start = this.index;
+        const subs = word.subs.length;
+        const literal = word.literal;
         if (!this.readDoubleQuoted(word)) return null;
+        if (word.subs.length === subs && word.literal === literal) this.recordQuoted(word, start, this.index);
         continue;
       }
       if (char === "\\") {
@@ -362,13 +373,18 @@ export class Lexer {
         }
         word.quoted = true;
         word.value += ansi.value;
+        this.recordQuoted(word, this.index, ansi.next);
         this.index = ansi.next;
         continue;
       }
       if (this.source.startsWith('$"', this.index)) {
         word.quoted = true;
+        const start = this.index;
+        const subs = word.subs.length;
+        const literal = word.literal;
         this.index += 1;
         if (!this.readDoubleQuoted(word)) return null;
+        if (word.subs.length === subs && word.literal === literal) this.recordQuoted(word, start, this.index);
         continue;
       }
       if (this.source.startsWith("$(", this.index)) {
@@ -410,6 +426,14 @@ export class Lexer {
       this.index += 1;
     }
     return consumed ? word : null;
+  }
+
+  // Records a quoted run whose bytes the lexer resolved to literal text with no
+  // substitution and no expansion inside it. A quoted run that carries either is
+  // deliberately left unrecorded: its text still has to be read as it stands.
+  recordQuoted(word, start, end) {
+    if (!word.quotedRanges) word.quotedRanges = [];
+    word.quotedRanges.push([start, end]);
   }
 
   readDoubleQuoted(word) {
@@ -1080,34 +1104,66 @@ function seedBlockTaint(program, context, command) {
   return { protectedVariables, watcherPatterns, watcherPids, converged };
 }
 
-// Whether this node's here-document bodies are data and nothing else. The
-// parser has to be able to name the command that consumes them, and that
-// command must neither be a shell reading its script from stdin nor hand its
-// stdout or its bodies anywhere else: `cat <<EOF` prints the body, but
-// `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a body
-// attached to `done` goes wherever the loop sends its input, which is not
-// modelled. Anything short of a positive answer leaves the body in the text.
-function heredocBodiesAreData(tokens, adjacent) {
+// Commands whose argument words the parser is confident are read and nothing
+// else: they print their arguments or ignore them.
+//
+// This is an allowlist of data sinks rather than a list of consumers that
+// execute what they are handed, and the direction matters. The executing ones
+// are unbounded - `xargs sh -c`, `find -exec`, `ssh host`, an interpreter's
+// `-e` - so a name missing from a list of those would be a permit. A name
+// missing from this list is only friction: its quoted text stays in view and
+// the command is refused inside a construct.
+const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo", "printf"]);
+
+// The preconditions for reading any part of a node as data. The parser has to
+// be able to name the command, that command must not be a shell, and the node
+// must not hand what it holds to anything else: `cat <<EOF` prints its body,
+// but `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a
+// body attached to `done` goes wherever the loop sends its input, which is not
+// modelled. Anything short of a positive answer leaves the bytes in the text.
+function nodeConsumesItsInput(tokens, adjacent) {
   const position = commandPosition(tokens);
-  if (!position.command || !position.command.literal || position.command.subs.length > 0) return false;
-  if (position.unresolvedWrapperOption || shellInvocation(position)) return false;
+  if (!position.command || !position.command.literal || position.command.subs.length > 0) return null;
+  if (position.unresolvedWrapperOption || shellInvocation(position)) return null;
   for (const side of [adjacent?.before, adjacent?.after]) {
-    if (side === "|" || side === "|&") return false;
+    if (side === "|" || side === "|&") return null;
   }
-  return tokens.every((token) => token.type !== "redir" || Array.isArray(token.heredocRange));
+  if (!tokens.every((token) => token.type !== "redir" || Array.isArray(token.heredocRange))) return null;
+  return position;
 }
 
-// The part of the program that actually runs: the whole command with the
-// here-document bodies the parser positively identified as data cut out. This
-// is not a here-document-aware regex - the parser decided which bodies are data
-// and which are commands, and the unchanged raw check simply reads what is left.
-function executableProgramText(command, program) {
+// Quoted runs this node reads as data. Only argument words qualify: a quoted
+// run that is the command word, a wrapper, or a prefix assignment is either
+// what runs or what a later command runs, so it stays in the text.
+function dataArgumentRanges(tokens, adjacent) {
+  const position = nodeConsumesItsInput(tokens, adjacent);
+  if (!position || !DATA_SINK_COMMANDS.has(basename(position.command.value))) return [];
   const ranges = [];
+  for (const word of position.words.slice(position.index + 1)) {
+    for (const range of word.quotedRanges || []) ranges.push(range);
+  }
+  return ranges;
+}
+
+// The part of the program that actually runs: the whole command with the text
+// the parser positively identified as data cut out. That is here-document
+// bodies whose consuming command reads them, quoted runs handed to a data sink,
+// and comments, which run nowhere at all.
+//
+// This is not a quote-aware or here-document-aware regex, which would be a
+// cleverer version of the thing it is backing up. The lexer already established
+// which bytes are quoted, which are commented, and which body belongs to which
+// command; the unchanged raw check simply reads what is left.
+function executableProgramText(command, program, comments) {
+  const ranges = [...comments];
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
+    const adjacent = program.adjacency?.[nodeIndex];
     const heredocs = tokens.filter((token) => token.type === "redir" && Array.isArray(token.heredocRange));
-    if (heredocs.length === 0 || !heredocBodiesAreData(tokens, program.adjacency?.[nodeIndex])) continue;
-    for (const token of heredocs) ranges.push(token.heredocRange);
+    if (heredocs.length > 0 && nodeConsumesItsInput(tokens, adjacent)) {
+      for (const token of heredocs) ranges.push(token.heredocRange);
+    }
+    for (const range of dataArgumentRanges(tokens, adjacent)) ranges.push(range);
   }
   if (ranges.length === 0) return command;
   ranges.sort((left, right) => left[0] - right[0]);
@@ -1292,7 +1348,7 @@ function analyzeProgram(command, context, depth = 0) {
   // unchanged check over the part of it that runs. Whatever the model misses,
   // the bytes are still there.
   const rawChecked = unsupported || program.hasBlocks;
-  const scanned = unsupported || program.error ? command : executableProgramText(command, program);
+  const scanned = unsupported || program.error ? command : executableProgramText(command, program, lexed.comments);
   const broadKillFound = broadKill || (rawChecked && rawMentionsBroadKill(scanned));
   if (rawChecked && rawMentionsProtected(scanned)) {
     protectedFound = true;

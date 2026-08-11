@@ -142,13 +142,19 @@ A name read from input the parser does not follow - `read`, a pipeline into a lo
 A read loop that names no watcher is unaffected.
 
 Parsing a construct is not the same as understanding it, so a second layer runs behind the analysis.
-When a program contains blocks and the analysis has produced no refusal, the unchanged raw check of the conservative path above is re-run over the part of the program that actually runs: the whole command with the here-document bodies the parser positively identified as data cut out.
-The check itself is not here-document-aware; the parser decides which bodies are data, and the check reads what is left.
+When a program contains blocks and the analysis has produced no refusal, the unchanged raw check of the conservative path above is re-run over the part of the program that actually runs: the whole command with the text the parser positively identified as data cut out.
+That text is here-document bodies whose consuming command reads them, quoted runs handed to a data sink, and comments, which run nowhere at all.
+The check itself is not quote-aware or here-document-aware, which would be a cleverer version of the thing it is backing up; the lexer already established which bytes are quoted, which are commented, and which body belongs to which command, and the check reads what is left.
 
-Inert data is allowed on that basis: a forbidden pattern that only ever reaches a `cat` or `python3` here-document body is allowed inside a construct exactly as it is outside one, while a `bash` here-document carrying the same bytes is denied in both places.
-This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable.
-A body counts as data only when the command consuming it can be named and does nothing else with it, so `cat <<EOF | bash` and `cat <<EOF > /tmp/o` keep their bodies in view and stay denied.
-Quoted text and other argument data inside a construct are not here-document bodies and keep the verdict they have always had, so `while true; do echo 'pkill -f fm-watch'; done` still denies.
+Inert data is allowed on that basis: a forbidden pattern that only ever reaches a `cat` or `python3` here-document body, a comment, or a quoted argument to `echo` is allowed inside a construct exactly as it is outside one, while a `bash` here-document carrying the same bytes is denied in both places.
+This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable, and for writing a dangerous command as an example in a comment or a quoted string.
+
+The boundary is what consumes the text.
+A here-document body counts as data only when the command consuming it can be named and does nothing else with it, so `cat <<EOF | bash` and `cat <<EOF > /tmp/o` keep their bodies in view.
+A quoted run counts as data only when it is an argument, never the command word or a prefix assignment, and only when its command is one of a small allowlist that prints its arguments or ignores them: `echo`, `printf`, `:`, `true`, and `false`.
+That list is an allowlist of data sinks rather than a list of consumers that execute what they are handed, because the executing ones are unbounded, and a name missing from a list of those would be a permit while a name missing from this one is only friction.
+So `eval '...'`, `bash -c '...'`, `sh -c '...'`, `sh '...'`, `'pkill' -f fm-watch`, `echo '...' | bash`, `echo '...' > /tmp/o`, `xargs -I{} sh -c '...'`, and any command the parser cannot vouch for all keep their quoted text in view and stay denied.
+A quoted run containing a substitution or an expansion is not literal text and is never cut, so `echo "$(pkill -f fm-watch)"` stays denied too.
 
 Block syntax the scanner cannot fit into a well-formed construct - an unclosed loop, a stray `done` or `esac`, an arithmetic `for`, a substitution in a `case` subject or pattern - keeps the whole command on the conservative path above.
 The regression suite pins two guarantees.
@@ -260,7 +266,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and both their never-more-permissive-than-top-level guarantees, bindings that outlive a branch or travel backwards around a loop, values arriving from unmodelled loop input, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and both their never-more-permissive-than-top-level guarantees, bindings that outlive a branch or travel backwards around a loop, values arriving from unmodelled loop input, inert comments and quoted data against the consumers that execute what they are handed, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 

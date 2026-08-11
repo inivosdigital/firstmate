@@ -277,9 +277,54 @@ test_block_construct_inert_data_allowed() {
   # both put the body back in play, so both stay refused.
   assert_policy block-until-heredoc-into-shell $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<\'EOF\' | bash\npkill -f fm-watch\nEOF')"
   assert_policy block-until-heredoc-to-file $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<\'EOF\' > /tmp/o\npkill -f fm-watch\nEOF')"
-  # Quoted text is an argument to a command that runs, not a body the parser has
-  # identified as data, so it keeps the verdict it has always had inside a block.
-  assert_policy block-until-quoted-data $'deny\tbroad-watcher-kill' "$(block_wrap until "echo 'pkill -f fm-watch'")"
+}
+
+# A comment and a quoted argument handed to a command that only prints it are as
+# inert as a here-document body fed to `cat`, and the lexer already knows both
+# for what they are.
+test_block_construct_inert_text_allowed() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-comment" allow "$(block_wrap "$shape" ': # pkill -f fm-watch')"
+    assert_policy "block-$shape-trailing-comment" allow "$(block_wrap "$shape" 'echo hi # pkill -f fm-watch')"
+    assert_policy "block-$shape-comment-protected" allow "$(block_wrap "$shape" ': # bin/fm-watch.sh')"
+    assert_policy "block-$shape-quoted-data" allow "$(block_wrap "$shape" "echo 'pkill -f fm-watch'")"
+    assert_policy "block-$shape-quoted-protected" allow "$(block_wrap "$shape" "echo 'bin/fm-watch.sh'")"
+  done
+  assert_policy block-until-double-quoted-data allow "$(block_wrap until 'echo "pkill -f fm-watch"')"
+  assert_policy block-until-printf-data allow "$(block_wrap until "printf '%s\\n' 'pkill -f fm-watch'")"
+  assert_policy block-until-ansi-quoted-data allow "$(block_wrap until "echo \$'pkill -f fm-watch'")"
+}
+
+# The boundary on that. A quoted literal that is the command, or that reaches a
+# consumer which executes it, is not inert. The allowed set is an allowlist of
+# commands that only print their arguments, so a command the parser does not
+# know keeps its quoted text in view and is refused.
+test_block_construct_executed_quoted_payload_denied() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-eval-quoted" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" "eval 'pkill -f fm-watch'")"
+    assert_policy "block-$shape-bash-c-quoted" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" "bash -c 'pkill -f fm-watch'")"
+    assert_policy "block-$shape-sh-c-quoted" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" "sh -c 'pkill -f fm-watch'")"
+  done
+  # The same three outside any construct.
+  assert_policy bare-eval-quoted $'deny\tbroad-watcher-kill' "eval 'pkill -f fm-watch'"
+  assert_policy bare-bash-c-quoted $'deny\tbroad-watcher-kill' "bash -c 'pkill -f fm-watch'"
+  assert_policy bare-sh-c-quoted $'deny\tbroad-watcher-kill' "sh -c 'pkill -f fm-watch'"
+  # A quoted string handed to `sh` as its script, and a quoted command word.
+  assert_policy block-until-sh-quoted-script $'deny\tbroad-watcher-kill' "$(block_wrap until "sh 'pkill -f fm-watch'")"
+  assert_policy block-until-quoted-command $'deny\tbroad-watcher-kill' "$(block_wrap until "'pkill' -f fm-watch")"
+  # A data sink whose output is handed somewhere it can run, or stored for later.
+  assert_policy block-until-echo-into-shell $'deny\tbroad-watcher-kill' "$(block_wrap until "echo 'pkill -f fm-watch' | bash")"
+  assert_policy block-until-echo-to-file $'deny\tbroad-watcher-kill' "$(block_wrap until "echo 'pkill -f fm-watch' > /tmp/o")"
+  # A consumer that executes what it is given, which the parser does not model.
+  assert_policy block-until-xargs-shell $'deny\tbroad-watcher-kill' "$(block_wrap until "echo x | xargs -I{} sh -c 'pkill -f fm-watch'")"
+  # A command the parser cannot vouch for keeps its quoted text in view.
+  assert_policy block-until-unknown-consumer $'deny\tbroad-watcher-kill' "$(block_wrap until "notes-tool 'pkill -f fm-watch'")"
+  # A quoted value bound to a name and then executed is a binding, not data.
+  assert_policy block-until-quoted-then-eval $'deny\tbroad-watcher-kill' "$(block_wrap until "Q='pkill -f fm-watch'; eval \$Q")"
+  # A substitution inside double quotes is not literal text, so it stays in view.
+  assert_policy block-until-quoted-substitution $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo "$(pkill -f fm-watch)"')"
 }
 
 # The defect this suite missed in its first round: a name bound in one part of a
@@ -673,6 +718,8 @@ test_shellcheck_clean() {
 test_full_acceptance_matrix
 test_direct_policy_contract
 test_block_construct_inert_data_allowed
+test_block_construct_inert_text_allowed
+test_block_construct_executed_quoted_payload_denied
 test_block_construct_binding_outlives_its_branch
 test_block_construct_unmodelled_input_is_tainted
 test_block_construct_executed_kill_denied
