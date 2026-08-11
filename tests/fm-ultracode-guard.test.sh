@@ -779,24 +779,99 @@ test_check_refuses_when_content_moves_under_a_textconv_driver() {
   pass "fm-ultracode-guard check refuses content that moved while the rendered diff held still"
 }
 
-test_check_passes_when_only_the_rendering_would_differ() {
-  local case_dir status
-  case_dir=$(new_case textconv-stable)
-  use_textconv_driver "$case_dir"
-  commit_nb "$case_dir" "REVIEWED"
+test_check_passes_when_only_path_quoting_configuration_changes() {
+  # The other half of "the identity tracks content": it must not move when
+  # content does not. Raw diff output renders paths through core.quotePath, so
+  # with a non-ASCII path a single local config setting changes what a caller
+  # hashing that output sees, while HEAD and its tree do not move at all. A
+  # refusal here is a false one - work nobody touched, held back.
+  local case_dir status tree_before tree_after
+  case_dir=$(new_case quote-path)
+  printf 'contents\n' > "$case_dir/wt/café.txt"
+  git -C "$case_dir/wt" add "café.txt"
+  git -C "$case_dir/wt" commit -qm "add a non-ASCII path"
   run_guard "$case_dir" flag task-x1 >/dev/null
   run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+  tree_before=$(git -C "$case_dir/wt" rev-parse "HEAD^{tree}")
 
-  # Same committed bytes, reached by a different history shape.
-  git -C "$case_dir/wt" commit -q --amend --no-edit -m "reworded, same content"
+  git -C "$case_dir/wt" config core.quotePath false
+
+  tree_after=$(git -C "$case_dir/wt" rev-parse "HEAD^{tree}")
+  if [ "$tree_before" != "$tree_after" ]; then
+    fail "quote-path: the tree moved, so this case no longer isolates a configuration-only change"
+  fi
 
   set +e
   run_guard "$case_dir" check task-x1 >/dev/null 2>&1
   status=$?
   set -e
 
-  expect_code 0 "$status" "textconv-stable: unchanged content must still satisfy check"
-  pass "fm-ultracode-guard check still passes when content is unchanged under a diff driver"
+  expect_code 0 "$status" "quote-path: a config-only change must not invalidate a recorded review"
+  pass "fm-ultracode-guard check ignores path-quoting configuration when the tree is unchanged"
+}
+
+# widen_shared_file <case_dir>: put a long feature.txt on the base branch, so an
+# edit at the top and an edit at the bottom merge without a conflict.
+widen_shared_file() {
+  local case_dir=$1 i
+  git clone -q "$case_dir/origin.git" "$case_dir/_wide" 2>/dev/null
+  : > "$case_dir/_wide/feature.txt"
+  for i in $(seq 1 20); do printf 'shared line %s\n' "$i" >> "$case_dir/_wide/feature.txt"; done
+  git -C "$case_dir/_wide" add feature.txt
+  git -C "$case_dir/_wide" commit -qm "widen the shared file"
+  git -C "$case_dir/_wide" push -q origin main
+  rm -rf "$case_dir/_wide"
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" reset -q --hard FETCH_HEAD
+}
+
+# advance_main_in_the_shared_file <case_dir>: another task lands a change to the
+# SAME file this task is editing, at the far end of it.
+advance_main_in_the_shared_file() {
+  local case_dir=$1
+  git clone -q "$case_dir/origin.git" "$case_dir/_bump" 2>/dev/null
+  printf 'another task edits the end of the shared file\n' >> "$case_dir/_bump/feature.txt"
+  git -C "$case_dir/_bump" add feature.txt
+  git -C "$case_dir/_bump" commit -qm "another task edits the same file"
+  git -C "$case_dir/_bump" push -q origin main
+  rm -rf "$case_dir/_bump"
+}
+
+test_check_refuses_after_a_rebase_over_a_same_file_base_advance() {
+  # Pins the narrowed promise in the header. The task's own edit survives the
+  # rebase untouched, but it now sits on top of someone else's edit to the same
+  # file, so the content that would ship is not the content that was reviewed
+  # and the gate refuses. Recorded as deliberate: an earlier header claimed
+  # every routine rebase held its review, which was false exactly here.
+  local case_dir out status
+  case_dir=$(new_case rebase-same-file)
+  widen_shared_file "$case_dir"
+  printf 'task edit at the top\n' > "$case_dir/wt/feature.new"
+  cat "$case_dir/wt/feature.txt" >> "$case_dir/wt/feature.new"
+  mv "$case_dir/wt/feature.new" "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -qm "the task's own change"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  advance_main_in_the_shared_file "$case_dir"
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" rebase -q FETCH_HEAD >/dev/null 2>&1 \
+    || fail "rebase-same-file: the rebase should apply cleanly for this case to mean anything"
+
+  assert_grep "task edit at the top" "$case_dir/wt/feature.txt" \
+    "rebase-same-file: the task's own change must have survived the rebase"
+  assert_grep "another task edits the end" "$case_dir/wt/feature.txt" \
+    "rebase-same-file: the base advance must be underneath it"
+
+  set +e
+  out=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "rebase-same-file: a same-file base advance changes what would ship, so check must refuse"
+  assert_contains "$out" "no longer covers the current diff" "rebase-same-file: should explain the refusal"
+  pass "fm-ultracode-guard check refuses after a rebase over a base advance to the same file"
 }
 
 # --- the requirement's generation, and one writer at a time -----------------
@@ -849,6 +924,31 @@ test_flag_replaces_a_marker_symlink_instead_of_writing_through_it() {
   assert_grep "role=independent-review" "$case_dir/state/task-x1.ultracode" \
     "marker-symlink: a real marker should now be in place"
   pass "fm-ultracode-guard flag replaces a marker symlink rather than writing through it"
+}
+
+test_flag_replaces_a_marker_directory_symlink_instead_of_writing_into_it() {
+  # The shape the damage control was added for, and the one it missed: `mv`
+  # given a destination that is a symlink to a DIRECTORY treats it as that
+  # directory and drops the temp marker inside it, leaving the link in place.
+  local case_dir leftovers
+  case_dir=$(new_case marker-dirlink)
+  mkdir -p "$case_dir/outside-dir"
+  ln -s "$case_dir/outside-dir" "$case_dir/state/task-x1.ultracode"
+
+  run_guard "$case_dir" flag task-x1 >/dev/null
+
+  if [ -L "$case_dir/state/task-x1.ultracode" ]; then
+    fail "marker-dirlink: the marker should have replaced the link, not been written past it"
+  fi
+  # Name the first stray entry rather than counting: the assertion then reports
+  # what leaked, and does not rest on a count pipeline reading empty input.
+  leftovers=$(find "$case_dir/outside-dir" -mindepth 1 -print -quit)
+  if [ -n "$leftovers" ]; then
+    fail "marker-dirlink: $leftovers was written into the outside directory"
+  fi
+  assert_grep "role=independent-review" "$case_dir/state/task-x1.ultracode" \
+    "marker-dirlink: a real marker should now be in place"
+  pass "fm-ultracode-guard flag replaces a marker directory symlink rather than writing into it"
 }
 
 # --- the diff must be established, never inferred ---------------------------
@@ -1092,8 +1192,10 @@ test_check_refuses_when_the_current_diff_cannot_be_determined
 test_reviewed_refuses_when_the_diff_cannot_be_determined
 test_reviewed_reports_the_commit_it_pinned
 test_check_refuses_when_content_moves_under_a_textconv_driver
-test_check_passes_when_only_the_rendering_would_differ
+test_check_passes_when_only_path_quoting_configuration_changes
+test_check_refuses_after_a_rebase_over_a_same_file_base_advance
 test_reflagging_retires_a_review_recorded_against_the_old_requirement
 test_flag_replaces_a_marker_symlink_instead_of_writing_through_it
+test_flag_replaces_a_marker_directory_symlink_instead_of_writing_into_it
 
 echo "# all fm-ultracode-guard tests passed"

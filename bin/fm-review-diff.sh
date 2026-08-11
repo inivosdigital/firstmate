@@ -12,7 +12,7 @@
 # the local branch with a warning. Without pr=, compare the local branch.
 # Usage: fm-review-diff.sh <task-id> [--stat|--identity]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
-#   --identity prints the CANONICAL content identity of that same comparison for
+#   --identity prints, NUL-delimited, the CANONICAL content identity of that same comparison for
 #     a caller that needs to tell "the code changed" from "the rendering
 #     changed": one `git diff-tree -r` raw line per changed path, naming the
 #     before/after blob object ids. It shares this script's base and compare
@@ -173,7 +173,15 @@ if [ "$MODE" = identity ]; then
     || { echo "error: no merge base between $BASE and $COMPARE_REF in $WT" >&2; exit 1; }
   # Rename detection off: it is a heuristic whose answer can change with
   # unrelated content, and the raw pairs already carry every changed path.
-  git -C "$WT" diff-tree -r --no-renames --no-ext-diff "$MERGE_BASE" "$COMPARE_COMMIT" --
+  # -z is load-bearing, not a style choice: without it raw output renders paths
+  # through core.quotePath, so flipping one local config setting changes this
+  # output for a non-ASCII path while the commit tree is byte-for-byte
+  # identical - a caller gating on it would refuse work nobody touched. -z
+  # emits paths verbatim between NULs, identical under either setting, and
+  # sidesteps the quoting of control characters too. Output is therefore
+  # NUL-delimited binary: read it as bytes, never through a shell variable,
+  # which silently drops NULs and would let a path run into the next record.
+  git -C "$WT" diff-tree -r --no-renames --no-ext-diff -z "$MERGE_BASE" "$COMPARE_COMMIT" --
   exit 0
 fi
 

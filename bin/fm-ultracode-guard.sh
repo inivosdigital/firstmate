@@ -36,12 +36,21 @@
 #       to the reviewed task are neither read nor validated;
 #     - the record is pinned to a canonical content identity of the diff it was
 #       recorded against - blob ids, not rendered text, so it moves whenever the
-#       committed bytes move - and check refuses once the current diff no longer
+#       committed bytes move, and it does not move when only local repository
+#       configuration does - and check refuses once the current diff no longer
 #       matches any recorded one;
 #     - the record names the generation of the requirement it was recorded
 #       against, so re-flagging retires it;
 #     - the diff being compared is established, never inferred from a PR head
-#       that could not be freshly resolved.
+#       that could not be freshly resolved;
+#     - both the task id and the reviewer id are lexically constrained before
+#       either is compared or turned into a path, and the role is constrained
+#       before it is written;
+#     - flag, reviewed and check hold this task's marker lock for their whole
+#       run, so no two of them interleave;
+#     - the marker is published by rename, so a half-written one is never
+#       observable, and a marker that is a symlink is replaced rather than
+#       written through - including a link to a directory.
 #   NOT enforced: that the reviewer id names a task this home really dispatched,
 #   that it is independent of the task under review, or that it reviewed
 #   anything at all. Those three are assertions the caller makes by running
@@ -115,10 +124,20 @@
 #   Blob ids move whenever the committed bytes move.
 #   That is a CONTENT identity, not a commit id, and the distinction is the
 #   whole design:
-#     rebase onto an advanced default branch - commit ids all change, the diff
-#       against the merge-base does not, so the review still stands. This fleet
-#       rebases routinely; pinning to a commit id would refuse here every time,
-#       and a guard that cries wolf gets worked around.
+#     rebase onto an advanced default branch - commit ids all change, and the
+#       review still stands PROVIDED the advance did not touch a file the task
+#       also touches. This fleet rebases routinely; pinning to a commit id would
+#       refuse every one of those, and a guard that cries wolf gets worked
+#       around.
+#       When the advance DOES touch the same file, the identity moves and check
+#       refuses, even though the task's own change is unaltered. That is the
+#       honest consequence of identifying whole before/after blobs rather than
+#       patch text, and it is the safe direction: the content that would now
+#       ship really is different from what was reviewed, because the task's
+#       change is sitting on top of someone else's edit to the same file. Re-
+#       record the review against the rebased diff. This paragraph is a promise
+#       narrowed to what the code keeps - an earlier version of it claimed every
+#       routine rebase held, which was false in exactly this case.
 #     squash - many commits collapse into one, final content identical, review
 #       still stands.
 #     amend - a reworded commit changes its id and nothing else; an amend that
@@ -262,14 +281,29 @@ hold_marker_lock() {
 }
 
 # write_marker: replace the marker from stdin atomically, and never through a
-# symlink. rename(2) swaps the directory entry itself, so a marker that is a
-# link to somewhere else is replaced rather than written through. A partly
-# written marker is never observable either.
+# symlink. A partly written marker is never observable either.
+#
+# rename(2) does not follow symlinks, but `mv` is not rename(2): given a
+# destination that is a symlink to a DIRECTORY, mv treats it as that directory
+# and deposits the temp file inside it - the marker stays a link and a stray
+# file lands outside state/. Links to a regular file, to nothing, and hard links
+# were all already handled; only this shape was not, and it is the shape the
+# damage control was added for.
+# GNU `mv -T` refuses to treat the destination that way, but it is a GNU
+# extension and this repo supports macOS, whose mv has no -T. So the link is
+# unlinked first and the rename then lands on a plain name. That is safe here
+# for a reason worth stating: every caller holds this task's marker lock, so no
+# other guard command can observe the gap, and check treats an absent marker as
+# "not flagged" - a gap another reader could misread. The lock is what makes
+# the two-step sound; do not lift this out from under it.
 write_marker() {
   local tmp
   tmp=$(mktemp "$STATE/.$ID.ultracode.XXXXXX") || return 1
   cat > "$tmp"
   chmod 0644 "$tmp"
+  if [ -L "$MARKER" ]; then
+    rm -f "$MARKER"
+  fi
   mv -f "$tmp" "$MARKER"
 }
 
@@ -333,17 +367,23 @@ current_tip() {
 # resolution (the same delegation the sibling guardrail bin/fm-tier-guard.sh
 # makes), and only hashes the result.
 diff_fingerprint() {
-  local wt=$1 errfile out
+  local wt=$1 errfile outfile rc
   errfile=$(mktemp)
+  # --identity is NUL-delimited, so it is captured as a file rather than into a
+  # variable: command substitution drops NUL bytes, which would let one record's
+  # path run into the next record's fields and collapse distinct diffs onto one
+  # identity. --no-filters keeps the hash off the attributes mechanism, the same
+  # reason --identity avoids textconv in the first place.
+  outfile=$(mktemp)
   # --identity, not the rendered diff: a project's own .gitattributes can bind a
   # path to a textconv or external diff driver, and then changed content renders
   # identically and a hash of the rendering never moves. That is ordinary in
   # projects holding notebooks or generated files, not an attack. --identity
   # names the before/after blob ids instead, which move with the bytes.
-  if ! out=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" --identity 2>"$errfile"); then
+  if ! "$SCRIPT_DIR/fm-review-diff.sh" "$ID" --identity >"$outfile" 2>"$errfile"; then
     echo "error: cannot determine the diff for $ID - bin/fm-review-diff.sh failed:" >&2
     sed 's/^/  /' "$errfile" >&2
-    rm -f "$errfile"
+    rm -f "$errfile" "$outfile"
     return 1
   fi
   # fm-review-diff.sh still exits 0 when it cannot freshly resolve an open PR's
@@ -360,11 +400,14 @@ diff_fingerprint() {
       grep 'PR head' "$errfile" | sed 's/^/  /'
       echo "  Restore access to the PR's remote and re-run. Do not record or accept a review against a head that could not be confirmed."
     } >&2
-    rm -f "$errfile"
+    rm -f "$errfile" "$outfile"
     return 1
   fi
   rm -f "$errfile"
-  printf '%s' "$out" | git -C "$wt" hash-object --stdin
+  rc=0
+  git -C "$wt" hash-object --no-filters --stdin < "$outfile" || rc=$?
+  rm -f "$outfile"
+  return "$rc"
 }
 
 cmd_flag() {
