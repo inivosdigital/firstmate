@@ -113,9 +113,15 @@ resolve_pr_head() {
     fi
   fi
   # Offline / unreachable remote: recorded pr_head is better than the local
-  # branch, but never preferred over a successful pull-head fetch above.
+  # branch, but never preferred over a successful pull-head fetch above. It is
+  # still only the head recorded when the PR was first seen, so it can lag every
+  # fix round pushed since. Say so on stderr rather than returning it as though
+  # it were a resolved head: a caller that gates on the diff being current
+  # cannot otherwise tell this fallback apart from a fresh fetch, and reading it
+  # as fresh is how unreviewed PR commits slip past such a gate.
   if [ -n "$recorded_head" ] \
     && git -C "$WT" cat-file -e "$recorded_head^{commit}" 2>/dev/null; then
+    echo "warning: PR head not freshly resolved; using the recorded pr_head $recorded_head, which may lag the open PR" >&2
     printf '%s' "$recorded_head"
     return 0
   fi

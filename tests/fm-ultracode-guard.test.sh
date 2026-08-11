@@ -75,6 +75,27 @@ tip_of() {
   git -C "$1/wt" rev-parse HEAD
 }
 
+# publish_pr_head <case_dir>: expose the branch tip as the forge would expose an
+# open PR's head, so the guard's diff comes from a freshly fetched PR head.
+publish_pr_head() {
+  git -C "$1/wt" push -q --force origin "HEAD:refs/pull/1/head"
+}
+
+# hide_pr_head <case_dir>: the PR ref stops resolving, the way an unreachable
+# remote or a dropped ref does, leaving only the recorded pr_head behind.
+hide_pr_head() {
+  git -C "$1/origin.git" update-ref -d refs/pull/1/head
+}
+
+# record_pr_meta <case_dir> <pr_head>: what bin/fm-pr-check.sh records once a PR
+# exists. pr_head is captured when the PR is first seen, so it ages from then on.
+record_pr_meta() {
+  local case_dir=$1 head=$2
+  fm_write_meta "$case_dir/state/task-x1.meta" \
+    "window=fm-task-x1" "worktree=$case_dir/wt" "project=$case_dir/project" \
+    "pr=https://github.com/example/repo/pull/1" "pr_head=$head"
+}
+
 run_guard() {
   local case_dir=$1
   shift
@@ -511,6 +532,225 @@ implementation" "implementation"
   pass "fm-ultracode-guard clears a pre-pinning review by re-recording it against the current diff"
 }
 
+test_check_passes_after_a_message_only_amend() {
+  local case_dir status reviewed_commit tip
+  case_dir=$(new_case amend-message-only)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+  reviewed_commit=$(tip_of "$case_dir")
+
+  git -C "$case_dir/wt" commit -q --amend -m "reviewed implementation, reworded"
+  tip=$(tip_of "$case_dir")
+  [ "$tip" != "$reviewed_commit" ] || fail "amend-message-only: fixture did not rewrite the commit id"
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "amend-message-only: rewording a commit must not invalidate the review"
+  pass "fm-ultracode-guard check survives an amend that only rewords the commit"
+}
+
+test_check_refuses_after_an_amend_that_changes_content() {
+  local case_dir status
+  case_dir=$(new_case amend-content)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  printf 'base\nquietly rewritten\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -q --amend --no-edit
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "amend-content: an amend that changes content must refuse"
+  pass "fm-ultracode-guard check refuses an amend that rewrites the reviewed content"
+}
+
+test_check_passes_after_a_force_push_preserving_the_diff() {
+  local case_dir status reviewed_commit tip
+  case_dir=$(new_case force-push-same-tree)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+  reviewed_commit=$(tip_of "$case_dir")
+
+  # Same tree, different commit: exactly what a history rewrite force-pushes.
+  git -C "$case_dir/wt" commit -q --amend --no-edit --date "2020-01-01T00:00:00"
+  git -C "$case_dir/wt" push -q --force origin fm/task-x1
+  tip=$(tip_of "$case_dir")
+  [ "$tip" != "$reviewed_commit" ] || fail "force-push-same-tree: fixture did not rewrite the commit id"
+  [ "$(git -C "$case_dir/wt" rev-parse "$tip^{tree}")" = "$(git -C "$case_dir/wt" rev-parse "$reviewed_commit^{tree}")" ] \
+    || fail "force-push-same-tree: fixture changed the tree, so it is not testing a same-tree rewrite"
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "force-push-same-tree: a rewrite that preserves the diff must still pass"
+  pass "fm-ultracode-guard check survives a force-push that preserves the reviewed content"
+}
+
+test_check_refuses_after_a_force_push_that_changes_content() {
+  local case_dir status
+  case_dir=$(new_case force-push-changed)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  printf 'base\nsomething else entirely\n' > "$case_dir/wt/feature.txt"
+  git -C "$case_dir/wt" add feature.txt
+  git -C "$case_dir/wt" commit -q --amend --no-edit
+  git -C "$case_dir/wt" push -q --force origin fm/task-x1
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "force-push-changed: a rewrite that changes content must refuse"
+  pass "fm-ultracode-guard check refuses a force-push that rewrites the reviewed content"
+}
+
+# --- the diff must be established, never inferred ---------------------------
+
+test_check_passes_against_a_freshly_resolved_pr_head() {
+  local case_dir status
+  case_dir=$(new_case pr-head-fresh)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  publish_pr_head "$case_dir"
+  record_pr_meta "$case_dir" "$(tip_of "$case_dir")"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "pr-head-fresh: a review pinned against the live PR head must pass"
+  pass "fm-ultracode-guard check passes when the PR head resolves and still matches the review"
+}
+
+test_check_refuses_when_only_the_recorded_pr_head_remains() {
+  # The dangerous half of the degraded PR path: the fresh fetch fails but the
+  # pr_head recorded when the PR opened is still a local object, so the diff
+  # helper returns it as though it were resolved. The compared diff is then the
+  # reviewed one while unreviewed commits sit past it, and the guard passed
+  # silently - this guard's own defect, reached through the PR path.
+  local case_dir out status reviewed_head
+  case_dir=$(new_case pr-head-recorded-only)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  publish_pr_head "$case_dir"
+  reviewed_head=$(tip_of "$case_dir")
+  record_pr_meta "$case_dir" "$reviewed_head"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  commit_work "$case_dir" "base
+reviewed implementation
+unreviewed work nobody read" "unreviewed work"
+  hide_pr_head "$case_dir"
+  git -C "$case_dir/wt" cat-file -e "$reviewed_head^{commit}" \
+    || fail "pr-head-recorded-only: fixture lost the recorded head object, so the fallback cannot be exercised"
+
+  set +e
+  out=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "pr-head-recorded-only: an unconfirmable PR head must refuse, never pass"
+  assert_contains "$out" "could not be freshly resolved" \
+    "pr-head-recorded-only: should say the PR head could not be established"
+  pass "fm-ultracode-guard check refuses when only a recorded, unconfirmable PR head remains"
+}
+
+test_check_refuses_when_the_pr_head_is_unreachable() {
+  local case_dir out status
+  case_dir=$(new_case pr-head-unreachable)
+  commit_work "$case_dir" "base
+reviewed implementation" "reviewed implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  # The PR opens after the review, then its remote becomes unreachable.
+  git -C "$case_dir/wt" remote remove origin
+  record_pr_meta "$case_dir" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+  set +e
+  out=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "pr-head-unreachable: an unresolvable PR head must refuse, never pass"
+  assert_contains "$out" "could not be freshly resolved" \
+    "pr-head-unreachable: should say the PR head could not be established"
+  pass "fm-ultracode-guard check refuses when the PR head cannot be resolved at all"
+}
+
+test_reviewed_refuses_to_pin_against_an_unconfirmable_pr_head() {
+  local case_dir out status
+  case_dir=$(new_case pr-head-unpinnable)
+  commit_work "$case_dir" "base
+implementation" "implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  git -C "$case_dir/wt" remote remove origin
+  record_pr_meta "$case_dir" "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+
+  set +e
+  out=$(run_guard "$case_dir" reviewed task-x1 task-x2 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "pr-head-unpinnable: a review must not be pinned to an unconfirmable head"
+  assert_contains "$out" "could not be freshly resolved" \
+    "pr-head-unpinnable: should say the PR head could not be established"
+  assert_no_grep "review=" "$case_dir/state/task-x1.ultracode" \
+    "pr-head-unpinnable: no record should be written against an unconfirmable head"
+  pass "fm-ultracode-guard reviewed refuses to pin a review to an unconfirmable PR head"
+}
+
+test_reviewer_metadata_alone_satisfies_the_identity_check() {
+  # A DOCUMENTED LIMIT, pinned so it stays deliberate. The guard enforces that
+  # the reviewer is a distinct id belonging to a really-dispatched task; it
+  # cannot observe whether that task read anything, so metadata alone passes.
+  # Independence rests on the supervisor who runs `reviewed`, not on this
+  # predicate (see the script header). Anything that makes independence
+  # mechanical has to change this test knowingly rather than by accident.
+  local case_dir status
+  case_dir=$(new_case reviewer-identity-limit)
+  commit_work "$case_dir" "base
+implementation" "implementation"
+  fm_write_meta "$case_dir/state/unrelated-helper.meta" \
+    "window=fm-unrelated-helper" "worktree=$case_dir/wt" "project=$case_dir/project"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+
+  run_guard "$case_dir" reviewed task-x1 unrelated-helper >/dev/null
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "reviewer-identity-limit: metadata alone is what the identity check enforces"
+  pass "fm-ultracode-guard treats reviewer metadata as identity, not as proof a review happened"
+}
+
 test_check_refuses_when_the_current_diff_cannot_be_determined() {
   local case_dir out status
   case_dir=$(new_case indeterminate-diff)
@@ -583,6 +823,15 @@ test_re_review_after_a_fix_passes_without_discarding_the_first
 test_check_passes_when_a_reverted_diff_returns_to_a_reviewed_state
 test_check_refuses_a_review_recorded_before_reviews_were_pinned
 test_re_recording_clears_a_pre_pinning_review
+test_check_passes_after_a_message_only_amend
+test_check_refuses_after_an_amend_that_changes_content
+test_check_passes_after_a_force_push_preserving_the_diff
+test_check_refuses_after_a_force_push_that_changes_content
+test_check_passes_against_a_freshly_resolved_pr_head
+test_check_refuses_when_only_the_recorded_pr_head_remains
+test_check_refuses_when_the_pr_head_is_unreachable
+test_reviewed_refuses_to_pin_against_an_unconfirmable_pr_head
+test_reviewer_metadata_alone_satisfies_the_identity_check
 test_check_refuses_when_the_current_diff_cannot_be_determined
 test_reviewed_refuses_when_the_diff_cannot_be_determined
 test_reviewed_reports_the_commit_it_pinned

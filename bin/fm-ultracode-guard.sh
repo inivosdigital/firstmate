@@ -1,11 +1,34 @@
 #!/usr/bin/env bash
-# Ultracode enforcement (guardrail #3): mechanically confirms a genuinely
-# independent second pass ran on an ultracode-flagged task's finished diff
-# before it can go PR-ready - not a sub-task the same crewmate spawned itself
+# Ultracode enforcement (guardrail #3): holds an ultracode-flagged task back
+# from PR-ready until an independent second pass on its finished diff has been
+# recorded, and until that record still covers the code as it stands
 # (data/research-resource-tiering-synthesis.md). Tracks state via a plain
 # marker file, state/<task-id>.ultracode, the same convention as other
 # firstmate state/ markers (state/.afk, state/<id>.turn-ended); it never
 # touches fm-spawn.sh or the task's own meta.
+#
+# What this guard proves, and what it does not
+#   Mechanically enforced:
+#     - a flagged task cannot pass with no review recorded at all;
+#     - the named reviewer is a different id from the task under review;
+#     - that id has recorded metadata in this home, so it names a task that was
+#       really dispatched rather than an invented id;
+#     - the record is pinned to the diff it was recorded against, and check
+#       refuses once the current diff no longer matches any recorded one;
+#     - the diff being compared is established, never inferred from a PR head
+#       that could not be freshly resolved.
+#   NOT enforced: that the named task actually reviewed anything. The metadata
+#   test proves a distinct dispatched task exists; nothing here can observe what
+#   that task read. `reviewed` is a SUPERVISOR-OWNED mutation - firstmate runs
+#   it after satisfying itself that a separately dispatched task reviewed the
+#   finished diff and its findings were addressed - and the independence
+#   guarantee rests there, not in this predicate. Stated plainly because an
+#   overclaim in a safety guard's own documentation is its own hazard: a reader
+#   who believes independence is machine-checked stops checking it.
+#   Making independence mechanical would need provenance recorded when the
+#   reviewer is dispatched (its own metadata binding it to the task it reviews),
+#   which is a change to the flagging and dispatch path rather than to this
+#   guard. That is reported, deliberately not built here.
 #
 # A recorded review is pinned to the diff it covered, so it goes stale when the
 # code moves. Without that binding a review recorded once satisfied check
@@ -37,6 +60,15 @@
 #   reviewed-commit field is recorded for the refusal message alone (it gives a
 #   supervisor something to `git log`), never for the comparison.
 #
+#   When a PR is recorded, the diff must come from a freshly resolved PR head.
+#   bin/fm-review-diff.sh will otherwise fall back to the local branch or to the
+#   pr_head recorded when the PR was first seen, and a fingerprint taken from
+#   either can match while unreviewed commits sit on the PR. Both fallbacks are
+#   therefore refusals here, not warnings, which does mean an ultracode check
+#   cannot be satisfied offline once a PR exists. That cost is deliberate: this
+#   guard's entire job is refusing to certify code nobody reviewed, and it
+#   cannot do that from a head it was unable to confirm.
+#
 #   Residual gaps, stated rather than implied: an identical diff rebased onto a
 #   different base can still interact badly with what landed underneath it, and
 #   the comparison covers committed work only. Neither is silent - the first
@@ -64,14 +96,16 @@
 #     docs/examples/crew-dispatch.json). Firstmate runs this right after
 #     spawning the task.
 #   fm-ultracode-guard.sh reviewed <task-id> <reviewer-task-id>
-#     Records that <reviewer-task-id> - a distinct, separately dispatched task
-#     (its own state/<reviewer-task-id>.meta must exist) - independently
-#     reviewed <task-id>'s finished diff and its findings were addressed, and
-#     pins that record to the diff as it stands now. Refuses if
-#     <reviewer-task-id> equals <task-id> or has no recorded meta, so a sub-task
-#     the same crewmate spawned itself cannot satisfy this; refuses too if the
-#     current diff cannot be established, since an unpinnable record would be
-#     indistinguishable from the unpinned ones above.
+#     The supervisor's assertion that <reviewer-task-id> - a distinct,
+#     separately dispatched task (its own state/<reviewer-task-id>.meta must
+#     exist) - independently reviewed <task-id>'s finished diff and its findings
+#     were addressed; this pins that assertion to the diff as it stands now.
+#     What it checks is above under "What this guard proves": the assertion that
+#     a review happened is the caller's, and only its pinning is mechanical.
+#     Refuses if <reviewer-task-id> equals <task-id> or has no recorded meta, so
+#     a sub-task the same crewmate spawned itself cannot satisfy this; refuses
+#     too if the current diff cannot be established, since an unpinnable record
+#     would be indistinguishable from the unpinned ones above.
 #     Re-running it after a fix APPENDS a record and keeps the earlier ones, so
 #     a reviewer who only needs to read the delta can be recorded without
 #     discarding the review of everything before it, and the marker keeps the
@@ -161,13 +195,22 @@ diff_fingerprint() {
     rm -f "$errfile"
     return 1
   fi
-  # fm-review-diff.sh still exits 0 but warns when it cannot resolve an open
-  # PR's head and falls back to the possibly-stale local branch. A fingerprint
-  # taken from that fallback can match while the real PR head has moved, so the
-  # degradation has to stay visible instead of reading as an authoritative pass
-  # - the same silent-reads-clean class fm-tier-guard.sh surfaces.
-  if grep -q 'PR head unavailable' "$errfile"; then
-    echo "warning: the diff for $ID was fingerprinted against a possibly-stale local branch because the open PR head could not be resolved; a pass here may not cover what the PR actually contains - re-check against the current PR before trusting it" >&2
+  # fm-review-diff.sh still exits 0 when it cannot freshly resolve an open PR's
+  # head: it falls back either to the local branch ("PR head unavailable") or to
+  # the pr_head recorded when the PR was first seen ("not freshly resolved").
+  # Both leave the compared diff unestablished as what the PR contains, and a
+  # fingerprint taken from either can match the recorded review while unreviewed
+  # commits sit on the PR - this guard's own defect reached through the PR path.
+  # So refuse rather than warn. Warning was not enough: only one of the two
+  # branches announced itself, and the silent one was the dangerous one.
+  if grep -qE 'PR head unavailable|PR head not freshly resolved' "$errfile"; then
+    {
+      echo "error: cannot determine the diff for $ID - the open PR's head could not be freshly resolved, so the diff compared here is not established to be what the PR contains:"
+      grep 'PR head' "$errfile" | sed 's/^/  /'
+      echo "  Restore access to the PR's remote and re-run. Do not record or accept a review against a head that could not be confirmed."
+    } >&2
+    rm -f "$errfile"
+    return 1
   fi
   rm -f "$errfile"
   printf '%s' "$out" | git -C "$wt" hash-object --stdin
