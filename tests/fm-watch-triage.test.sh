@@ -2029,6 +2029,12 @@ test_wedge_escalation_resets_when_pane_becomes_active() {
   printf '1\n' > "$state/.count-$key"
   # Pre-seed one escalation as if a prior wedge round already fired.
   printf '1\n' > "$state/.wedge-escalations-$key"
+  # A turn that completed moments ago, which is what "the crew is active again"
+  # means for the busy bound: this call is well within it, so the changed hash
+  # decides. A pane past the bound keeps its timer instead of resetting it,
+  # whatever its hash does (the busy-bound cases below).
+  set_mtime "$(date +%s)" "$state/wedged-reset.turn-ended"
+  prime_turnend_seen "$state/wedged-reset.turn-ended"
   export FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)'
 
   # The pane content changes (the crew is active again): the hash no longer
@@ -2643,6 +2649,169 @@ test_busy_pane_resumed_call_past_the_bound_still_wedges() {
   grep -F "escalation 1" "$out" >/dev/null || fail "a call past the bound did not report the escalation count"
   [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = 1 ] || fail "a call past the bound did not record its escalation"
   pass "a call that genuinely runs past the bound still wedge-escalates after a resumed pause"
+}
+
+# "I looked and the pane was between calls" and "I could not tell what the pane
+# was" are different answers, and only the first may start a new stretch. Codex
+# classifies unknown on the installed binary whatever its pane shows
+# (bin/fm-busy-lib.sh's codex-unverified arm), so a wedged Codex worker whose
+# footer keeps ticking produces an unknown verdict on every poll. Each of those
+# polls is an opportunity to renew the start, and renewing it once per bound
+# suppresses the alarm forever, so three of them must leave the start exactly
+# where it was and escalate every time. The ticking footer also keeps the pane
+# hash moving, so this never reaches the ordinary stale triage: the changed-hash
+# path is the only thing that can surface it.
+test_repeated_unknown_verdicts_do_not_move_the_start() {
+  local dir state fakebin out capture_file window key sig pid ticker n
+  dir=$(make_case busy-unknown-verdicts); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-unknown"
+  printf 'esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/busy-unknown.meta"
+  printf 'working: setup complete\n' > "$state/busy-unknown.status"
+  sig=$(seen_sig "$state/busy-unknown.status"); printf '%s' "$sig" > "$state/.seen-busy-unknown_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The one thing that does prove where this call began: a turn that completed
+  # 4000s ago, past the production default 3600s bound, with nothing since.
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-unknown.turn-ended"
+  prime_turnend_seen "$state/busy-unknown.turn-ended"
+
+  # A footer that ticks between polls, as the wedged pane in the incident did.
+  ( n=0; while :; do n=$((n + 1)); printf 'thinking (%ds)\nesc to interrupt\n' "$n" > "$capture_file"; sleep 0.3; done ) &
+  ticker=$!
+  n=1
+  while [ "$n" -le 3 ]; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    if ! wait_for_exit "$pid" 100; then
+      kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+      fail "unknown verdict $n left a ticking wedged pane unescalated: $(cat "$out")"
+    fi
+    if ! grep -F "possible wedge" "$out" >/dev/null; then
+      kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+      fail "unknown verdict $n did not flag a possible wedge: $(cat "$out")"
+    fi
+    if [ -e "$state/.last-idle-$key" ]; then
+      kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+      fail "unknown verdict $n was recorded as an idle sighting: $(cat "$state/.last-idle-$key")"
+    fi
+    n=$((n + 1))
+  done
+  kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+  pass "repeated unknown verdicts neither move the start nor exempt a ticking pane from the bound"
+}
+
+# The boundary of that path. Bounding an unreadable pane must not turn every
+# declared external wait on such a harness into a wedge alarm: the declared
+# pause and captain-hold handling in the same branch clears the timer on every
+# poll of that pane, so the crew stays with the ordinary pause handling and
+# never accumulates a wedge escalation.
+test_unknown_verdict_under_a_declared_pause_is_not_wedged() {
+  local dir state fakebin out capture_file window key sig pid ticker n
+  dir=$(make_case busy-unknown-paused); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-unknown-paused"
+  printf 'esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\n' "$window" > "$state/busy-parked.meta"
+  printf 'working: setup complete\npaused: awaiting the nightly export to finish\n' \
+    > "$state/busy-parked.status"
+  sig=$(seen_sig "$state/busy-parked.status"); printf '%s' "$sig" > "$state/.seen-busy-parked_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-parked.turn-ended"
+  prime_turnend_seen "$state/busy-parked.turn-ended"
+
+  ( n=0; while :; do n=$((n + 1)); printf 'waiting (%ds)\nesc to interrupt\n' "$n" > "$capture_file"; sleep 0.3; done ) &
+  ticker=$!
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+    reap "$pid"
+    fail "a declared external wait on an unreadable harness was escalated as a possible wedge: $(cat "$out")"
+  fi
+  kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+  [ ! -s "$out" ] || fail "a declared external wait printed a wake reason: $(cat "$out")"
+  [ ! -e "$state/.wedge-escalations-$key" ] || fail "a declared external wait on a ticking unreadable pane accumulated a wedge escalation"
+  reap "$pid"
+  pass "a declared external wait on a pane the contract cannot read never accumulates a wedge escalation"
+}
+
+# The record's two fields are written together, the anchor stamped at or before
+# the poll that wrote it, so an anchor later than that poll is not a record this
+# watcher can produce. It is corruption, and corruption is not evidence: the
+# bound falls back to the older proof that survives, and repeating the
+# impossible record buys the call no more time than producing it once did.
+test_repeated_inconsistent_idle_records_do_not_defer_the_bound() {
+  local dir state fakebin out capture_file window key sig pid n now anchor
+  dir=$(make_case busy-inconsistent-record); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-impossible"
+  printf 'thinking\nCtrl+c:cancel\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\n' "$window" > "$state/busy-impossible.meta"
+  printf 'working: setup complete\n' > "$state/busy-impossible.status"
+  sig=$(seen_sig "$state/busy-impossible.status"); printf '%s' "$sig" > "$state/.seen-busy-impossible_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  # The surviving trustworthy proof: a turn completed 4000s ago, past the
+  # production default 3600s bound.
+  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-impossible.turn-ended"
+  prime_turnend_seen "$state/busy-impossible.turn-ended"
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    now=$(date +%s)
+    # An idle sighting stamped 4000s after the poll that recorded it.
+    seed_idle_anchor "$state" "$key" "$now" $(( now - 4000 ))
+    rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "impossible record $n deferred the wedge escalation: $(cat "$out")"
+    grep -F "possible wedge" "$out" >/dev/null || fail "impossible record $n did not flag a possible wedge: $(cat "$out")"
+    anchor=$(idle_anchor_of "$state" "$key")
+    [ "$anchor" = "$now" ] \
+      || fail "impossible record $n was rewritten rather than rejected (anchor '$anchor', expected $now)"
+    n=$((n + 1))
+  done
+  pass "an idle record whose anchor postdates its own poll is rejected, however often it reappears"
+}
+
+# The documented cost of failing this alarm toward the captain, held to what the
+# code actually does. A harness with no armed spawn epoch and no completed turn
+# (grok, muse, and any adapter the contract cannot read) gives a watcher nothing
+# that proves when its call began, so it is treated as over the bound - and that
+# repeats on the wedge cadence for as long as the condition holds rather than
+# costing a single look, reaching demand-deep-inspection like any other repeat.
+test_unarmed_harness_realarms_until_its_first_turn_completes() {
+  local dir state fakebin out capture_file window key sig pid n
+  dir=$(make_case busy-unarmed-realarm); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-unarmed"
+  printf 'thinking\nCtrl+c:cancel\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=grok\n' "$window" > "$state/busy-unarmed.meta"
+  printf 'working: setup complete\n' > "$state/busy-unarmed.status"
+  sig=$(seen_sig "$state/busy-unarmed.status"); printf '%s' "$sig" > "$state/.seen-busy-unarmed_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  n=1
+  while [ "$n" -le 3 ]; do
+    : > "$out"
+    PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+      FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+      FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+    pid=$!
+    wait_for_exit "$pid" 100 || fail "alarm $n never fired for a worker with no trustworthy start: $(cat "$out")"
+    grep -F "escalation $n" "$out" >/dev/null \
+      || fail "alarm $n did not report escalation $n: $(cat "$out")"
+    [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = "$n" ] \
+      || fail "alarm $n did not record escalation $n"
+    n=$((n + 1))
+  done
+  grep -F "demand-deep-inspection" "$out" >/dev/null \
+    || fail "a third alarm for the same pane did not demand deep inspection: $(cat "$out")"
+  pass "a worker with no trustworthy start re-alarms on every wedge interval, not once"
 }
 
 test_nonterminal_stale_repairs_missing_or_corrupt_timer() {
@@ -3811,6 +3980,10 @@ test_backward_clock_steps_do_not_suppress_the_bound
 test_spawn_epoch_anchors_a_task_with_no_turn_yet
 test_busy_record_rewritten_mid_call_does_not_defer_the_bound
 test_busy_pane_resumed_call_past_the_bound_still_wedges
+test_repeated_unknown_verdicts_do_not_move_the_start
+test_unknown_verdict_under_a_declared_pause_is_not_wedged
+test_repeated_inconsistent_idle_records_do_not_defer_the_bound
+test_unarmed_harness_realarms_until_its_first_turn_completes
 test_nonterminal_stale_not_working_surfaced
 test_nonterminal_stale_paused_absorbed_then_resurfaced
 test_exited_declared_pause_and_live_gate_share_bounded_cadence

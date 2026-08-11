@@ -188,14 +188,17 @@ hash_pane() {
   if command -v md5 >/dev/null 2>&1; then md5 -q; else md5sum | cut -d' ' -f1; fi
 }
 
-# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working, through
-# the semantic busy-state contract (bin/fm-busy-lib.sh). Only an exact busy
-# verdict returns 0: idle, unknown, and dead all return 1, so a converted
-# adapter whose semantic state is missing, malformed, stale, or unverified is
-# treated as not-provably-working and surfaces rather than being absorbed.
-# <tail40> is the same bounded capture already read for hashing and is
-# consumed only by the Grok-scoped fallback inside the contract.
-window_is_busy() {  # <window> <tail40>
+# window_busy_state: prints one word of the semantic busy-state contract's
+# four-state verdict for a window - busy, idle, unknown or dead
+# (bin/fm-busy-lib.sh) - and unrecognised words print unknown. Callers that only
+# need "is this pane provably working" collapse it to a boolean below, but the
+# busy bound needs the state itself: idle is a positive sighting that the pane
+# was between calls, while unknown and dead only say the contract could not
+# establish that, and the bound treats the two differently (see "What may move
+# this bound's start" below). <tail40> is the same bounded capture already read
+# for hashing and is consumed only by the Grok-scoped fallback inside the
+# contract.
+window_busy_state() {  # <window> <tail40>
   local w=$1 tail40=$2 task meta verdict
   task=$(window_to_task "$w" "$STATE")
   meta="$STATE/$task.meta"
@@ -205,7 +208,19 @@ window_is_busy() {  # <window> <tail40>
     verdict=$(fm_busy_classify "$(window_backend "$w")" "$w" "$(window_harness "$w")" \
       "${task:-unknown}" "$STATE" "$tail40")
   fi
-  [ "${verdict%% *}" = busy ]
+  case "${verdict%% *}" in
+    busy|idle|dead) printf '%s' "${verdict%% *}" ;;
+    *)              printf 'unknown' ;;
+  esac
+}
+
+# window_is_busy: 0 (busy) iff the task's harness is PROVABLY working. Only an
+# exact busy verdict returns 0: idle, unknown, and dead all return 1, so a
+# converted adapter whose semantic state is missing, malformed, stale, or
+# unverified is treated as not-provably-working and surfaces rather than being
+# absorbed.
+window_is_busy() {  # <window> <tail40>
+  [ "$(window_busy_state "$1" "$2")" = busy ]
 }
 
 window_kind() {
@@ -325,7 +340,11 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # anywhere, so its start is the newest thing that positively proves the current
 # call had not begun yet. Exactly three things prove that, and nothing else may:
 #   - state/.last-idle-<key>: the newest poll at which a watcher of this home
-#     positively saw that pane NOT busy (busy_observe below);
+#     got an exact idle verdict for that pane from the busy-state contract
+#     (busy_observe below). An unknown or dead verdict is not that verdict:
+#     unknown says the contract could not tell, and a pane whose agent is gone
+#     is a task awaiting recovery rather than a worker between calls, so
+#     neither one moves this start;
 #   - state/<task>.turn-ended: touched by the harness turn-end hook when a turn
 #     actually completed. Pi also touches it at inner turn boundaries inside one
 #     busy run, so it is read as "a turn completed here", never as a call start;
@@ -359,10 +378,15 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # one.
 
 # state/.last-idle-<key>: one line "<idle-anchor> <last-poll>", both epochs.
-# <idle-anchor> is the newest poll that positively saw the pane not busy and is
-# advanced by nothing else. <last-poll> is the wall clock at that window's most
-# recent poll; it is not evidence about the worker, it exists so that a backward
-# clock step is visible as now < last-poll.
+# <idle-anchor> is the newest poll that got an exact idle verdict for the pane
+# and is advanced by nothing else. <last-poll> is the wall clock at that
+# window's most recent poll; it is not evidence about the worker, it exists so
+# that a backward clock step is visible as now < last-poll.
+#
+# Both writers below stamp the anchor at or before the poll that wrote it, so
+# anchor > last-poll is not a record this watcher can produce. Such a line is
+# corruption rather than evidence and is rejected here, which leaves the bound
+# on whichever older proof survives and, when none does, over the bound.
 busy_idle_record() {  # <window-key>; prints "<idle-anchor> <last-poll>"
   local key=$1 f line anchor last
   f="$STATE/.last-idle-$key"
@@ -374,19 +398,23 @@ busy_idle_record() {  # <window-key>; prints "<idle-anchor> <last-poll>"
   last=${last%% *}
   case "$anchor" in ''|*[!0-9]*) return 1 ;; esac
   case "$last" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$anchor" -le "$last" ] || return 1
   printf '%s %s' "$anchor" "$last"
 }
 
 # busy_observe: maintain that record for one window, once per poll, before any
-# bound is read. A not-busy poll is the one event that starts a new stretch. A
-# busy poll never advances the anchor - it only stamps the poll and, when the
+# bound is read. It takes the contract's state word rather than a boolean
+# because the distinction it needs is destroyed by a boolean: an exact idle
+# verdict is the one event that starts a new stretch, while busy, unknown and
+# dead alike leave the anchor where it was - none of them is evidence that the
+# current call had not begun. A non-idle poll only stamps the poll and, when the
 # clock has stepped backward since the previous one, shifts the anchor by that
 # same step so the elapsed time it was measuring is preserved rather than reset.
-busy_observe() {  # <window-key> <busy-now>
-  local key=$1 busy=$2 f now rec anchor last
+busy_observe() {  # <window-key> <busy-state>
+  local key=$1 state=$2 f now rec anchor last
   f="$STATE/.last-idle-$key"
   now=$(date +%s)
-  if [ "$busy" -ne 0 ]; then
+  if [ "$state" = idle ]; then
     printf '%s %s\n' "$now" "$now" > "$f"
     return 0
   fi
@@ -431,8 +459,9 @@ busy_spawn_epoch() {  # <task> <now>
 
 # busy_turn_over_age: 0 iff at least BUSY_TURN_MAX_SECS has passed since the
 # newest of those proofs, or if there is no proof at all. The caller has already
-# established that the pane is busy, and routes a crossed bound through the
-# existing wedge_timer_check, never anything that touches the worker itself.
+# established that this poll did not see the pane idle, and routes a crossed
+# bound through the existing wedge_timer_check, never anything that touches the
+# worker itself.
 busy_turn_over_age() {  # <task> <window-key>
   local task=$1 key=$2 now started c
   now=$(date +%s)
@@ -1200,11 +1229,16 @@ EOF
     # harness renders its busy indicator) so busy-looking strings in displayed
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
-    if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Kept as the contract's own state word, not a boolean: the triage below
+    # needs "provably working" (busy_now), while the bound needs to tell an
+    # exact idle sighting apart from unknown and dead, which a boolean cannot
+    # carry.
+    busy_state=$(window_busy_state "$w" "$tail40")
+    if [ "$busy_state" = busy ]; then busy_now=0; else busy_now=1; fi
     # Record this poll into the window's idle-anchor record before anything
-    # reads the busy bound below. A not-busy verdict is the only thing here that
-    # can move that anchor forward.
-    busy_observe "$key" "$busy_now"
+    # reads the busy bound below. An exact idle verdict is the only thing here
+    # that can move that anchor forward.
+    busy_observe "$key" "$busy_state"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -1309,10 +1343,11 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
-        # unless a genuinely busy pane's current call has run past the bound -
-        # then route it through the same wedge timer instead of erasing it.
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" "$key"; then
-          wedge_timer_check "$w" "$ssf" "busy (no progress within the bound)" "$ewf"
+        # unless this poll did not see the pane idle and its call has run past
+        # the bound - then route it through the same wedge timer instead of
+        # erasing it.
+        if [ "$busy_state" != idle ] && busy_turn_over_age "$task" "$key"; then
+          wedge_timer_check "$w" "$ssf" "not seen idle within the bound" "$ewf"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1323,8 +1358,15 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" "$key"; then
-        wedge_timer_check "$w" "$ssf" "busy (no progress within the bound)" "$ewf"
+      # A changing pane never reaches the stale triage above, so this is the
+      # only place a pane the contract cannot read - unknown, or an agent that
+      # is gone - can be surfaced while its footer keeps moving. It gets the
+      # same bound and the same wedge timer as a provably busy one rather than
+      # an exemption; a declared pause or captain hold still owns such a pane,
+      # because the block below clears the timer this may have started on every
+      # poll of it.
+      if [ "$busy_state" != idle ] && busy_turn_over_age "$task" "$key"; then
+        wedge_timer_check "$w" "$ssf" "not seen idle within the bound" "$ewf"
       else
         rm -f "$ssf" "$ewf"
       fi
