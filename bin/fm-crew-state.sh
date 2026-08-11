@@ -27,10 +27,12 @@
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
 #      the same line of history). An actively-executing run (running/fixing/ci,
-#      no outcome yet) also matches when its head is not an object in this repo
-#      at all: no-mistakes executes runs in its own private worktree, so a
-#      rebased or fix-advanced head reaches this repo only at push (see
-#      nm_run_attributes_here). Local work that advanced past a resolvable run
+#      no outcome yet, not parked at a gate) also matches when its head is not
+#      an object in this repo at all: no-mistakes executes runs in its own
+#      private worktree, so a rebased or fix-advanced head reaches this repo
+#      only at push - but ONLY when the runs list corroborates it as the single
+#      live run for this branch (see nm_run_attributes_here for the full
+#      fail-closed conditions). Local work that advanced past a resolvable run
 #      head, or diverged from it, invalidates attribution, and a terminal or
 #      gate-parked run with a locally-absent head stays unattributed.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
@@ -290,6 +292,22 @@ nm_gate_findings_count() {
   case "$rest" in ''|*[!0-9]*) return 0 ;; esac
   printf '%s' "$rest"
 }
+# 0 when the captured axi-status run ($RUN_OUT) is parked at a gate, in ANY of
+# the representations no-mistakes uses: a top-level awaiting_approval or
+# fix_review status, an awaiting_agent line, a scalar `gate:` or a `gate:`
+# block, or a gate step row. The ONE owner of that disjunction, shared by the
+# run-step interpreter and the unresolvable-head attribution guard below - a
+# real scalar or block gate carries top-level `status: running`, so a guard
+# reading only the top-level status does not see it (independent-review
+# finding on the 2026-08-10 fix).
+nm_run_is_gated() {
+  case "$(strip_quotes "$(nm_field status)")" in
+    awaiting_approval|fix_review) return 0 ;;
+  esac
+  printf '%s\n' "$RUN_OUT" | grep -Eq '^[[:space:]]*awaiting_agent:' && return 0
+  [ -n "$(nm_gate_status)" ] && return 0
+  nm_has_gate
+}
 log_reports_ci_ready() {
   [ "$LOG_VERB" = "done" ] || return 1
   case "$(status_line_note "$LOG_LINE")" in
@@ -379,12 +397,28 @@ nm_ci_checks_state() {
 # oriented text - no run id, no JSON/TOON, newest-first, columns
 # "<status> <branch> <short-sha> <date> [<pr-url>]" separated by runs of
 # spaces (verified: no quoting, so splitting on the first two whitespace runs
-# is exact) - but branch + coarse status is exactly what this predicate needs:
-# is a run for THIS branch active right now. Echoes the first (most recent)
-# matching row's status word (running/completed/cancelled/failed), or empty
-# when the branch has no run within FM_CREW_STATE_RUNS_LIMIT rows.
-nm_runs_status_for_branch() {  # <branch>
+# is exact).
+#
+# One scan serves two consumers that need different slices of the same view,
+# via globals: the coarse status fallback below, and the uniqueness proof the
+# unresolvable-head dispensation requires (nm_run_attributes_here). After a
+# call:
+#   NM_RUNS_MATCH_STATUS  newest same-branch row whose short-sha strictly
+#                         matches this worktree's code identity ('' if none)
+#   NM_RUNS_LIVE_N        count of same-branch rows still `running`, whatever
+#                         their head relation
+#   NM_RUNS_LIVE_SHA      the LAST-counted running row's short-sha; meaningful
+#                         only when NM_RUNS_LIVE_N is exactly 1
+# An empty/unavailable list leaves all three at their empty defaults, which
+# every consumer reads as "cannot bind".
+NM_RUNS_MATCH_STATUS=''
+NM_RUNS_LIVE_N=0
+NM_RUNS_LIVE_SHA=''
+nm_scan_runs_for_branch() {  # <branch>
   local branch=$1 out row st rest br sha
+  NM_RUNS_MATCH_STATUS=''
+  NM_RUNS_LIVE_N=0
+  NM_RUNS_LIVE_SHA=''
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
@@ -397,22 +431,55 @@ nm_runs_status_for_branch() {  # <branch>
     rest=${rest#* }
     rest=$(trim "$rest")
     sha=${rest%% *}
-    if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: a resolvable short-sha must
-      # match this worktree (equal, or local is ancestor of run tip), while a
-      # sha that is not an object here binds only a still-`running` row - the
-      # mid-flight pipeline-worktree shape nm_run_attributes_here explains -
-      # never a terminal row from a previous incarnation of a reused branch.
-      case "$(fm_nm_head_relation "$WT" "$sha")" in
-        match) ;;
-        unresolvable) [ "$st" = running ] || continue ;;
-        *) continue ;;
-      esac
-      printf '%s' "$st"
-      return 0
+    [ "$br" = "$branch" ] || continue
+    if [ "$st" = running ]; then
+      NM_RUNS_LIVE_N=$((NM_RUNS_LIVE_N + 1))
+      NM_RUNS_LIVE_SHA=$sha
+    fi
+    if [ -z "$NM_RUNS_MATCH_STATUS" ] \
+      && [ "$(fm_nm_head_relation "$WT" "$sha")" = match ]; then
+      NM_RUNS_MATCH_STATUS=$st
     fi
   done <<< "$out"
   return 0
+}
+
+# Coarse status for <branch>: the newest strictly-matching row's status word
+# (running/completed/cancelled/failed), else `running` only when the branch has
+# EXACTLY one still-running row and its sha is unresolvable here - the
+# mid-flight pipeline-worktree shape nm_run_attributes_here explains. Two or
+# more live rows means the branch's live run cannot be told apart from another
+# incarnation's, so nothing binds (fail closed, independent-review finding on
+# the 2026-08-10 fix); echoes empty when the branch has no acceptable run
+# within FM_CREW_STATE_RUNS_LIMIT rows.
+# <allow-unresolvable> must be 0 when `axi status` already answered for this
+# same branch and nm_run_attributes_here rejected that answer: the sole live
+# row is then a coarser view of the very run the detailed surface just refused
+# (gated, terminal, ambiguous, or diverged), and binding it here would launder
+# the rejection through the fallback. Strict-match rows still bind - head
+# identity is ownership proof on its own.
+nm_runs_status_for_branch() {  # <branch> <allow-unresolvable:1|0>
+  nm_scan_runs_for_branch "$1"
+  if [ -n "$NM_RUNS_MATCH_STATUS" ]; then
+    printf '%s' "$NM_RUNS_MATCH_STATUS"
+    return 0
+  fi
+  [ "${2:-1}" = 1 ] || return 0
+  if [ "$NM_RUNS_LIVE_N" = 1 ] \
+    && [ "$(fm_nm_head_relation "$WT" "$NM_RUNS_LIVE_SHA")" = unresolvable ]; then
+    printf 'running'
+  fi
+  return 0
+}
+
+# 0 when one hex commit id is a prefix of the other: runs-list rows carry a
+# short sha while `axi status` may carry the full one, and correspondence
+# between the two surfaces is what ties the sole live row to the axi run.
+nm_sha_corresponds() {  # <a> <b>
+  [ -n "$1" ] && [ -n "$2" ] || return 1
+  case "$1" in "$2"*) return 0 ;; esac
+  case "$2" in "$1"*) return 0 ;; esac
+  return 1
 }
 
 # CREW_BRANCH is empty at detached HEAD (a just-spawned crew, or a scout's
@@ -422,18 +489,29 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 # 0 if the active axi-status run binds to this worktree's code identity.
 # Branch match is a precondition (caller); the head relation itself is owned by
 # fm_nm_head_relation in bin/fm-nm-run-lib.sh. A strict `match` always binds.
-# An `unresolvable` head - not an object in this repo at all - additionally
-# binds only while the run is actively executing (no outcome yet and top-level
-# status running/fixing/ci): no-mistakes executes the run in its own private
-# worktree, so from the rebase step onward the run head exists only there
-# until push, and demanding local resolvability misread every such mid-flight
-# run as unattributed (the 2026-08-10 false-wedge incident: a healthy
-# nine-minute review step on a rebased head kept wedge-escalating because
-# --run-progress reported none). A terminal or gate-parked run whose head
-# never reached this repo stays unbound exactly as before - that is the
-# reused-branch stale-run shape the strict rule exists to reject - so a
-# cancelled, superseded, or long-parked historical run cannot claim a crew
-# that has already rebuilt its branch.
+# An `unresolvable` head - not an object in this repo at all - may additionally
+# bind: no-mistakes executes the run in its own private worktree, so from the
+# rebase step onward the run head exists only there until push, and demanding
+# local resolvability misread every such mid-flight run as unattributed (the
+# 2026-08-10 false-wedge incident: a healthy nine-minute review step on a
+# rebased head kept wedge-escalating because --run-progress reported none).
+#
+# A branch name plus a live-looking status is NOT ownership proof, so the
+# dispensation fails closed unless ALL of these hold (independent-review
+# findings on the first cut of this fix):
+#   - the run is not parked at a gate in ANY representation (nm_run_is_gated;
+#     a scalar or block gate carries top-level `status: running`, so the
+#     top-level status alone cannot exclude it);
+#   - no outcome yet and top-level status running/fixing/ci;
+#   - the runs list shows EXACTLY ONE still-running row for this branch, that
+#     row's sha is itself unresolvable here, and it corresponds to the axi
+#     run's head - two live same-branch candidates cannot be told apart, and
+#     binding the wrong one would let its progress mask a genuinely stalled
+#     task, which is precisely the alarm this must never silence.
+# A terminal or gate-parked run whose head never reached this repo stays
+# unbound exactly as before - that is the reused-branch stale-run shape the
+# strict rule exists to reject - so a cancelled, superseded, or long-parked
+# historical run cannot claim a crew that has already rebuilt its branch.
 nm_run_attributes_here() {
   local run_head outcome
   run_head=$(strip_quotes "$(nm_field head)")
@@ -442,12 +520,17 @@ nm_run_attributes_here() {
     unresolvable) ;;
     *) return 1 ;;
   esac
+  nm_run_is_gated && return 1
   outcome=$(strip_quotes "$(nm_field outcome)")
   [ -z "$outcome" ] || return 1
   case "$(strip_quotes "$(nm_field status)")" in
-    running|fixing|ci) return 0 ;;
+    running|fixing|ci) ;;
     *) return 1 ;;
   esac
+  nm_scan_runs_for_branch "$CREW_BRANCH"
+  [ "$NM_RUNS_LIVE_N" = 1 ] || return 1
+  [ "$(fm_nm_head_relation "$WT" "$NM_RUNS_LIVE_SHA")" = unresolvable ] || return 1
+  nm_sha_corresponds "$run_head" "$NM_RUNS_LIVE_SHA"
 }
 
 HAVE_RUN=0
@@ -473,7 +556,11 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
       # for no better answer.
-      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH")
+      # When the rejected answer was for THIS branch, forbid the fallback's
+      # unresolvable-row dispensation (see nm_runs_status_for_branch).
+      allow_unres=1
+      [ "$run_branch" = "$CREW_BRANCH" ] && allow_unres=0
+      COARSE_STATUS=$(nm_runs_status_for_branch "$CREW_BRANCH" "$allow_unres")
       if [ -n "$COARSE_STATUS" ]; then
         HAVE_RUN=1
         RUN_SOURCE=coarse
@@ -554,10 +641,6 @@ if [ "$HAVE_RUN" = 1 ]; then
     status=$(strip_quotes "$(nm_field status)")
     RUN_STATUS=$status
     outcome=$(strip_quotes "$(nm_field outcome)")
-    awaiting=$(printf '%s\n' "$RUN_OUT" | grep -E '^[[:space:]]*awaiting_agent:' | head -1 || true)
-    gate_status=$(nm_gate_status)
-    has_gate=0
-    nm_has_gate && has_gate=1
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
@@ -567,7 +650,9 @@ if [ "$HAVE_RUN" = 1 ]; then
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;
         *)             RUN_STATE=unknown; RUN_DETAIL="outcome: $outcome" ;;
       esac
-    elif [ -n "$awaiting" ] || [ "$status" = awaiting_approval ] || [ "$status" = fix_review ] || [ -n "$gate_status" ] || [ "$has_gate" = 1 ]; then
+    elif nm_run_is_gated; then
+      has_gate=0
+      nm_has_gate && has_gate=1
       if [ "$has_gate" = 1 ]; then
         gate=$(nm_gate_line_name)
       else

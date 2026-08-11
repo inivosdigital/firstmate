@@ -526,6 +526,9 @@ test_run_progress_attributes_live_run_on_absent_rebased_head() {
   git -C "$d/wt" rev-parse --verify "$absent^{commit}" >/dev/null 2>&1 \
     && fail "fixture defect: the rebased head resolved inside the task worktree"
   FM_FAKE_RUN_HEAD=$absent
+  # The runs list corroborates the run as this branch's SINGLE live run - the
+  # uniqueness proof the unresolvable-head dispensation requires.
+  FM_FAKE_RUNS_LIST="  running    fm/feat-rb $(printf '%.7s' "$absent")  2026-08-10 22:05"
   FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-rb)"
   out1=$(run_crew_progress "$d" feat-rb)
   case "$out1" in "progress: working/"*) ;; *) fail "a live run on a rebased head absent from this repo was not attributed: $out1" ;; esac
@@ -630,6 +633,7 @@ test_run_progress_defers_wedge_on_absent_rebased_head() {
   fm_write_meta "$d/state/feat-we.meta" "window=fm:fm-feat-we" "worktree=$d/wt" "kind=ship"
   absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
   FM_FAKE_RUN_HEAD=$absent
+  FM_FAKE_RUNS_LIST="  running    fm/feat-we $(printf '%.7s' "$absent")  2026-08-10 22:05"
   FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-we)"
   # The live-run dead-agent guard is not under test here; pin it alive so the
   # verdict is attributable to attribution alone (same pattern as the
@@ -645,6 +649,69 @@ test_run_progress_defers_wedge_on_absent_rebased_head() {
     || fail "the progress marker did not record the live step token"
   unset -f fm_backend_agent_alive
   pass "crew_run_progress_defers_wedge defers the incident geometry end to end"
+}
+
+# Independent-review regression (a): TWO same-branch still-running rows whose
+# shas this repo cannot resolve. The candidates cannot be told apart, so
+# binding either could let the wrong run's progress mask a genuinely stalled
+# task - the dispensation must fail closed on both the full axi-status path
+# and the coarse runs-list path.
+test_two_live_unresolvable_candidates_fail_closed() {
+  reset_fakes
+  local d absent out
+  d=$(new_case ambiguous-live-runs)
+  make_repo_on_branch "$d/wt" fm/feat-am
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-am.meta" "window=fm:fm-feat-am" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  # Second live candidate: an unrelated run's head, equally unresolvable here.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/feat-am deadbee  2026-08-10 22:10
+  running    fm/feat-am $(printf '%.7s' "$absent")  2026-08-10 22:05
+EOF
+)"
+  # Full path: axi status offers a live-looking run on the absent head, but the
+  # runs list shows it is not the branch's only live run.
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-am)"
+  out=$(run_crew_progress "$d" feat-am)
+  [ "$out" = "progress: none" ] \
+    || fail "an ambiguous live unresolvable run was attributed on the full path: $out"
+  # Coarse path: axi status answers for another branch, so only the runs list
+  # speaks for this one - two live rows must still refuse to bind.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  out=$(run_crew_progress "$d" feat-am)
+  [ "$out" = "progress: none" ] \
+    || fail "two live unresolvable rows were attributed on the coarse path: $out"
+  pass "two same-branch live unresolvable candidates fail closed on both paths"
+}
+
+# Independent-review regression (b): a gate-parked run carries top-level
+# `status: running` in its scalar-gate and block-gate representations, so a
+# status check alone cannot exclude it. On an absent head, with the runs list
+# corroborating it as the branch's sole live run (so a failure here is
+# attributable to the gate exclusion, not to missing corroboration), it must
+# still stay unattributed - binding it would resurrect the historical
+# parked-run masking shape through the unresolvable dispensation.
+test_gated_running_run_on_absent_head_stays_unattributed() {
+  reset_fakes
+  local d absent out
+  d=$(new_case gated-absent-head)
+  make_repo_on_branch "$d/wt" fm/feat-gg
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-gg.meta" "window=fm:fm-feat-gg" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  FM_FAKE_RUNS_LIST="  running    fm/feat-gg $(printf '%.7s' "$absent")  2026-08-10 22:05"
+  FM_FAKE_AXI_STATUS="$(run_parked_scalar_gate_running fm/feat-gg)"
+  out=$(run_crew_progress "$d" feat-gg)
+  [ "$out" = "progress: none" ] \
+    || fail "a scalar-gate run (top-level status running) on an absent head was attributed: $out"
+  FM_FAKE_AXI_STATUS="$(run_parked_in_gate_block fm/feat-gg)"
+  out=$(run_crew_progress "$d" feat-gg)
+  [ "$out" = "progress: none" ] \
+    || fail "a block-gate run (top-level status running) on an absent head was attributed: $out"
+  pass "gate-parked runs with top-level status running stay unattributed on an absent head"
 }
 
 # ---------------------------------------------------------------------------
@@ -1779,5 +1846,7 @@ test_run_progress_attributes_live_run_on_absent_rebased_head
 test_stale_run_on_absent_head_stays_unattributed
 test_coarse_running_row_with_absent_sha_attributes
 test_run_progress_defers_wedge_on_absent_rebased_head
+test_two_live_unresolvable_candidates_fail_closed
+test_gated_running_run_on_absent_head_stays_unattributed
 
 echo "all fm-crew-state tests passed"
