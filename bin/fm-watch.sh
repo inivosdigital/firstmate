@@ -32,14 +32,16 @@
 #                          closer look instead of another routine supervision
 #                          resume. Unless afk is active. A genuinely busy pane
 #                          (window_is_busy true) is exempt from the above, but
-#                          only up to BUSY_TURN_MAX_SECS with no completed turn
-#                          (state/<id>.turn-ended, or the spawn record before any
-#                          turn completes); past that bound busy_turn_over_age
-#                          routes it through the same wedge timer, so it surfaces
-#                          with the identical "stale: ..." reason, escalation
-#                          count, and demand-deep-inspection marker, for human
-#                          inspection only - never an automatic interrupt,
-#                          signal, or restart of the worker or its tool process.
+#                          only until BUSY_TURN_MAX_SECS has passed since the
+#                          newest positive proof its current call had not yet
+#                          started (busy_turn_over_age owns what counts as proof
+#                          and what a pane with no proof at all is treated as);
+#                          past that bound busy_turn_over_age routes it through
+#                          the same wedge timer, so it surfaces with the
+#                          identical "stale: ..." reason, escalation count, and
+#                          demand-deep-inspection marker, for human inspection
+#                          only - never an automatic interrupt, signal, or
+#                          restart of the worker or its tool process.
 #   check: <script>: <out> authenticated check output, always actionable
 #   check: process-event result captured: <keys>
 #                          a durably captured process-to-event result is queued
@@ -146,16 +148,15 @@ SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trai
 STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provably-working stale escalates as a possible wedge
 # A busy pane is unconditional proof of liveness with no built-in duration bound,
 # so a hung foreground call can remain hidden even while its rendered busy
-# footer changes every poll. BUSY_TURN_MAX_SECS bounds how long any busy pane
-# may go with no completed turn: once its task's
-# state/<id>.turn-ended marker (or, before any turn has completed, the task's
-# spawn record) is this old, busy_turn_over_age routes the pane through the
-# same STALE_ESCALATE_SECS-paced wedge_timer_check used for a provably-working
-# non-busy stale, so it escalates via the existing stale reason, escalation
-# counter, and demand-deep-inspection marker for human inspection only - never
-# an automatic interrupt, signal, or restart. A completed turn touches
-# turn-ended and resets the age. Set generously above any legitimate interval
-# between completed turns, including long tool calls, builds, or test runs.
+# footer changes every poll. BUSY_TURN_MAX_SECS bounds how long a busy pane may
+# go with no proof that its current call had not started yet: once
+# busy_turn_over_age (which owns what counts as proof) ages the newest such proof
+# past this, it routes the pane through the same STALE_ESCALATE_SECS-paced
+# wedge_timer_check used for a provably-working non-busy stale, so it escalates
+# via the existing stale reason, escalation counter, and demand-deep-inspection
+# marker for human inspection only - never an automatic interrupt, signal, or
+# restart. Set generously above any legitimate uninterrupted busy stretch,
+# including long tool calls, builds, or test runs.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -318,18 +319,132 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
   esac
 }
 
-# busy_turn_over_age: 0 iff <task>'s latest completed-turn marker is at least
-# BUSY_TURN_MAX_SECS old. Ages the per-task turn-ended marker, the harness-neutral
-# signal every verified harness's turn-end hook touches; before any turn has
-# completed, ages the task's spawn record instead so a fresh task still gets a
-# bound. The caller checks that the pane is busy and routes a crossed bound
-# through the existing wedge_timer_check, never anything that touches the
-# worker itself.
-busy_turn_over_age() {  # <task>
-  local task=$1 f
-  f="$STATE/$task.turn-ended"
-  [ -e "$f" ] || f="$STATE/$task.meta"
-  [ "$(age_of "$f")" -ge "$BUSY_TURN_MAX_SECS" ]
+# What may move this bound's start, and what may not
+# ---------------------------------------------------------------------------
+# The bound measures how long a pane has been busy with no sign the worker got
+# anywhere, so its start is the newest thing that positively proves the current
+# call had not begun yet. Exactly three things prove that, and nothing else may:
+#   - state/.last-idle-<key>: the newest poll at which a watcher of this home
+#     positively saw that pane NOT busy (busy_observe below);
+#   - state/<task>.turn-ended: touched by the harness turn-end hook when a turn
+#     actually completed. Pi also touches it at inner turn boundaries inside one
+#     busy run, so it is read as "a turn completed here", never as a call start;
+#   - the epoch inside the task's busy-contract gen token, minted once when
+#     fm-spawn armed this incarnation: the call cannot predate the task.
+#
+# Everything else is "I do not know", and "I do not know" never moves the start
+# forward. This alarm exists so a silently wedged worker cannot sit dead
+# forever: a missed wedge is severe, a false alarm costs one supervision look.
+# So an absent, unreadable or malformed record, a poll this watcher never made
+# (an exit and re-arm, downtime, a capture failure, a fresh watcher meeting a
+# pane already busy), and an epoch left in the future by a wall clock that moved
+# are all treated as no evidence at all: they keep the older start, and a pane
+# with no start to keep is treated as OVER the bound, not under it.
+#
+# state/<id>.meta's mtime is deliberately not a fallback. bin/fm-pr-check.sh and
+# bin/fm-x-lib.sh rewrite that file during a task's life, so its mtime advances
+# for reasons that have nothing to do with the call - the hazard
+# bin/fm-tier-guard.sh:11-16 already documents - and a start that advances on
+# unrelated activity defers the alarm for as long as that activity continues.
+# The gen token carries a spawn epoch written once and never rewritten for the
+# incarnation, so it is used instead. Its format is owned by
+# bin/fm-busy-event.sh; if that changes, the parse below fails and the task
+# loses only this floor, which alarms rather than suppresses.
+#
+# Time is wall clock: no monotonic epoch is readable by a fresh watcher process
+# on every supported platform, and none is needed here. A forward step only
+# makes the measured age larger, and a backward step is visible against the
+# record's own last-poll stamp and repaired by shifting the start by the same
+# amount, so elapsed busy time survives a clock step instead of being reset by
+# one.
+
+# state/.last-idle-<key>: one line "<idle-anchor> <last-poll>", both epochs.
+# <idle-anchor> is the newest poll that positively saw the pane not busy and is
+# advanced by nothing else. <last-poll> is the wall clock at that window's most
+# recent poll; it is not evidence about the worker, it exists so that a backward
+# clock step is visible as now < last-poll.
+busy_idle_record() {  # <window-key>; prints "<idle-anchor> <last-poll>"
+  local key=$1 f line anchor last
+  f="$STATE/.last-idle-$key"
+  [ -r "$f" ] || return 1
+  IFS= read -r line < "$f" 2>/dev/null || return 1
+  case "$line" in *' '*) ;; *) return 1 ;; esac
+  anchor=${line%% *}
+  last=${line#* }
+  last=${last%% *}
+  case "$anchor" in ''|*[!0-9]*) return 1 ;; esac
+  case "$last" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s %s' "$anchor" "$last"
+}
+
+# busy_observe: maintain that record for one window, once per poll, before any
+# bound is read. A not-busy poll is the one event that starts a new stretch. A
+# busy poll never advances the anchor - it only stamps the poll and, when the
+# clock has stepped backward since the previous one, shifts the anchor by that
+# same step so the elapsed time it was measuring is preserved rather than reset.
+busy_observe() {  # <window-key> <busy-now>
+  local key=$1 busy=$2 f now rec anchor last
+  f="$STATE/.last-idle-$key"
+  now=$(date +%s)
+  if [ "$busy" -ne 0 ]; then
+    printf '%s %s\n' "$now" "$now" > "$f"
+    return 0
+  fi
+  rec=$(busy_idle_record "$key") || return 0
+  anchor=${rec%% *}
+  last=${rec##* }
+  if [ "$now" -lt "$last" ]; then
+    anchor=$(( anchor - (last - now) ))
+    [ "$anchor" -ge 0 ] || anchor=0
+  fi
+  printf '%s %s\n' "$anchor" "$now" > "$f"
+}
+
+# The three proofs above, each as an epoch or a failure. A value later than
+# <now> is not evidence: the clock moved under it, so it is reported absent
+# rather than kept as a start in the future that nothing could ever age past.
+busy_idle_anchor() {  # <window-key> <now>
+  local key=$1 now=$2 rec anchor
+  rec=$(busy_idle_record "$key") || return 1
+  anchor=${rec%% *}
+  [ "$anchor" -le "$now" ] || return 1
+  printf '%s' "$anchor"
+}
+
+busy_turn_epoch() {  # <task> <now>
+  local task=$1 now=$2 m
+  m=$(stat_mtime "$STATE/$task.turn-ended") || return 1
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$m" -le "$now" ] || return 1
+  printf '%s' "$m"
+}
+
+busy_spawn_epoch() {  # <task> <now>
+  local task=$1 now=$2 gen epoch
+  gen=$(fm_busy_current_gen "$STATE" "$task") || return 1
+  case "$gen" in g[0-9]*) ;; *) return 1 ;; esac
+  epoch=${gen#g}
+  epoch=${epoch%%.*}
+  [ "$epoch" -le "$now" ] || return 1
+  printf '%s' "$epoch"
+}
+
+# busy_turn_over_age: 0 iff at least BUSY_TURN_MAX_SECS has passed since the
+# newest of those proofs, or if there is no proof at all. The caller has already
+# established that the pane is busy, and routes a crossed bound through the
+# existing wedge_timer_check, never anything that touches the worker itself.
+busy_turn_over_age() {  # <task> <window-key>
+  local task=$1 key=$2 now started c
+  now=$(date +%s)
+  started=
+  for c in "$(busy_idle_anchor "$key" "$now")" \
+           "$(busy_turn_epoch "$task" "$now")" \
+           "$(busy_spawn_epoch "$task" "$now")"; do
+    [ -n "$c" ] || continue
+    if [ -z "$started" ] || [ "$c" -gt "$started" ]; then started=$c; fi
+  done
+  [ -n "$started" ] || return 0
+  [ $(( now - started )) -ge "$BUSY_TURN_MAX_SECS" ]
 }
 
 # Absorb a stale pane under a declared external-wait pause (paused:) or a
@@ -1086,6 +1201,10 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
+    # Record this poll into the window's idle-anchor record before anything
+    # reads the busy bound below. A not-busy verdict is the only thing here that
+    # can move that anchor forward.
+    busy_observe "$key" "$busy_now"
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
@@ -1190,10 +1309,10 @@ EOF
         fi
       else
         # Pane busy or not yet stably stale: reset pending escalation bookkeeping,
-        # unless a genuinely busy pane has gone too long with no completed turn -
+        # unless a genuinely busy pane's current call has run past the bound -
         # then route it through the same wedge timer instead of erasing it.
-        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-          wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+        if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" "$key"; then
+          wedge_timer_check "$w" "$ssf" "busy (no progress within the bound)" "$ewf"
         else
           rm -f "$ssf" "$ewf"
         fi
@@ -1204,8 +1323,8 @@ EOF
     else
       printf '%s' "$h" > "$hf"
       echo 0 > "$cf"
-      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task"; then
-        wedge_timer_check "$w" "$ssf" "busy (no completed turn)" "$ewf"
+      if [ "$busy_now" -eq 0 ] && busy_turn_over_age "$task" "$key"; then
+        wedge_timer_check "$w" "$ssf" "busy (no progress within the bound)" "$ewf"
       else
         rm -f "$ssf" "$ewf"
       fi
