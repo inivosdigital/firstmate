@@ -22,7 +22,13 @@
 // branch, later assignment, or line ordering ever removes it. And because
 // parsing a construct is not understanding it, a block program that produced no
 // refusal is still handed to the unchanged raw check, over the part of itself
-// that runs. See docs/arm-pretool-check.md "Block constructs".
+// that runs.
+//
+// Only two kinds of byte are held back from that check: a comment, and a
+// here-document body under a quoted delimiter going to a command that reads its
+// input and nothing else. Both are text the shell itself is required to leave
+// inert, not text this parser has concluded is harmless, which is a weaker
+// thing and was twice wrong. See docs/arm-pretool-check.md "Block constructs".
 
 import path from "node:path";
 import { realpathSync } from "node:fs";
@@ -257,6 +263,12 @@ export class Lexer {
       }
       this.tokens.push(word);
       if (this.expectHeredoc) {
+        // Whether any part of the delimiter was quoted, which decides what the
+        // shell does to the body. With no part of it quoted the body is subject
+        // to parameter expansion, command substitution and arithmetic expansion
+        // before the reading command is ever reached, so `<<EOF` holding
+        // `$(...)` runs it and `<<'EOF'` holding the same text does not.
+        this.expectHeredoc.token.heredocQuoted = word.quoted;
         this.pendingHeredocs.push({ delimiter: word.value, stripTabs: this.expectHeredoc.stripTabs, token: this.expectHeredoc.token });
         this.expectHeredoc = null;
       }
@@ -339,17 +351,12 @@ export class Lexer {
           return null;
         }
         word.value += this.source.slice(this.index + 1, end);
-        this.recordQuoted(word, this.index, end + 1);
         this.index = end + 1;
         continue;
       }
       if (char === '"') {
         word.quoted = true;
-        const start = this.index;
-        const subs = word.subs.length;
-        const literal = word.literal;
         if (!this.readDoubleQuoted(word)) return null;
-        if (word.subs.length === subs && word.literal === literal) this.recordQuoted(word, start, this.index);
         continue;
       }
       if (char === "\\") {
@@ -373,18 +380,13 @@ export class Lexer {
         }
         word.quoted = true;
         word.value += ansi.value;
-        this.recordQuoted(word, this.index, ansi.next);
         this.index = ansi.next;
         continue;
       }
       if (this.source.startsWith('$"', this.index)) {
         word.quoted = true;
-        const start = this.index;
-        const subs = word.subs.length;
-        const literal = word.literal;
         this.index += 1;
         if (!this.readDoubleQuoted(word)) return null;
-        if (word.subs.length === subs && word.literal === literal) this.recordQuoted(word, start, this.index);
         continue;
       }
       if (this.source.startsWith("$(", this.index)) {
@@ -426,14 +428,6 @@ export class Lexer {
       this.index += 1;
     }
     return consumed ? word : null;
-  }
-
-  // Records a quoted run whose bytes the lexer resolved to literal text with no
-  // substitution and no expansion inside it. A quoted run that carries either is
-  // deliberately left unrecorded: its text still has to be read as it stands.
-  recordQuoted(word, start, end) {
-    if (!word.quotedRanges) word.quotedRanges = [];
-    word.quotedRanges.push([start, end]);
   }
 
   readDoubleQuoted(word) {
@@ -1109,30 +1103,22 @@ function seedBlockTaint(program, context, command) {
   return { protectedVariables, watcherPatterns, watcherPids, converged };
 }
 
-// Commands whose argument words the parser is confident are read and nothing
-// else: they print their arguments or ignore them.
-//
-// This is an allowlist of data sinks rather than a list of consumers that
-// execute what they are handed, and the direction matters. The executing ones
-// are unbounded - `xargs sh -c`, `find -exec`, `ssh host`, an interpreter's
-// `-e` - so a name missing from a list of those would be a permit. A name
-// missing from this list is only friction: its quoted text stays in view and
-// the command is refused inside a construct.
-//
-// `printf` is deliberately absent. `printf -v NAME` assigns its result instead
-// of printing it, and a list whose entry needs an exception has the wrong
-// membership rule; `echo` covers the same example forms.
-const DATA_SINK_COMMANDS = new Set([":", "true", "false", "echo"]);
-
 // Commands whose standard input the parser is confident is read and nothing
 // else: each copies, counts, filters or digests its input, and none of them
 // interprets any of it as a program or writes it anywhere it could be run.
 //
-// The same direction as the list above, for the same reason, and this one was
-// a blocklist of three shell names until it was found to admit `dash`, `ksh`,
-// `python3`, `ssh host`, `at now`, `tee /tmp/o` and thirty others. A list of
-// the commands that execute what they read cannot be finished, so this one
-// names the commands that do not.
+// This is an allowlist rather than a list of consumers that execute what they
+// are handed, and the direction matters. The executing ones are unbounded -
+// every shell, every interpreter, `ssh host`, `at now`, `xargs sh -c` - so a
+// name missing from a list of those would be a permit. A name missing from this
+// list is only friction: its body stays in view and the command is refused
+// inside a construct. It was a blocklist of three shell names until it was
+// found to admit thirty others.
+//
+// Membership here is necessary and not sufficient. It answers only "does this
+// command execute what it reads", which is the smaller half of the question:
+// the shell expands an unquoted here-document body before this command is
+// reached at all, so the delimiter has to be quoted as well.
 //
 // `sed` and `awk` are absent because `-f -` makes the input a program, `tee`
 // and `dd` because they write it to a file, and every interpreter because
@@ -1149,11 +1135,11 @@ const INPUT_READER_COMMANDS = new Set([
   "grep", "egrep", "fgrep", "cksum", "md5sum", "sha1sum", "sha256sum", "sha512sum", "base64",
 ]);
 
-// Commands that change what a name resolves to. Every entry in either list
-// above is the command it spells only while nothing has rebound it, and an
-// alias, a disabled builtin, a hashed path, a sourced file, or a string kept to
-// be evaluated later all rebind it silently. The parser cannot follow any of
-// those, so their presence anywhere in the program withdraws both allowlists
+// Commands that change what a name resolves to. Every entry in the list above
+// is the command it spells only while nothing has rebound it, and an alias, a
+// disabled builtin, a hashed path, a sourced file, or a string kept to be
+// evaluated later all rebind it silently. The parser cannot follow any of
+// those, so their presence anywhere in the program withdraws the allowlist
 // rather than being reasoned around.
 //
 // This one is a blocklist, unavoidably, but over a closed and small domain -
@@ -1169,7 +1155,7 @@ const NAME_REBINDING_COMMANDS = new Set(["alias", "unalias", "enable", "hash", "
 // commands above, or a new PATH, seen wherever the assignment sits - on its
 // own, as a prefix, or as an argument to `export`.
 //
-// PATH matters most to the reader allowlist, whose members are all external
+// PATH matters because the reader allowlist's members are all external
 // programs, so `PATH+=` counts exactly as `PATH=` does.
 //
 // A group is searched rather than assumed guilty. `(date)` and `{ date; }`
@@ -1208,87 +1194,68 @@ function groupRebindsNames(group, depth) {
   return programRebindsNames(program, depth + 1);
 }
 
-// The preconditions for reading any part of a node as data, shared by both
-// halves of the cut so that one answer governs the whole of it.
+// Here-document bodies this node holds that no part of the program can run.
 //
-// The parser has to be able to name the command, and the node must not hand
-// what it holds to anything else: `cat <<EOF` prints its body, but
-// `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a body
-// attached to `done` goes wherever the loop sends its input, which is not
-// modelled. Anything short of a positive answer leaves the bytes in the text.
+// Two independent things have to be true, because two different things can run
+// a body. The shell expands an unquoted body - parameter, command and
+// arithmetic expansion - while setting the here-document up, before the reading
+// command is reached, so `cat <<EOF` holding `$(pkill ...)` runs that kill and
+// `cat` never sees it happen. Only a quoted delimiter, `<<'EOF'` or `<<"EOF"`,
+// makes the body literal, and that is a property of the text rather than a
+// belief about a program. Then the command itself has to be one that reads its
+// input and nothing else, or `bash <<'EOF'` would run the literal text.
 //
-// The command must be a bare name with no wrapper in front of it, because both
-// allowlists below name specific commands and neither `/tmp/x/cat` nor
-// `env echo` is the command it spells: the first is whatever sits at that path,
-// and `env`, `exec`, `nohup`, `timeout` and `sudo` all run the external program
-// rather than the builtin. `command` and `builtin` do resolve to the builtin,
-// but they are excluded with the rest rather than carved out, because a list
-// whose entry needs an exception is how the last two rounds went wrong.
-function nodeConsumesItsInput(tokens, adjacent) {
-  const position = commandPosition(tokens);
-  if (!position.command || !position.command.literal || position.command.subs.length > 0) return null;
-  if (position.wrappers.length > 0 || position.command.value.includes("/")) return null;
-  for (const side of [adjacent?.before, adjacent?.after]) {
-    if (side === "|" || side === "|&") return null;
-  }
-  if (!tokens.every((token) => token.type !== "redir" || Array.isArray(token.heredocRange))) return null;
-  return position;
-}
-
-// Here-document bodies this node reads as data. The command has to be on the
-// reader allowlist; every other command keeps its body in the text, including
-// the shells, every other interpreter, anything that writes what it reads to a
-// file, and anything the parser has never heard of.
+// The node must also not hand what it holds to anything else: `cat <<EOF`
+// prints its body, but `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it
+// for later, and a body attached to `done` goes wherever the loop sends its
+// input, which is not modelled.
+//
+// The command must be a bare name with no wrapper in front of it, because the
+// allowlist names specific commands and neither `/tmp/x/cat` nor `env cat` is
+// the command it spells: the first is whatever sits at that path, and `env`,
+// `exec`, `nohup`, `timeout` and `sudo` all run the external program rather
+// than the builtin. `command` and `builtin` do resolve to the builtin, but they
+// are excluded with the rest rather than carved out, because a list whose entry
+// needs an exception is how this went wrong before.
+//
+// Anything short of a positive answer to all of it leaves the bytes in the text.
 function dataHeredocRanges(tokens, adjacent) {
-  const position = nodeConsumesItsInput(tokens, adjacent);
-  if (!position || !INPUT_READER_COMMANDS.has(position.command.value)) return [];
+  const position = commandPosition(tokens);
+  if (!position.command || !position.command.literal || position.command.subs.length > 0) return [];
+  if (position.wrappers.length > 0 || position.command.value.includes("/")) return [];
+  if (!INPUT_READER_COMMANDS.has(position.command.value)) return [];
+  for (const side of [adjacent?.before, adjacent?.after]) {
+    if (side === "|" || side === "|&") return [];
+  }
+  if (!tokens.every((token) => token.type !== "redir" || (Array.isArray(token.heredocRange) && token.heredocQuoted === true))) return [];
   return tokens.filter((token) => token.type === "redir" && Array.isArray(token.heredocRange)).map((token) => token.heredocRange);
 }
 
-// Quoted runs this node reads as data. Only argument words qualify: a quoted
-// run that is the command word, a wrapper, or a prefix assignment is either
-// what runs or what a later command runs, so it stays in the text.
-//
-// The word around the run has to be literal in its own right, not merely
-// unchanged across it. A run is recorded per run, so an innocent-looking one
-// can sit inside a word that assigns while it expands - `${NAME:="..."}` binds
-// NAME, and `$X"..."` is not literal text either - and the command in front of
-// it says nothing about that.
-//
-// The bare-name and no-wrapper requirements that make the allowlist's sentence
-// about builtins true live in the shared precondition above.
-function dataArgumentRanges(tokens, adjacent) {
-  const position = nodeConsumesItsInput(tokens, adjacent);
-  if (!position || !DATA_SINK_COMMANDS.has(position.command.value)) return [];
-  const ranges = [];
-  for (const word of position.words.slice(position.index + 1)) {
-    if (!word.literal || word.subs.length > 0) continue;
-    for (const range of word.quotedRanges || []) ranges.push(range);
-  }
-  return ranges;
-}
-
 // The part of the program that actually runs: the whole command with the text
-// the parser positively identified as data cut out. That is here-document
-// bodies whose consuming command reads them, quoted runs handed to a data sink,
-// and comments, which run nowhere at all.
+// nothing in it can run cut out. That is comments, which run nowhere at all,
+// and here-document bodies the shell is required to leave literal and hands to
+// a command that only reads them.
+//
+// Quoted argument text is deliberately not cut. A quoted run is inert to the
+// shell in the same way a quoted here-document body is, so an argument half of
+// this cut can be argued for on the same footing; it is left out because the
+// case for each new inert-looking shape has twice turned out to be narrower
+// than it read, and the whole relaxation is worth less than the certainty.
 //
 // This is not a quote-aware or here-document-aware regex, which would be a
 // cleverer version of the thing it is backing up. The lexer already established
-// which bytes are quoted, which are commented, and which body belongs to which
-// command; the unchanged raw check simply reads what is left.
+// which bytes are commented, which body belongs to which command, and whether
+// its delimiter was quoted; the unchanged raw check simply reads what is left.
 function executableProgramText(command, program, comments) {
   const ranges = [...comments];
-  // One withdrawal over the whole cut. Both halves read a command name and
-  // conclude something about bytes from it, so a program that can give a name a
-  // new meaning takes the claim away from both. Comments survive it: they are
-  // not a claim about any command.
+  // The cut reads a command name and concludes something about bytes from it,
+  // so a program that can give a name a new meaning takes the claim away.
+  // Comments survive it: they are not a claim about any command.
   const namesAreTrustworthy = !programRebindsNames(program);
   for (let nodeIndex = 0; namesAreTrustworthy && nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
     const adjacent = program.adjacency?.[nodeIndex];
     for (const range of dataHeredocRanges(tokens, adjacent)) ranges.push(range);
-    for (const range of dataArgumentRanges(tokens, adjacent)) ranges.push(range);
   }
   if (ranges.length === 0) return command;
   ranges.sort((left, right) => left[0] - right[0]);
@@ -1470,8 +1437,13 @@ function analyzeProgram(command, context, depth = 0) {
   // keep meeting data flow it does not represent, and until now the raw check
   // only ran on the unsupported path, so a block that parsed cleanly bought a
   // permit no straight-line program could. Give a parsed block program the same
-  // unchanged check over the part of it that runs. Whatever the model misses,
-  // the bytes are still there.
+  // unchanged check over the part of it that runs.
+  //
+  // What that leaves out has to be text the shell cannot run rather than text
+  // the model believes is harmless, or this layer is backing up the model with
+  // the model. An unquoted here-document body once qualified on the second
+  // reading and expanded on the first, and the substitutions in it were gone
+  // from the scan before it ran.
   const rawChecked = unsupported || program.hasBlocks;
   const scanned = unsupported || program.error ? command : executableProgramText(command, program, lexed.comments);
   const broadKillFound = broadKill || (rawChecked && rawMentionsBroadKill(scanned));

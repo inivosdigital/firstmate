@@ -146,42 +146,52 @@ The model is incomplete everywhere, not only inside constructs: a straight-line 
 Blocks are simply where this backstop was bought, because admitting constructs at all was what needed it.
 Reading the second layer as "the parser might be wrong here, and is understood elsewhere" gets it backwards.
 
-When a program contains blocks and the analysis has produced no refusal, the unchanged raw check of the conservative path above is re-run over the part of the program that actually runs: the whole command with the text the parser positively identified as data cut out.
-That text is here-document bodies whose consuming command reads them, quoted runs handed to a data sink, and comments, which run nowhere at all.
-The check itself is not quote-aware or here-document-aware, which would be a cleverer version of the thing it is backing up; the lexer already established which bytes are quoted, which are commented, and which body belongs to which command, and the check reads what is left.
+When a program contains blocks and the analysis has produced no refusal, the unchanged raw check of the conservative path above is re-run over the part of the program that actually runs: the whole command with the text nothing in it can run cut out.
+That text is comments, which run nowhere at all, and here-document bodies the shell is required to leave literal and hands to a command that only reads them.
+The check itself is not quote-aware or here-document-aware, which would be a cleverer version of the thing it is backing up; the lexer already established which bytes are commented, which body belongs to which command, and whether its delimiter was quoted, and the check reads what is left.
 
-Inert data is allowed on that basis: a forbidden pattern that only ever reaches a `cat` here-document body, a comment, or a quoted argument to `echo` is allowed inside a construct exactly as it is outside one, while a `bash` here-document carrying the same bytes is denied in both places.
-This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable, and for writing a dangerous command as an example in a comment or a quoted string.
+What is held back has to be text the shell cannot run, not text the model believes is harmless, or this layer would be backing up the model with the model.
+That distinction is not academic: it is exactly where an earlier version of this rule was wrong, and the difference between the two is one character of quoting.
 
-The boundary is what consumes the text, and both halves of the cut answer it the same way: with a list of the commands that do not execute what they are handed, never a list of the ones that do.
-The executing ones are unbounded - `xargs sh -c`, `find -exec`, `ssh host`, an interpreter's `-e` - so a name missing from a list of those would be a permit, while a name missing from these is only friction: its text stays in view and the command is refused inside a construct.
+A here-document body is set aside only when **the delimiter is quoted** and the consuming command is a reader.
+Both are required and neither is sufficient, because two different things can run a body.
 
-A here-document body counts as data only when its consumer is on a small allowlist of readers that copy, count, filter or digest their input: `cat`, `head`, `tail`, `wc`, `nl`, `rev`, `tr`, `cut`, `fold`, `grep`, `egrep`, `fgrep`, `cksum`, `md5sum`, `sha1sum`, `sha256sum`, `sha512sum`, and `base64`.
+The delimiter decides what the shell does before the command is reached.
+With no part of the delimiter quoted, `<<EOF`, the shell subjects the body to parameter expansion, command substitution and arithmetic expansion while setting the here-document up.
+So `cat <<EOF` whose body contains `$(pkill -f fm-watch)` runs that kill, before `cat` is executed and regardless of `cat` reading nothing but its input, and the same holds for a backtick, for text embedded in a longer line, and for a descriptor the command never reads.
+`<<'EOF'` and `<<"EOF"` make the body literal text by the shell's own rules, and that is a property of the command's text rather than a belief about a program's behavior.
+An unquoted delimiter is refused even when its body could not expand, because the relaxation is bought by the quoting and not by inspecting the body; a check that read the body would be the same mistake in a different place.
+
+The reader list is the other half, because a literal body handed to something that runs what it reads is still run: `bash <<'EOF'` executes it.
+So the consumer must be on a small allowlist of readers that copy, count, filter or digest their input: `cat`, `head`, `tail`, `wc`, `nl`, `rev`, `tr`, `cut`, `fold`, `grep`, `egrep`, `fgrep`, `cksum`, `md5sum`, `sha1sum`, `sha256sum`, `sha512sum`, and `base64`.
+That direction is deliberate, and it is the only direction that can be right: the commands that execute what they read are unbounded - every shell, every interpreter, `ssh host`, `at now`, `xargs sh -c` - so a name missing from a list of *those* would be a permit, while a name missing from this one is only friction.
 `sed` and `awk` are absent because `-f -` makes the input a program, `tee` and `dd` because they write it where it can be run later, and every interpreter because running its input is what it is for.
 `sort` and `uniq` are absent for the `tee` reason even though neither looks like a writer: `sort -o FILE` and `uniq - FILE` name an output file as an ordinary argument, with no shell redirection for the redirection rule to catch.
-So `dash`, `ksh`, `busybox sh`, `python3`, `perl`, `ssh host`, `at now`, `crontab -`, `tee /tmp/o`, `xargs`, and anything the parser has never heard of all keep their bodies in view, as do `cat <<EOF | bash` and `cat <<EOF > /tmp/o`.
-This costs the `python3 <<'EOF'` idiom, which an earlier version of this document offered as an example: an interpreter runs what it reads, and the fact that one particular body happened to be a syntax error was not a reason to trust the next one.
+So `dash`, `ksh`, `busybox sh`, `python3`, `perl`, `ssh host`, `crontab -`, `tee /tmp/o`, `xargs`, and anything the parser has never heard of all keep their bodies in view, as do `cat <<'EOF' | bash` and `cat <<'EOF' > /tmp/o`.
 
-A quoted run counts as data only when it is an argument, never the command word or a prefix assignment, and only when its command is on a small allowlist of builtins that print their arguments or ignore them: `echo`, `:`, `true`, and `false`.
-`printf` is absent from it: `printf -v NAME` assigns its result instead of printing it, and a list whose entry needs an exception has the wrong membership rule.
-So `eval '...'`, `bash -c '...'`, `sh -c '...'`, `sh '...'`, `'pkill' -f fm-watch`, `echo '...' | bash`, `echo '...' > /tmp/o`, `xargs -I{} sh -c '...'`, and any command the parser cannot vouch for all keep their quoted text in view and stay denied.
+Inert data is allowed on that basis: a forbidden pattern that only ever reaches a quoted-delimiter `cat` here-document body, or a comment, is allowed inside a construct exactly as it is outside one, while a `bash` here-document carrying the same bytes is denied in both places.
+This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable, and for writing a dangerous command as an example in a comment.
 
-Both lists name specific commands, so the command word must be a bare name with no wrapper in front of it.
-`/bin/echo '...'`, `./echo '...'` and `/tmp/x/cat <<EOF` are whatever sits at those paths, and `env`, `exec`, `nohup`, `timeout` and `sudo` all run the external program rather than the builtin, so `env echo '...'` is `/usr/bin/echo '...'`.
-`command` and `builtin` do resolve to the builtin, but they are refused with the rest rather than carved out, because a list whose entry needs an exception is how this rule went wrong twice already.
-That costs `command echo '<text>'` and `sudo cat <<EOF` inside a construct, and it is the price of the sentence above being true as written.
+The list names specific commands, so the command word must be a bare name with no wrapper in front of it.
+`/bin/cat <<'EOF'` and `./cat <<'EOF'` are whatever sits at those paths, and `env`, `exec`, `nohup`, `timeout` and `sudo` all run the external program rather than the builtin.
+`command` and `builtin` do resolve to the builtin, but they are refused with the rest rather than carved out, because a list whose entry needs an exception is how this rule went wrong before.
+That costs `sudo cat <<'EOF'` inside a construct, and it is the price of the sentence above being true as written.
 
-The word holding a quoted run must itself be literal, not merely unchanged across the run, because a word can assign while it is expanded.
-`echo ${P:="fm-watch"}` and `echo $X"fm-watch"` both contain a literal-looking run inside a word that is not literal text, and the command in front of such a word says nothing about that, so neither is cut and `echo "$(pkill -f fm-watch)"` stays denied on the same rule.
+Quoted argument text is not set aside, in any spelling.
+`echo 'pkill -f fm-watch'` inside a construct is refused, as are `:`, `true` and `false` with the same argument, and the double-quoted and `$'...'` forms.
+A quoted run is inert to the shell in the same way a quoted here-document body is, so this could be argued for on the same footing.
+It is left out because the case for each new inert-looking shape has twice turned out to be narrower than it read, and this relaxation is worth less than the certainty of not making that mistake a third time.
+Anything that needs a dangerous pattern written out inside a construct can put it in a comment or a quoted-delimiter here-document.
 
-A name means the command it spells only while nothing has rebound it, so both lists are withdrawn from the whole program when the program contains a function definition, `alias`, `unalias`, `enable`, `hash`, `eval`, `source`, `.`, `trap`, an assignment to `PATH` or `PATH+=` wherever it sits, or a command word the parser cannot read.
-One withdrawal governs the whole cut, and it matters most to the reader list, whose members are all external programs that a new `PATH` silently replaces.
-`builtin` resolves through to what follows it, so `builtin eval "$S"` withdraws the lists exactly as `eval "$S"` does.
+A name means the command it spells only while nothing has rebound it, so the reader list is withdrawn from the whole program when the program contains a function definition, `alias`, `unalias`, `enable`, `hash`, `eval`, `source`, `.`, `trap`, an assignment to `PATH` or `PATH+=` wherever it sits, or a command word the parser cannot read.
+A quoted delimiter says what the shell does to the body, not what `cat` is, so the quoting does not survive a rebinding on its own.
+PATH bites hardest here because every reader on the list is an external program that a new `PATH` silently replaces.
+`builtin` resolves through to what follows it, so `builtin eval "$S"` withdraws the list exactly as `eval "$S"` does.
 Comments survive the withdrawal, because a comment is not a claim about any command.
 Groups are read with the same lexer rather than assumed either way, so `{ alias echo=eval; }` counts and an ordinary `(date)` does not.
 A subshell is treated the same as a brace group even though its bindings die with it, because reading it costs one pass and refusing `(alias echo=eval)` costs nothing anyone writes.
-Membership follows that rule alone: `export`, `declare`, `set`, and `shopt` are absent because none of them can give a name a new meaning, and a program that sets a variable or a shell option keeps reading its quoted text as text.
-One consequence worth knowing before it surprises someone: `source config/x-mode.env` is an approved setup command in its own right, described above, and is also a name rebinder, so a program that sources it and then quotes a watcher pattern inside a construct is refused.
+Membership follows that rule alone: `export`, `declare`, `set`, and `shopt` are absent because none of them can give a name a new meaning, and a program that sets a variable or a shell option keeps its here-document body set aside.
+One consequence worth knowing before it surprises someone: `source config/x-mode.env` is an approved setup command in its own right, described above, and is also a name rebinder, so a program that sources it and then feeds a watcher pattern to a here-document inside a construct is refused.
 This cannot see a definition made before the command runs - a shell that already has `echo` or `cat` defined as a function will run that function - which is outside what a classifier reading one command string can establish.
 
 Block syntax the scanner cannot fit into a well-formed construct - an unclosed loop, a stray `done` or `esac`, an arithmetic `for`, a substitution in a `case` subject or pattern - keeps the whole command on the conservative path above.
@@ -294,7 +304,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and both their never-more-permissive-than-top-level guarantees, bindings that outlive a branch or travel backwards around a loop, values arriving from unmodelled loop input, inert comments and quoted data against the consumers that execute what they are handed, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and both their never-more-permissive-than-top-level guarantees, bindings that outlive a branch or travel backwards around a loop, values arriving from unmodelled loop input, inert comments, each here-document delimiter's quoting against a body that expands, every reader on the allowlist against the consumers that execute what they are handed, quoted argument text staying in view, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 

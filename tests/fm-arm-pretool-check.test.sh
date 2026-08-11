@@ -282,33 +282,83 @@ test_block_construct_inert_data_allowed() {
   assert_policy block-until-heredoc-to-file $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<\'EOF\' > /tmp/o\npkill -f fm-watch\nEOF')"
 }
 
-# A comment and a quoted argument handed to a command that only prints it are as
-# inert as a here-document body fed to `cat`, and the lexer already knows both
-# for what they are.
+# The delimiter's quoting decides this, and it is the whole of what makes a body
+# safe to set aside. With no part of the delimiter quoted the shell expands the
+# body while setting the here-document up - parameter, command and arithmetic
+# expansion - so `$(pkill -f fm-watch)` runs before `cat` is reached, and `cat`
+# reading nothing but its input says nothing about it. `<<'EOF'` and `<<"EOF"`
+# make the body literal text by the shell's own rules.
+test_block_construct_heredoc_quoting_decides() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "heredoc-unquoted-substitution-$shape" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap "$shape" $'cat <<EOF\n$(pkill -f fm-watch)\nEOF')"
+    assert_policy "heredoc-quoted-substitution-$shape" allow \
+      "$(block_wrap "$shape" $'cat <<\'EOF\'\n$(pkill -f fm-watch)\nEOF')"
+  done
+  # A backtick substitution expands under the same rule.
+  assert_policy heredoc-unquoted-backtick $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<EOF\n`pkill -f fm-watch`\nEOF')"
+  assert_policy heredoc-quoted-backtick allow "$(block_wrap until $'cat <<\'EOF\'\n`pkill -f fm-watch`\nEOF')"
+  # Embedded in surrounding text, and on a descriptor the command never reads:
+  # the expansion happens when the shell builds the body, not when it is read.
+  assert_policy heredoc-unquoted-embedded $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<EOF\nx$(pkill -f fm-watch)y\nEOF')"
+  assert_policy heredoc-unquoted-unread-fd $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat 3<<EOF\n$(pkill -f fm-watch)\nEOF')"
+  # The protected-path side of the same expansion.
+  assert_policy heredoc-unquoted-protected $'deny\tunclassifiable-protected-command' "$(block_wrap until $'cat <<EOF\n$(bin/fm-watch.sh)\nEOF')"
+  assert_policy heredoc-quoted-protected allow "$(block_wrap until $'cat <<\'EOF\'\n$(bin/fm-watch.sh)\nEOF')"
+  # A body that cannot expand is refused anyway when the delimiter is bare. The
+  # relaxation is bought by the quoting, not by inspecting the body, so a check
+  # that reads the body would be the same mistake in a different place.
+  assert_policy heredoc-unquoted-literal-body $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-unquoted-tab-strip $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<-EOF\n\tpkill -f fm-watch\n\tEOF')"
+  assert_policy heredoc-quoted-tab-strip allow "$(block_wrap until $'cat <<-\'EOF\'\n\tpkill -f fm-watch\n\tEOF')"
+  # A double-quoted delimiter quotes it too, and a herestring is not a body at all.
+  assert_policy heredoc-double-quoted-delimiter allow "$(block_wrap until $'cat <<"EOF"\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-herestring-denied $'deny\tbroad-watcher-kill' "$(block_wrap until "cat <<< 'pkill -f fm-watch'")"
+}
+
+# A comment runs nowhere at all, which no command name has to be trusted for.
 test_block_construct_inert_text_allowed() {
   local shape
+  local idiom
+  idiom=$'cat <<\'EOF\'\npkill -f fm-watch\nEOF'
   for shape in "${BLOCK_SHAPES[@]}"; do
     assert_policy "block-$shape-comment" allow "$(block_wrap "$shape" ': # pkill -f fm-watch')"
     assert_policy "block-$shape-trailing-comment" allow "$(block_wrap "$shape" 'echo hi # pkill -f fm-watch')"
     assert_policy "block-$shape-comment-protected" allow "$(block_wrap "$shape" ': # bin/fm-watch.sh')"
-    assert_policy "block-$shape-quoted-data" allow "$(block_wrap "$shape" "echo 'pkill -f fm-watch'")"
-    assert_policy "block-$shape-quoted-protected" allow "$(block_wrap "$shape" "echo 'bin/fm-watch.sh'")"
   done
-  assert_policy block-until-double-quoted-data allow "$(block_wrap until 'echo "pkill -f fm-watch"')"
-  assert_policy block-until-ansi-quoted-data allow "$(block_wrap until "echo \$'pkill -f fm-watch'")"
   # Setting a variable or a shell option cannot give a name a new meaning, and
   # neither can an ordinary group, so none of them withdraws the allowlist. This
   # pins how narrow that withdrawal is: widen it and these stop being allowed.
-  assert_policy block-until-with-export allow "$(block_wrap until "echo 'pkill -f fm-watch'")"$'\nexport TZ=UTC'
-  assert_policy block-until-with-set allow $'set -e\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
-  assert_policy block-until-with-subshell allow $'(date)\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
-  assert_policy block-until-with-brace-group allow $'{ date; }\n'"$(block_wrap until "echo 'pkill -f fm-watch'")"
+  assert_policy block-until-with-export allow "$(block_wrap until "$idiom")"$'\nexport TZ=UTC'
+  assert_policy block-until-with-set allow $'set -e\n'"$(block_wrap until "$idiom")"
+  assert_policy block-until-with-subshell allow $'(date)\n'"$(block_wrap until "$idiom")"
+  assert_policy block-until-with-brace-group allow $'{ date; }\n'"$(block_wrap until "$idiom")"
 }
 
-# The boundary on that. A quoted literal that is the command, or that reaches a
-# consumer which executes it, is not inert. The allowed set is an allowlist of
-# commands that only print their arguments, so a command the parser does not
-# know keeps its quoted text in view and is refused.
+# Quoted argument text is not set aside, in any spelling. A quoted run is as
+# inert to the shell as a quoted here-document body, so this could be argued for
+# on the same footing; it is refused because the case for each new
+# inert-looking shape has twice turned out narrower than it read, and the whole
+# relaxation is worth less than the certainty. Only a construct is affected: at
+# top level these were already refused and still are.
+test_block_construct_quoted_argument_not_data() {
+  local shape
+  for shape in "${BLOCK_SHAPES[@]}"; do
+    assert_policy "block-$shape-quoted-data" $'deny\tbroad-watcher-kill' "$(block_wrap "$shape" "echo 'pkill -f fm-watch'")"
+    assert_policy "block-$shape-quoted-protected" $'deny\tunclassifiable-protected-command' "$(block_wrap "$shape" "echo 'bin/fm-watch.sh'")"
+  done
+  assert_policy block-until-double-quoted-data $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo "pkill -f fm-watch"')"
+  assert_policy block-until-ansi-quoted-data $'deny\tbroad-watcher-kill' "$(block_wrap until "echo \$'pkill -f fm-watch'")"
+  local sink
+  for sink in : true false echo; do
+    assert_policy "quoted-arg-$sink" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink 'pkill -f fm-watch'")"
+  done
+}
+
+# A quoted literal that is the command, or that reaches a consumer which
+# executes it, is refused whether or not anything is being set aside. These held
+# before the argument cut existed and hold after it was taken back out.
 test_block_construct_executed_quoted_payload_denied() {
   local shape
   for shape in "${BLOCK_SHAPES[@]}"; do
@@ -345,148 +395,97 @@ HEREDOC_READERS=(cat head tail wc nl rev tr cut fold grep egrep fgrep cksum md5s
 test_block_construct_heredoc_reader_allowlist() {
   local reader
   for reader in "${HEREDOC_READERS[@]}"; do
-    assert_policy "heredoc-reader-$reader" allow "$(block_wrap until "$reader <<EOF"$'\npkill -f fm-watch\nEOF')"
+    assert_policy "heredoc-reader-$reader" allow "$(block_wrap until "$reader <<'EOF'"$'\npkill -f fm-watch\nEOF')"
+    # The quoting requirement is a property of the construct, not of `cat`: every
+    # name on the list loses its body to the shell under a bare delimiter.
+    assert_policy "heredoc-reader-$reader-unquoted" $'deny\tbroad-watcher-kill' \
+      "$(block_wrap until "$reader <<EOF"$'\n$(pkill -f fm-watch)\nEOF')"
   done
 }
 
-# The defect this suite missed in its third round: the here-document rule asked
-# whether the consumer was one of three shell names, so every other command that
-# runs what it reads got its body cut. The question is what the consumer does
-# with its input, and only an allowlist can answer it.
+# Membership in the reader list is necessary as well as the quoting: a literal
+# body handed to something that runs what it reads is still run. Each consumer
+# here gets a quoted delimiter, so only the allowlist can be what refuses it,
+# and deleting a name from that list turns these green for the wrong reason.
 test_block_construct_heredoc_non_reader_denied() {
   local consumer
   # Shells that are simply not spelled `sh`, `bash` or `zsh`.
   for consumer in dash ksh ksh93 mksh yash posh "busybox sh"; do
     assert_policy "heredoc-shell-${consumer// /-}" $'deny\tbroad-watcher-kill' \
-      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+      "$(block_wrap until "$consumer <<'EOF'"$'\npkill -f fm-watch\nEOF')"
   done
   # Interpreters, which run what they read. The python body is valid python.
   assert_policy heredoc-python-executing $'deny\tbroad-watcher-kill' \
-    "$(block_wrap until $'python3 <<EOF\nimport os\nos.system("pkill -f fm-watch")\nEOF')"
+    "$(block_wrap until $'python3 <<\'EOF\'\nimport os\nos.system("pkill -f fm-watch")\nEOF')"
   for consumer in perl ruby node php lua tclsh expect "gawk -f -" "sed -f -"; do
     assert_policy "heredoc-interpreter-${consumer%% *}" $'deny\tbroad-watcher-kill' \
-      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+      "$(block_wrap until "$consumer <<'EOF'"$'\npkill -f fm-watch\nEOF')"
   done
   # Commands that write what they read where it can be run later. The doc already
-  # promised this for `cat <<EOF > /tmp/o`; it has to hold for a writer too.
+  # promised this for `cat <<'EOF' > /tmp/o`; it has to hold for a writer too.
   # `sort -o FILE` and `uniq - FILE` name an output file as an ordinary
   # argument, so the redirection rule never sees it. Neither looks like a writer,
   # which is why both are off the reader list.
   for consumer in "tee /tmp/o" "dd of=/tmp/o" "cp /dev/stdin /tmp/o" "sponge /tmp/o" "crontab -" "at now" batch "sort -o /tmp/o" "uniq - /tmp/o" sort uniq; do
     assert_policy "heredoc-writer-${consumer%% *}" $'deny\tbroad-watcher-kill' \
-      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+      "$(block_wrap until "$consumer <<'EOF'"$'\npkill -f fm-watch\nEOF')"
   done
   # Commands that hand the body to another machine or another process.
   for consumer in "ssh host" "ssh -T host" "docker exec -i c sh" "kubectl exec -i pod --" "systemd-run --pipe bash" "xargs -I{} sh -c {}" parallel "make -f -" gdb ed patch; do
     assert_policy "heredoc-elsewhere-${consumer%% *}" $'deny\tbroad-watcher-kill' \
-      "$(block_wrap until "$consumer <<EOF"$'\npkill -f fm-watch\nEOF')"
+      "$(block_wrap until "$consumer <<'EOF'"$'\npkill -f fm-watch\nEOF')"
   done
   # A command the parser has never heard of, and a reader's name at a path or
   # behind a wrapper, which is not that reader.
-  assert_policy heredoc-unknown-consumer $'deny\tbroad-watcher-kill' "$(block_wrap until $'notes-tool <<EOF\npkill -f fm-watch\nEOF')"
-  assert_policy heredoc-absolute-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'/bin/cat <<EOF\npkill -f fm-watch\nEOF')"
-  assert_policy heredoc-relative-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'./cat <<EOF\npkill -f fm-watch\nEOF')"
-  assert_policy heredoc-sudo-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'sudo cat <<EOF\npkill -f fm-watch\nEOF')"
-  assert_policy heredoc-env-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'env cat <<EOF\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-unknown-consumer $'deny\tbroad-watcher-kill' "$(block_wrap until $'notes-tool <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-absolute-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'/bin/cat <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-relative-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'./cat <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-sudo-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'sudo cat <<\'EOF\'\npkill -f fm-watch\nEOF')"
+  assert_policy heredoc-env-cat $'deny\tbroad-watcher-kill' "$(block_wrap until $'env cat <<\'EOF\'\npkill -f fm-watch\nEOF')"
   # The protected-path side of the same rule, so this is not specific to kills.
-  assert_policy heredoc-dash-protected $'deny\tunclassifiable-protected-command' "$(block_wrap until $'dash <<EOF\nbin/fm-watch.sh\nEOF')"
+  assert_policy heredoc-dash-protected $'deny\tunclassifiable-protected-command' "$(block_wrap until $'dash <<\'EOF\'\nbin/fm-watch.sh\nEOF')"
 }
 
-# One withdrawal has to govern the whole cut. A program that can give a name a
-# new meaning cannot be trusted about `cat` either, and `cat` is the half where
-# PATH actually bites, because every reader on the list is an external program.
+# A quoted delimiter says what the shell does to the body, not what `cat` is, so
+# the reader's name still has to mean what it spells. An alias, a disabled
+# builtin, a hashed path, a sourced file, a string evaluated later, or a new
+# PATH all give it another meaning, and PATH bites hardest here because every
+# reader on the list is an external program.
 test_block_construct_withdrawal_covers_heredocs() {
   local prefix
   local body
-  body=$(block_wrap until $'cat <<EOF\npkill -f fm-watch\nEOF')
-  for prefix in 'PATH=/tmp/x' 'PATH+=:/tmp/x' 'export PATH=/tmp/x' 'alias cat=bash' 'hash -p /tmp/x/bash cat' 'eval "$SETUP"' '. /tmp/defs.sh' 'trap "$SETUP" DEBUG' '{ alias cat=bash; }' 'builtin alias cat=bash'; do
+  body=$(block_wrap until $'cat <<\'EOF\'\npkill -f fm-watch\nEOF')
+  for prefix in 'PATH=/tmp/x' 'PATH+=:/tmp/x' 'export PATH=/tmp/x' 'alias cat=bash' 'hash -p /tmp/x/bash cat' 'enable -n cat' 'eval "$SETUP"' '. /tmp/defs.sh' 'trap "$SETUP" DEBUG' '$SETUP'; do
     assert_policy "heredoc-withdrawn-${prefix%% *}" $'deny\tbroad-watcher-kill' "$(printf '%s\n%s' "$prefix" "$body")"
   done
   assert_policy heredoc-withdrawn-function $'deny\tbroad-watcher-kill' "$(printf 'cat() { bash; }\n%s' "$body")"
-  assert_policy heredoc-withdrawn-protected $'deny\tunclassifiable-protected-command' \
-    "$(printf 'PATH=/tmp/x\n%s' "$(block_wrap until $'cat <<EOF\nbin/fm-watch.sh\nEOF')")"
-  # A comment is not a claim about any command, so the withdrawal leaves it alone.
-  assert_policy comment-survives-withdrawal allow "$(printf '. /tmp/defs.sh\n%s' "$(block_wrap until ': # pkill -f fm-watch')")"
-  # And an ordinary program still gets the here-document idiom the branch exists for.
-  assert_policy heredoc-idiom-still-allowed allow "$(printf 'export TZ=UTC\n%s' "$body")"
-}
-
-# The defect this suite missed in its second round: reading a quoted argument as
-# data is a claim about that argument and about the name in front of it, and both
-# halves can be false. An argument can assign while it expands, and a name can
-# have been rebound to something that runs what it is handed.
-test_block_construct_sink_name_defeated_denied() {
-  # An argument that assigns while it is expanded. The word is not literal, so
-  # nothing in it is read as data whatever command it is handed to.
-  assert_policy block-until-printf-v-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'printf -v P "fm-watch"; pkill -f "$P"')"
-  assert_policy block-if-printf-v-protected $'deny\tunclassifiable-protected-command' 'if true; then printf -v A "bin/fm-watch.sh"; fi; $A'
-  assert_policy block-until-default-assign $'deny\tbroad-watcher-kill' "$(block_wrap until ': ${P:="fm-watch"}; pkill -f "$P"')"
-  assert_policy block-until-echo-default-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${P:="fm-watch"}; pkill -f "$P"')"
-  assert_policy block-until-echo-plain-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${P="fm-watch"}; pkill -f "$P"')"
-  assert_policy block-until-echo-array-assign $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo ${A[0]:="fm-watch"}; pkill -f "${A[0]}"')"
-  # A literal run beside an expansion is not a literal word.
-  assert_policy block-until-adjacent-expansion $'deny\tbroad-watcher-kill' "$(block_wrap until 'echo $X"fm-watch"; pkill -f "$X"')"
-  # `printf` is not on the list at all, because `printf -v` assigns rather than
-  # prints and the list must not need an exception to be true.
-  assert_policy block-until-printf-data $'deny\tbroad-watcher-kill' "$(block_wrap until "printf '%s\\n' 'pkill -f fm-watch'")"
-  # The list describes builtins, so a path is not one of its names.
-  assert_policy block-until-absolute-echo $'deny\tbroad-watcher-kill' "$(block_wrap until "/bin/echo 'pkill -f fm-watch'")"
-  assert_policy block-until-relative-echo $'deny\tbroad-watcher-kill' "$(block_wrap until "./echo 'pkill -f fm-watch'")"
-  # A name is the builtin it spells only while nothing has rebound it.
-  assert_policy rebind-function $'deny\tbroad-watcher-kill' "$(printf 'echo() { eval "$1"; }\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-function-colon $'deny\tbroad-watcher-kill' "$(printf ':() { eval "$1"; }\n%s' "$(block_wrap until ": 'pkill -f fm-watch'")")"
-  assert_policy rebind-alias $'deny\tbroad-watcher-kill' "$(printf 'alias echo=eval\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-enable $'deny\tbroad-watcher-kill' "$(printf 'enable -n echo\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-hash $'deny\tbroad-watcher-kill' "$(printf 'hash -p /tmp/x echo\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-source $'deny\tbroad-watcher-kill' "$(printf '. /tmp/defs.sh\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-eval $'deny\tbroad-watcher-kill' "$(printf 'eval "$SETUP"\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-trap $'deny\tbroad-watcher-kill' "$(printf "trap '\$SETUP' DEBUG\n%s" "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-path $'deny\tbroad-watcher-kill' "$(printf 'PATH=/tmp/x\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-path-prefix $'deny\tbroad-watcher-kill' "$(block_wrap until "PATH=/tmp/x echo 'pkill -f fm-watch'")"
-  assert_policy rebind-path-via-env $'deny\tbroad-watcher-kill' "$(block_wrap until "env PATH=/tmp/x echo 'pkill -f fm-watch'")"
-  assert_policy rebind-unreadable-command $'deny\tbroad-watcher-kill' "$(printf '$SETUP\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  assert_policy heredoc-withdrawn-path-prefix $'deny\tbroad-watcher-kill' "$(block_wrap until $'PATH=/tmp/x cat <<\'EOF\'\npkill -f fm-watch\nEOF')"
   # A rebinding hidden inside a group counts. The group is read with the same
   # lexer rather than assumed innocent or assumed guilty. A subshell's own
   # bindings would die with it; it is refused anyway rather than scoped, which
   # costs nothing anyone writes.
-  assert_policy rebind-inside-subshell $'deny\tbroad-watcher-kill' "$(printf '(alias echo=eval)\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-inside-brace $'deny\tbroad-watcher-kill' "$(printf '{ echo() { eval "$1"; }; }\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  assert_policy rebind-inside-nested-group $'deny\tbroad-watcher-kill' "$(printf '({ (PATH=/tmp/x); })\n%s' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
-  # Order does not matter: the rebinding is a property of the program, not of
-  # what precedes the sink.
-  assert_policy rebind-after-use $'deny\tbroad-watcher-kill' "$(printf '%s\n. /tmp/defs.sh' "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  local group
+  for group in '{ alias cat=bash; }' '(alias cat=bash)' '({ (PATH=/tmp/x); })' '{ cat() { bash; }; }'; do
+    assert_policy "heredoc-withdrawn-group-${group:0:3}" $'deny\tbroad-watcher-kill' "$(printf '%s\n%s' "$group" "$body")"
+  done
   # `builtin` reaches every one of those names without being the name itself, so
   # the command word has to resolve through it.
   local rebinder
-  for rebinder in 'eval "$S"' '. /tmp/x' 'alias echo=eval' 'hash -p /tmp/x echo' 'enable -n echo' 'trap "$S" DEBUG'; do
-    assert_policy "rebind-builtin-${rebinder%% *}" $'deny\tbroad-watcher-kill' \
-      "$(printf 'builtin %s\n%s' "$rebinder" "$(block_wrap until "echo 'pkill -f fm-watch'")")"
+  for rebinder in 'eval "$S"' '. /tmp/x' 'alias cat=bash' 'hash -p /tmp/x cat' 'enable -n cat' 'trap "$S" DEBUG'; do
+    assert_policy "heredoc-withdrawn-builtin-${rebinder%% *}" $'deny\tbroad-watcher-kill' "$(printf 'builtin %s\n%s' "$rebinder" "$body")"
   done
+  # Order does not matter: the rebinding is a property of the program, not of
+  # what precedes the here-document.
+  assert_policy heredoc-withdrawn-after-use $'deny\tbroad-watcher-kill' "$(printf '%s\n. /tmp/defs.sh' "$body")"
+  assert_policy heredoc-withdrawn-protected $'deny\tunclassifiable-protected-command' \
+    "$(printf 'PATH=/tmp/x\n%s' "$(block_wrap until $'cat <<\'EOF\'\nbin/fm-watch.sh\nEOF')")"
+  # A comment is not a claim about any command, so the withdrawal leaves it alone.
+  assert_policy comment-survives-withdrawal allow "$(printf '. /tmp/defs.sh\n%s' "$(block_wrap until ': # pkill -f fm-watch')")"
+  # And an ordinary program still gets the here-document idiom this exists for.
+  assert_policy heredoc-idiom-still-allowed allow "$(printf 'export TZ=UTC\n%s' "$body")"
 }
 
-# Every name still reachable as a sink, against each form that should stop it
-# being one. The allowlist names four builtins; a path, a wrapper that runs the
-# external program, an argument that assigns while it expands, and an output
-# that goes somewhere it can run are the ways a program can spell one of those
-# four names and not get one.
-test_block_construct_sink_forms_denied() {
-  local sink
-  local wrapper
-  for sink in : true false echo; do
-    # The bare form is what the allowlist is for, and it stays permitted.
-    assert_policy "sinkform-$sink-bare" allow "$(block_wrap until "$sink 'pkill -f fm-watch'")"
-    # `command` and `builtin` do resolve to the builtin; they are refused with
-    # the rest rather than carved out, because an exception is how this went
-    # wrong before. That costs `command echo '<text>'` and is the price.
-    for wrapper in env exec nohup sudo command builtin "timeout 5"; do
-      assert_policy "sinkform-$sink-${wrapper%% *}" $'deny\tbroad-watcher-kill' "$(block_wrap until "$wrapper $sink 'pkill -f fm-watch'")"
-    done
-    assert_policy "sinkform-$sink-path" $'deny\tbroad-watcher-kill' "$(block_wrap until "/usr/bin/${sink/:/true} 'pkill -f fm-watch'")"
-    assert_policy "sinkform-$sink-assigning-arg" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink \${P:=\"fm-watch\"}; pkill -f \"\$P\"")"
-    assert_policy "sinkform-$sink-into-shell" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink 'pkill -f fm-watch' | bash")"
-    assert_policy "sinkform-$sink-to-file" $'deny\tbroad-watcher-kill' "$(block_wrap until "$sink 'pkill -f fm-watch' > /tmp/o")"
-  done
-}
+
 
 # The defect this suite missed in its first round: a name bound in one part of a
 # construct and used in another. Wrapping a whole body in one construct cannot
@@ -498,6 +497,11 @@ test_block_construct_binding_outlives_its_branch() {
   assert_policy dataflow-elif-pattern $'deny\tbroad-watcher-kill' 'if false; then Q=none; elif true; then Q=fm-watch; else Q=none; fi; pkill -f $Q'
   assert_policy dataflow-case-pattern $'deny\tbroad-watcher-kill' 'case x in a) Q=fm-watch ;; *) Q=none ;; esac; pkill -f $Q'
   assert_policy dataflow-if-else-protected $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch.sh; else A=x; fi; $A'
+  # A name can be bound by something other than an assignment word: `printf -v`
+  # writes to it, and `${P:=...}` binds it in the course of expanding.
+  assert_policy dataflow-printf-v-pattern $'deny\tbroad-watcher-kill' "$(block_wrap until 'printf -v P "fm-watch"; pkill -f "$P"')"
+  assert_policy dataflow-printf-v-protected $'deny\tunclassifiable-protected-command' 'if true; then printf -v A "bin/fm-watch.sh"; fi; $A'
+  assert_policy dataflow-default-assign $'deny\tbroad-watcher-kill' "$(block_wrap until ': ${P:="fm-watch"}; pkill -f "$P"')"
   assert_policy dataflow-if-else-protected-background $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch.sh; else A=x; fi; $A &'
   assert_policy dataflow-if-else-protected-redirect $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch-arm.sh; else A=x; fi; $A > /tmp/o'
   assert_policy dataflow-case-protected $'deny\tunclassifiable-protected-command' 'case x in a) S=bin/fm-watch.sh ;; *) S=true ;; esac; bash $S'
@@ -879,13 +883,13 @@ test_shellcheck_clean() {
 test_full_acceptance_matrix
 test_direct_policy_contract
 test_block_construct_inert_data_allowed
+test_block_construct_heredoc_quoting_decides
 test_block_construct_inert_text_allowed
+test_block_construct_quoted_argument_not_data
 test_block_construct_executed_quoted_payload_denied
 test_block_construct_heredoc_reader_allowlist
 test_block_construct_heredoc_non_reader_denied
 test_block_construct_withdrawal_covers_heredocs
-test_block_construct_sink_name_defeated_denied
-test_block_construct_sink_forms_denied
 test_block_construct_binding_outlives_its_branch
 test_block_construct_unmodelled_input_is_tainted
 test_block_construct_executed_kill_denied
