@@ -246,7 +246,7 @@ test_flag_rejects_newline_injection_in_role() {
     "newline-injection: should explain the refusal"
   assert_absent "$case_dir/state/task-x1.ultracode" \
     "newline-injection: no marker file should be written for a rejected role"
-  pass "fm-ultracode-guard flag refuses a role containing a newline (marker-injection defense)"
+  pass "fm-ultracode-guard flag refuses a role containing a newline (the marker is line-based)"
 }
 
 test_flag_rejects_role_with_disallowed_characters() {
@@ -288,7 +288,7 @@ implementation" "implementation"
   run_guard "$case_dir" flag task-x1 >/dev/null
   payload=$'task-x2\nreview=deadbeef deadbeef evil-task'
   # A reviewer id is recorded as the last field of a review record, so a newline
-  # in it is the one shape that could forge a second, matching record.
+  # in it is the one shape that would leave a second, matching record behind it.
   fm_write_meta "$case_dir/state/$payload.meta" "window=w"
 
   set +e
@@ -299,7 +299,7 @@ implementation" "implementation"
   expect_code 1 "$status" "reviewer-newline: a reviewer id containing a newline must be refused"
   assert_contains "$out" "must be a plain task id" "reviewer-newline: should explain the refusal"
   assert_no_grep "evil-task" "$case_dir/state/task-x1.ultracode" \
-    "reviewer-newline: no forged review record should reach the marker"
+    "reviewer-newline: no second review record should reach the marker"
   pass "fm-ultracode-guard reviewed refuses a reviewer id containing a newline"
 }
 
@@ -310,7 +310,7 @@ test_reviewed_refuses_a_reviewer_id_that_aliases_the_task_itself() {
   # "task-x1", so the distinctness comparison passes, but it resolves to the
   # task's OWN meta, so the existence check passes too. Before validation this
   # recorded a review and check returned a clean pass with no second task in
-  # existence - the exact outcome this guard exists to prevent.
+  # existence - the exact outcome this gate exists to catch.
   local case_dir out status
   case_dir=$(new_case reviewer-self-alias)
   commit_work "$case_dir" "base
@@ -705,6 +705,152 @@ reviewed implementation" "reviewed implementation"
   pass "fm-ultracode-guard check refuses a force-push that rewrites the reviewed content"
 }
 
+# --- the identity must track content, not rendering -------------------------
+
+# use_textconv_driver <case_dir>: bind *.nb to a text conversion driver, the way
+# a project holding notebooks or generated files ordinarily does. The driver
+# normalises the payload away, so two different committed files render as the
+# same diff. Nothing adversarial: .gitattributes is committed, the driver is
+# ordinary local config.
+use_textconv_driver() {
+  local case_dir=$1
+  cat > "$case_dir/strip.sh" <<'EOS'
+#!/bin/sh
+sed 's/"outputs":"[^"]*"/"outputs":"<stripped>"/' "$1"
+EOS
+  chmod +x "$case_dir/strip.sh"
+  # The driver-bound file has to already exist on the BASE branch. Only then do
+  # both sides of the comparison normalise to the same text, git emit no hunk,
+  # and the rendering hold still. Added on the branch instead, the patch carries
+  # an "index <old>..<new>" line whose blob id moves with the payload - which is
+  # what the vacuity guard below caught on the first attempt at this fixture.
+  git clone -q "$case_dir/origin.git" "$case_dir/_nb" 2>/dev/null
+  printf '*.nb diff=stripped\n' > "$case_dir/_nb/.gitattributes"
+  printf '{"outputs":"v0"}\n' > "$case_dir/_nb/data.nb"
+  git -C "$case_dir/_nb" add -A
+  git -C "$case_dir/_nb" commit -qm "notebook and its diff driver"
+  git -C "$case_dir/_nb" push -q origin main
+  rm -rf "$case_dir/_nb"
+  git -C "$case_dir/wt" fetch -q origin main
+  git -C "$case_dir/wt" reset -q --hard FETCH_HEAD
+  # Driver config is local, the way a developer's checkout carries it.
+  git -C "$case_dir/wt" config diff.stripped.textconv "$case_dir/strip.sh"
+}
+
+# commit_nb <case_dir> <payload>: change the committed bytes only inside the
+# region the driver normalises, so the rendered diff cannot move.
+commit_nb() {
+  local case_dir=$1 payload=$2
+  printf '{"outputs":"%s"}\n' "$payload" > "$case_dir/wt/data.nb"
+  git -C "$case_dir/wt" add data.nb
+  git -C "$case_dir/wt" commit -qm "change payload to $payload"
+}
+
+test_check_refuses_when_content_moves_under_a_textconv_driver() {
+  local case_dir out status rendered_before rendered_after
+  case_dir=$(new_case textconv-content)
+  use_textconv_driver "$case_dir"
+  commit_nb "$case_dir" "REVIEWED"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+  rendered_before=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-review-diff.sh" task-x1 2>/dev/null)
+
+  commit_nb "$case_dir" "NOBODY-REVIEWED-THIS"
+  rendered_after=$(FM_ROOT_OVERRIDE="$ROOT" FM_STATE_OVERRIDE="$case_dir/state" \
+    "$ROOT/bin/fm-review-diff.sh" task-x1 2>/dev/null)
+
+  # The premise: this case is only meaningful while the rendering really is
+  # unchanged. If the driver stops hiding the change, the test has gone vacuous
+  # and must fail rather than pass for the wrong reason.
+  if [ "$rendered_before" != "$rendered_after" ]; then
+    fail "textconv-content: the rendered diff moved, so this case no longer tests a hidden content change"
+  fi
+  assert_contains "$(git -C "$case_dir/wt" show HEAD:data.nb)" "NOBODY-REVIEWED-THIS" \
+    "textconv-content: the committed bytes must really have changed"
+
+  set +e
+  out=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "textconv-content: check must refuse when committed content moved"
+  assert_contains "$out" "no longer covers the current diff" "textconv-content: should explain the refusal"
+  pass "fm-ultracode-guard check refuses content that moved while the rendered diff held still"
+}
+
+test_check_passes_when_only_the_rendering_would_differ() {
+  local case_dir status
+  case_dir=$(new_case textconv-stable)
+  use_textconv_driver "$case_dir"
+  commit_nb "$case_dir" "REVIEWED"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+
+  # Same committed bytes, reached by a different history shape.
+  git -C "$case_dir/wt" commit -q --amend --no-edit -m "reworded, same content"
+
+  set +e
+  run_guard "$case_dir" check task-x1 >/dev/null 2>&1
+  status=$?
+  set -e
+
+  expect_code 0 "$status" "textconv-stable: unchanged content must still satisfy check"
+  pass "fm-ultracode-guard check still passes when content is unchanged under a diff driver"
+}
+
+# --- the requirement's generation, and one writer at a time -----------------
+
+test_reflagging_retires_a_review_recorded_against_the_old_requirement() {
+  # The race the reviewer produced by hand: reviewed reads the marker and does
+  # its slow work, flag resets the requirement, and reviewed's append lands
+  # afterwards. The record it writes describes the CURRENT diff, so nothing
+  # about the content can reject it - only knowing which requirement it was
+  # recorded against can. The append is replayed literally here because that is
+  # exactly what the losing side of that race writes.
+  local case_dir out status in_flight
+  case_dir=$(new_case stale-generation)
+  commit_work "$case_dir" "base
+implementation" "implementation"
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  run_guard "$case_dir" reviewed task-x1 task-x2 >/dev/null
+  in_flight=$(grep '^review=' "$case_dir/state/task-x1.ultracode" | tail -1)
+
+  # The requirement is reset, exactly as an escalation does.
+  run_guard "$case_dir" flag task-x1 >/dev/null
+  printf '%s\n' "$in_flight" >> "$case_dir/state/task-x1.ultracode"
+
+  set +e
+  out=$(run_guard "$case_dir" check task-x1 2>&1)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "stale-generation: a review from the superseded requirement must not satisfy check"
+  pass "fm-ultracode-guard check refuses a review recorded against a superseded requirement"
+}
+
+test_flag_replaces_a_marker_symlink_instead_of_writing_through_it() {
+  # Not a forgery defence - a worker can write the marker directly either way.
+  # This is about damage: a tool that silently overwrites an arbitrary file when
+  # its own state is odd is worth a few lines to stop.
+  local case_dir victim
+  case_dir=$(new_case marker-symlink)
+  victim="$case_dir/important.txt"
+  printf 'do not clobber me\n' > "$victim"
+  ln -s "$victim" "$case_dir/state/task-x1.ultracode"
+
+  run_guard "$case_dir" flag task-x1 >/dev/null
+
+  assert_contains "$(cat "$victim")" "do not clobber me" \
+    "marker-symlink: the link target must be left alone"
+  if [ -L "$case_dir/state/task-x1.ultracode" ]; then
+    fail "marker-symlink: the marker should have replaced the link, not followed it"
+  fi
+  assert_grep "role=independent-review" "$case_dir/state/task-x1.ultracode" \
+    "marker-symlink: a real marker should now be in place"
+  pass "fm-ultracode-guard flag replaces a marker symlink rather than writing through it"
+}
+
 # --- the diff must be established, never inferred ---------------------------
 
 test_check_passes_against_a_freshly_resolved_pr_head() {
@@ -945,5 +1091,9 @@ test_reviewer_metadata_path_alone_satisfies_the_reviewer_check
 test_check_refuses_when_the_current_diff_cannot_be_determined
 test_reviewed_refuses_when_the_diff_cannot_be_determined
 test_reviewed_reports_the_commit_it_pinned
+test_check_refuses_when_content_moves_under_a_textconv_driver
+test_check_passes_when_only_the_rendering_would_differ
+test_reflagging_retires_a_review_recorded_against_the_old_requirement
+test_flag_replaces_a_marker_symlink_instead_of_writing_through_it
 
 echo "# all fm-ultracode-guard tests passed"

@@ -10,8 +10,19 @@
 # only a fallback when fetch fails (stale recorded SHAs must never win over a
 # reachable remote PR head). If neither PR head can be resolved, fall back to
 # the local branch with a warning. Without pr=, compare the local branch.
-# Usage: fm-review-diff.sh <task-id> [--stat]
+# Usage: fm-review-diff.sh <task-id> [--stat|--identity]
 #   --stat prints only the stat summary; default prints stat summary plus full diff.
+#   --identity prints the CANONICAL content identity of that same comparison for
+#     a caller that needs to tell "the code changed" from "the rendering
+#     changed": one `git diff-tree -r` raw line per changed path, naming the
+#     before/after blob object ids. It shares this script's base and compare
+#     resolution - so a gate and a human are always talking about the same two
+#     commits - but not its rendering, because the rendered diff is a display
+#     artifact. `.gitattributes` can bind a path to a textconv or external diff
+#     driver, which is ordinary in projects holding notebooks, generated files
+#     or binary formats, and that makes changed content render identically. Raw
+#     object ids move whenever the committed bytes move, whatever the driver
+#     shows a reader.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -21,7 +32,7 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 "$FM_ROOT/bin/fm-guard.sh" || true
 
 usage() {
-  echo "usage: fm-review-diff.sh <task-id> [--stat]" >&2
+  echo "usage: fm-review-diff.sh <task-id> [--stat|--identity]" >&2
 }
 
 if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
@@ -31,10 +42,11 @@ fi
 
 ID=${1:-}
 [ -n "$ID" ] || { usage; exit 1; }
-STAT_ONLY=false
+MODE=full
 case "${2:-}" in
   '') ;;
-  --stat) STAT_ONLY=true ;;
+  --stat) MODE=stat ;;
+  --identity) MODE=identity ;;
   *) usage; exit 1 ;;
 esac
 [ $# -le 2 ] || { usage; exit 1; }
@@ -148,8 +160,22 @@ else
   BASE="$DEFAULT"
 fi
 
-git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}" >/dev/null || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
-git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}" >/dev/null || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
+BASE_COMMIT=$(git -C "$WT" rev-parse --verify --quiet "$BASE^{commit}") || { echo "error: base $BASE does not exist in $WT" >&2; exit 1; }
+COMPARE_COMMIT=$(git -C "$WT" rev-parse --verify --quiet "$COMPARE_REF^{commit}") || { echo "error: compare ref $COMPARE_REF does not resolve in $WT" >&2; exit 1; }
+
+if [ "$MODE" = identity ]; then
+  # Both sides are pinned to the commits resolved above rather than re-resolved,
+  # so the identity cannot describe a different comparison from the one the
+  # warnings on stderr were about. The merge base makes this the two-dot
+  # equivalent of the three-dot form rendered below, so an unrelated commit
+  # landing on the base branch does not move the identity.
+  MERGE_BASE=$(git -C "$WT" merge-base "$BASE_COMMIT" "$COMPARE_COMMIT") \
+    || { echo "error: no merge base between $BASE and $COMPARE_REF in $WT" >&2; exit 1; }
+  # Rename detection off: it is a heuristic whose answer can change with
+  # unrelated content, and the raw pairs already carry every changed path.
+  git -C "$WT" diff-tree -r --no-renames --no-ext-diff "$MERGE_BASE" "$COMPARE_COMMIT" --
+  exit 0
+fi
 
 echo "diff base: $BASE"
 if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
@@ -158,7 +184,7 @@ if git -C "$WT" diff --quiet "$BASE...$COMPARE_REF" --; then
 fi
 
 git -C "$WT" diff --stat "$BASE...$COMPARE_REF" --
-if ! "$STAT_ONLY"; then
+if [ "$MODE" != stat ]; then
   echo
   git -C "$WT" diff "$BASE...$COMPARE_REF" --
 fi

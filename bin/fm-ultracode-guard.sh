@@ -9,15 +9,37 @@
 # firstmate state/ markers (state/.afk, state/<id>.turn-ended); it never
 # touches fm-spawn.sh or the task's own meta.
 #
-# What this guard proves, and what it does not
+# WHAT THIS GUARD IS FOR - read this before hardening it again
+#   It is a gate against SUPERVISOR ERROR: firstmate advancing a flagged task
+#   without having commissioned a review, or talking itself into believing one
+#   basically happened. It has caught exactly that. It is NOT a security
+#   boundary against a hostile worker, and it cannot become one at this layer.
+#   Every worker already runs as the same user that owns state/, and every brief
+#   tells its worker to append to state/<id>.status. A worker that wanted to
+#   forge a review would write the review= line into this marker directly - no
+#   traversal, no aliasing, no symlink, nothing this script could notice.
+#   Hardening the identity checks against filesystem tricks therefore buys
+#   nothing that is not already given away: it is a better lock on a door
+#   standing next to an open wall. Four rounds of review were spent polishing
+#   that lock before anyone measured the wall. If you are here to add
+#   resolved-path containment, -ef comparisons, or link checks on the reviewer's
+#   metadata, that is the phantom; go and change who can write state/ instead.
+#   What genuinely keeps the gate useful is the list below being small, true,
+#   and cheap enough that nobody routes around it.
+#
+# What this guard establishes, and what it does not
 #   Mechanically enforced, and this list is exhaustive:
 #     - a flagged task cannot pass with no review recorded at all;
 #     - the named reviewer is a different string from the task's own id;
 #     - a file exists at state/<reviewer-task-id>.meta. Existence is the whole
 #       test: an empty file passes it. Contents, kind, provenance and any link
 #       to the reviewed task are neither read nor validated;
-#     - the record is pinned to the diff it was recorded against, and check
-#       refuses once the current diff no longer matches any recorded one;
+#     - the record is pinned to a canonical content identity of the diff it was
+#       recorded against - blob ids, not rendered text, so it moves whenever the
+#       committed bytes move - and check refuses once the current diff no longer
+#       matches any recorded one;
+#     - the record names the generation of the requirement it was recorded
+#       against, so re-flagging retires it;
 #     - the diff being compared is established, never inferred from a PR head
 #       that could not be freshly resolved.
 #   NOT enforced: that the reviewer id names a task this home really dispatched,
@@ -34,17 +56,23 @@
 #   overclaim on its own, because "the independent review" is the shorter
 #   phrase. Sweep for it rather than re-reading, across every surface that
 #   describes this guard, not just this file:
-#     grep -nEi 'genuinely|independent|dispatched|second pass|certif|actually reviewed' \
+#     CLAIMS='genuinely|independent|dispatched|second pass|certif|actually reviewed'
+#     CLAIMS="$CLAIMS|prevent|protect|defen[cs]|secur|tamper|forge|attack|guarantee"
+#     grep -nEi "$CLAIMS" \
 #       bin/fm-ultracode-guard.sh tests/fm-ultracode-guard.test.sh docs/scripts.md \
 #       | grep -vE 'independent-review|ultracode_role'
-#     grep -nEi 'ultracode' AGENTS.md docs/architecture.md \
-#       | grep -Ei 'genuinely|independent|dispatched|second pass|certif|actually reviewed'
+#     grep -nEi 'ultracode' AGENTS.md docs/architecture.md | grep -Ei "$CLAIMS"
 #   Every hit must be one of: the NOT-enforced list above, an instruction
 #   telling a supervisor what to go do, or prose naming firstmate as the
 #   asserter. A hit that makes the SCRIPT the subject of dispatch provenance,
-#   reviewer independence, or "a review happened" is the defect. (It is a
-#   documented sweep, not a test, because tests here must not assert
-#   implementation-source bytes.)
+#   reviewer independence, or "a review happened" is the defect. So is a hit
+#   claiming this stops a worker who wanted to forge a review, or naming it a
+#   protection rather than a gate - "this prevents X" overclaims exactly the
+#   way "this proves Y" does, and the threat-model paragraph above is what the
+#   second half of that word list defends. (It is a documented sweep, not a
+#   test, because tests here must not assert implementation-source bytes.)
+#   Known false positive: "forge" also means GitHub/GitLab in the test fixture
+#   names. Read the line, do not widen the pattern.
 #   The sweep only works if its output is read against that rule INCLUDING the
 #   lines of this header - the round-3 pass printed its own overclaiming
 #   summary line at the top of this file and shipped it anyway, which is how a
@@ -68,13 +96,23 @@
 #
 # Marker format (one record per line; this header is the format's only owner):
 #   role=<ultracode_role>
-#   review=<diff-fingerprint> <reviewed-commit> <reviewer-task-id>
+#   gen=<generation-token>
+#   review=<generation> <diff-fingerprint> <reviewed-commit> <reviewer-task-id>
 # The reviewer id is last because it is the longest and least constrained field;
-# keeping it there means it cannot shift the two fields check actually compares.
+# keeping it there means it cannot shift the fields check actually compares.
+# flag mints a fresh generation, and check accepts only records naming the
+# current one, so re-flagging retires every earlier review even if one was
+# already in flight when the requirement was reset.
 #
 # What a review is pinned to
-#   The fingerprint is a hash of what bin/fm-review-diff.sh prints for the task,
-#   which is the diff a reviewer is pointed at, against the authoritative base.
+#   The fingerprint is a hash of bin/fm-review-diff.sh --identity for the task:
+#   the raw before/after blob ids of every path that differs from the
+#   authoritative base. Deliberately NOT a hash of the rendered diff a reviewer
+#   reads - a project's own .gitattributes can bind a path to a textconv or
+#   external diff driver, and then changed content renders identically and a
+#   hash of the rendering sits still over code nobody reviewed. Notebooks,
+#   generated files and binary formats do this in ordinary honest projects.
+#   Blob ids move whenever the committed bytes move.
 #   That is a CONTENT identity, not a commit id, and the distinction is the
 #   whole design:
 #     rebase onto an advanced default branch - commit ids all change, the diff
@@ -161,6 +199,10 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+# fm-wake-lib.sh owns this repo's portable per-path mutex (stale-owner handling
+# included); the marker lock below is one, not a second implementation.
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 usage() {
   echo "usage: fm-ultracode-guard.sh flag <task-id> [<role>]" >&2
@@ -203,6 +245,52 @@ reject_unsafe_id() {
 reject_unsafe_id "task-id" "$ID"
 
 MARKER="$STATE/$ID.ultracode"
+MARKER_LOCK="$STATE/$ID.ultracode.lock"
+
+# hold_marker_lock: serialize this task's flag/reviewed/check against each
+# other. Without it, flag's overwrite, reviewed's read-then-append and check's
+# read-then-compare interleave: a review can be recorded against a requirement
+# that was just reset, and check can report success while the marker on disk
+# holds no review. The lock is held across the whole command, git fetch
+# included, so the diff a decision is made on is the diff the marker is written
+# against.
+hold_marker_lock() {
+  mkdir -p "$STATE"
+  fm_lock_acquire_wait "$MARKER_LOCK"
+  # shellcheck disable=SC2064 # MARKER_LOCK is fixed by now; expand it here.
+  trap "fm_lock_release '$MARKER_LOCK'" EXIT INT TERM
+}
+
+# write_marker: replace the marker from stdin atomically, and never through a
+# symlink. rename(2) swaps the directory entry itself, so a marker that is a
+# link to somewhere else is replaced rather than written through. A partly
+# written marker is never observable either.
+write_marker() {
+  local tmp
+  tmp=$(mktemp "$STATE/.$ID.ultracode.XXXXXX") || return 1
+  cat > "$tmp"
+  chmod 0644 "$tmp"
+  mv -f "$tmp" "$MARKER"
+}
+
+# marker_generation: the token flag stamps when it (re)opens the requirement.
+# Every review record names the generation it was recorded against, and check
+# accepts only records naming the current one. The lock above already closes
+# the interleaving, but it can steal a lock whose owner it proves dead, so
+# mutual exclusion is not absolute; this binding makes a record from a
+# superseded requirement unusable rather than trusting that it never lands.
+marker_generation() {
+  grep '^gen=' "$MARKER" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+new_generation() {
+  local raw
+  if raw=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null) && [ -n "$raw" ]; then
+    printf '%s' "$raw" | tr -d ' \n'
+    return 0
+  fi
+  printf '%s-%s-%s' "$(date +%s)" "$$" "${RANDOM:-0}${RANDOM:-0}"
+}
 
 # task_worktree: the task's own worktree, read from its meta. Read-only; this
 # script still never writes the task's meta.
@@ -247,7 +335,12 @@ current_tip() {
 diff_fingerprint() {
   local wt=$1 errfile out
   errfile=$(mktemp)
-  if ! out=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" 2>"$errfile"); then
+  # --identity, not the rendered diff: a project's own .gitattributes can bind a
+  # path to a textconv or external diff driver, and then changed content renders
+  # identically and a hash of the rendering never moves. That is ordinary in
+  # projects holding notebooks or generated files, not an attack. --identity
+  # names the before/after blob ids instead, which move with the bytes.
+  if ! out=$("$SCRIPT_DIR/fm-review-diff.sh" "$ID" --identity 2>"$errfile"); then
     echo "error: cannot determine the diff for $ID - bin/fm-review-diff.sh failed:" >&2
     sed 's/^/  /' "$errfile" >&2
     rm -f "$errfile"
@@ -278,29 +371,32 @@ cmd_flag() {
   local role=${3:-independent-review}
   [ $# -le 3 ] || { usage; exit 1; }
   # The marker is a line-based file (see cmd_reviewed/cmd_check), so a role
-  # containing a newline or other control character could inject a forged
-  # review= record and bypass the independent-review requirement entirely.
+  # carrying a newline or other control character would put a second line into
+  # it and leave check reading a record nobody wrote. Keeping the file's line
+  # structure intact, not stopping anyone: a worker can write this file.
   case "$role" in
     *[!A-Za-z0-9_-]*|'')
       echo "error: role '$role' must be non-empty and contain only letters, digits, '-', or '_'" >&2
       exit 1
       ;;
   esac
-  mkdir -p "$STATE"
+  hold_marker_lock
   # Overwrites any existing marker: re-flagging (e.g. after an escalation)
   # deliberately clears every prior review record, since those reviews were
-  # against an earlier version of the diff and the requirement starts over.
-  echo "role=$role" > "$MARKER"
+  # against an earlier version of the diff and the requirement starts over. The
+  # fresh generation is what makes that stick for a review already in flight.
+  printf 'role=%s\ngen=%s\n' "$role" "$(new_generation)" | write_marker
   echo "flagged $ID ultracode role=$role"
 }
 
 cmd_reviewed() {
-  local reviewer=${3:-} wt tip fingerprint record
+  local reviewer=${3:-} wt tip fingerprint record gen
   [ $# -eq 3 ] || { usage; exit 1; }
   [ -n "$reviewer" ] || { echo "error: reviewed requires a reviewer-task-id" >&2; exit 1; }
+  hold_marker_lock
   # Before the distinctness comparison below, which a path alias would other-
-  # wise walk straight past. This also covers the newline that could forge a
-  # second review= record, since the marker file is line-based.
+  # wise walk straight past. It also keeps a newline out of the marker, whose
+  # line structure would otherwise gain a record nobody wrote.
   reject_unsafe_id "reviewer-task-id" "$reviewer"
   [ -f "$MARKER" ] || { echo "error: $ID is not ultracode-flagged (no $MARKER); nothing to mark reviewed" >&2; exit 1; }
   if [ "$reviewer" = "$ID" ]; then
@@ -315,22 +411,36 @@ cmd_reviewed() {
     } >&2
     exit 1
   fi
+  # A marker written before generations existed has none; mint one in place
+  # rather than refusing. It cannot relax anything: no record predating this
+  # carries a generation, so none can match the one being minted now.
+  gen=$(marker_generation)
+  if [ -z "$gen" ]; then
+    gen=$(new_generation)
+    { cat "$MARKER"; printf 'gen=%s\n' "$gen"; } | write_marker
+  fi
+
   wt=$(task_worktree) || exit 1
   tip=$(current_tip "$wt") || exit 1
   fingerprint=$(diff_fingerprint "$wt") || exit 1
 
-  record="review=$fingerprint $tip $reviewer"
-  grep -qxF "$record" "$MARKER" 2>/dev/null || printf '%s\n' "$record" >> "$MARKER"
+  record="review=$gen $fingerprint $tip $reviewer"
+  if ! grep -qxF "$record" "$MARKER" 2>/dev/null; then
+    { cat "$MARKER"; printf '%s\n' "$record"; } | write_marker
+  fi
   echo "recorded your assertion that $reviewer reviewed $ID, pinned to the diff at $tip"
 }
 
 cmd_check() {
   [ $# -eq 2 ] || { usage; exit 1; }
+  # Taken before the marker is read, so the whole read-then-compare cannot
+  # interleave with a flag or a reviewed on the same task.
+  hold_marker_lock
   if [ ! -f "$MARKER" ]; then
     exit 0
   fi
-  local role records unpinned wt current record body fingerprint latest
-  local reviewed_commit reviewer tip extra
+  local role records unpinned wt current record body fingerprint latest gen
+  local reviewed_commit reviewer tip extra record_gen
   role=$(grep '^role=' "$MARKER" | tail -1 | cut -d= -f2- || true)
   role=${role:-independent-review}
   records=$(grep '^review=' "$MARKER" || true)
@@ -354,16 +464,23 @@ cmd_check() {
 
   wt=$(task_worktree) || exit 1
   current=$(diff_fingerprint "$wt") || exit 1
+  gen=$(marker_generation)
 
+  # A record must name the CURRENT generation and the CURRENT diff identity.
+  # Any other shape - a record from a superseded requirement, or one written
+  # before generations existed - is simply not a match, so the refusal below
+  # is what a caller gets.
   while IFS= read -r record; do
     [ -n "$record" ] || continue
     body=${record#review=}
     case "$body" in
-      *' '*' '*) ;;
+      *' '*' '*' '*) ;;
       *) continue ;;
     esac
+    record_gen=${body%% *}
+    body=${body#* }
     fingerprint=${body%% *}
-    if [ "$fingerprint" = "$current" ]; then
+    if [ -n "$gen" ] && [ "$record_gen" = "$gen" ] && [ "$fingerprint" = "$current" ]; then
       exit 0
     fi
   done <<EOF
@@ -372,6 +489,7 @@ EOF
 
   latest=$(printf '%s\n' "$records" | tail -1)
   body=${latest#review=}
+  body=${body#* }
   body=${body#* }
   reviewed_commit=${body%% *}
   reviewer=${body#* }
