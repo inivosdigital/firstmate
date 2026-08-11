@@ -58,7 +58,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-dispatch-select.sh`  | Resolve a matched crew-dispatch rule to one concrete profile, owning `quota-balanced` selection |
 | `fm-tier-guard.sh`       | Mechanically check whether a task's diff size or elapsed time outgrew its assigned model/effort tier (guardrail #1); read-only |
 | `fm-risk-tripwire.sh`    | Mechanically scan a task's brief and changed paths for migration/auth/schema/security signals (guardrail #2) |
-| `fm-ultracode-guard.sh`  | Confirm a genuinely independent second pass ran on an ultracode-flagged task's diff before PR-ready, via a marker file (guardrail #3) |
+| `fm-ultracode-guard.sh`  | Confirm a genuinely independent second pass ran on an ultracode-flagged task's diff, and still covers it, before PR-ready (guardrail #3) |
 | `fm-backend.sh`          | Runtime-backend selection, meta helpers, selector resolution, and operation dispatch |
 | `fm-backend-hometag-lib.sh` | Shared per-installation home-tag derivation for zellij tab and cmux workspace titles |
 | `fm-composer-lib.sh`     | Single fleet-wide owner of composer-content classification for all backends          |

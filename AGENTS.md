@@ -103,7 +103,7 @@ state/               volatile runtime signals; gitignored
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
-  <id>.ultracode     present when the dispatched profile set ultracode=true or a risk-floor tripwire hit flagged it; role=<ultracode_role>, plus reviewed_by=<reviewer-task-id> once bin/fm-ultracode-guard.sh confirms an independent second pass ran (section 4)
+  <id>.ultracode     present when the dispatched profile set ultracode=true or a risk-floor tripwire hit flagged it; role=<ultracode_role>, plus one review record per independent second pass bin/fm-ultracode-guard.sh confirmed, each pinned to the diff that pass covered so a review recorded once cannot cover later commits (section 4; the script's header owns the record format)
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
   <id>.pr-poll-retirement  private identity-bound crash-recovery receipt for one exact validated merged result; removed after its poll artifacts retire
@@ -361,6 +361,7 @@ A tier-guard or self-reported escalation above lifts the task off the Light veri
 
 **Ultracode confirmation.**
 Before advancing an ultracode-flagged task to PR-ready, run `bin/fm-ultracode-guard.sh check <id>`; it refuses until a genuinely separate task - dispatched independently, never a sub-task the flagged crewmate spawned itself - has reviewed the finished diff and its findings were addressed, recorded with `bin/fm-ultracode-guard.sh reviewed <id> <reviewer-task-id>`.
+Each recorded review covers only the diff it was recorded against, so code landing afterwards refuses again; re-record once the reviewer has covered the new work rather than treating the earlier pass as still standing.
 
 ### PR ready, landing, and teardown
 
