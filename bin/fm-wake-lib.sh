@@ -265,6 +265,48 @@ fm_lock_discard_owner() {
   rmdir "$ownerdir" 2>/dev/null || true
 }
 
+# fm_lock_owner_dir_is_ours <lockdir> <resolved-ownerdir>
+# True when the resolved directory has the one shape fm_lock_owner_dir gives an
+# owner directory of THIS lock: a sibling named "<lock-abs>.owner." plus
+# mktemp's six-character suffix. Purely lexical, so it costs no extra look at
+# the directory itself.
+fm_lock_owner_dir_is_ours() {
+  local lockdir=$1 ownerdir=$2 lock_abs suffix
+  [ -n "$ownerdir" ] || return 1
+  lock_abs=$(fm_lock_abs_path "$lockdir") || return 1
+  suffix=${ownerdir#"$lock_abs.owner."}
+  [ "$suffix" != "$ownerdir" ] || return 1
+  [ "${#suffix}" -eq 6 ] || return 1
+  case "$suffix" in
+    *[!A-Za-z0-9]*) return 1 ;;
+  esac
+  return 0
+}
+
+# fm_lock_discard_resolved_owner <lockdir> <resolved-ownerdir>
+# Discard an owner directory that was RESOLVED by reading the lock symlink,
+# rather than created by this library moments earlier. A stray link - a leftover
+# test fixture, a mistyped FM_HOME, an interrupted move - names a directory
+# nothing here ever wrote, and discarding it would delete real files outside
+# state/ with no way back. So an owner directory that fails the naming contract
+# is left exactly as found and reported instead. The lock symlink is ours and
+# the caller still removes it, so the lock stays reclaimable either way.
+# This is damage control on a delete, not a defence against a hostile process:
+# anything that could plant such a link already runs as the user that owns
+# state/ and could remove those files itself. The point is that an ordinary
+# accident costs nothing.
+fm_lock_discard_resolved_owner() {
+  local lockdir=$1 ownerdir=$2
+  [ -n "$ownerdir" ] || return 0
+  if fm_lock_owner_dir_is_ours "$lockdir" "$ownerdir"; then
+    fm_lock_discard_owner "$ownerdir"
+    return 0
+  fi
+  printf 'fm-wake-lib: lock %s pointed at %s, which this library did not create; freed the lock and left that path untouched\n' \
+    "$lockdir" "$ownerdir" >&2
+  return 0
+}
+
 fm_lock_remove_stray_owner_link() {
   local lockdir=$1 ownerdir=$2 stray
   stray="$lockdir/$(basename "$ownerdir")"
@@ -341,7 +383,7 @@ fm_lock_remove_path() {
   if [ -L "$lockdir" ]; then
     ownerdir=$(fm_lock_link_owner "$lockdir" 2>/dev/null || true)
     rm -f "$lockdir" 2>/dev/null || return 1
-    [ -n "$ownerdir" ] && fm_lock_discard_owner "$ownerdir"
+    fm_lock_discard_resolved_owner "$lockdir" "$ownerdir"
     return 0
   fi
   fm_lock_clean_known_files "$lockdir"
@@ -469,7 +511,7 @@ fm_lock_release() {
     [ "$pid" = "$current" ] || return 0
     fm_lock_points_to_owner "$lockdir" "$ownerdir" || return 0
     rm -f "$lockdir" 2>/dev/null || return 0
-    fm_lock_discard_owner "$ownerdir"
+    fm_lock_discard_resolved_owner "$lockdir" "$ownerdir"
     return 0
   fi
   pid=$(cat "$lockdir/pid" 2>/dev/null || true)

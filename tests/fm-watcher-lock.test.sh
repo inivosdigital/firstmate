@@ -22,6 +22,34 @@ mark_pr_check_migration_complete() {
   chmod 0600 "$state/.pr-check-migration-scan-v1" "$state/.pr-check-migration-v1"
 }
 
+# Build a lock symlink pointing at a directory the lock library never created,
+# holding the file names a real owner directory uses plus one it never writes.
+# Sets ALIAS_DIR, ALIAS_STATE, ALIAS_LOCK, ALIAS_OUTSIDE.
+ALIAS_DIR=
+ALIAS_STATE=
+ALIAS_LOCK=
+ALIAS_OUTSIDE=
+make_aliased_lock() {
+  local name=$1 owner_pid=$2
+  ALIAS_DIR=$(make_case "$name")
+  ALIAS_STATE="$ALIAS_DIR/state"
+  ALIAS_LOCK="$ALIAS_STATE/.aliased.lock"
+  ALIAS_OUTSIDE="$ALIAS_DIR/outside"
+  mkdir "$ALIAS_OUTSIDE"
+  printf '%s\n' "$owner_pid" > "$ALIAS_OUTSIDE/pid"
+  printf '%s\n' autoarm > "$ALIAS_OUTSIDE/role"
+  printf '%s\n' precious > "$ALIAS_OUTSIDE/keep"
+  ln -s "$ALIAS_OUTSIDE" "$ALIAS_LOCK"
+}
+
+assert_aliased_outside_intact() {
+  local outside=$1 ctx=$2 name
+  [ -d "$outside" ] || fail "$ctx: the aliased directory itself was removed"
+  for name in pid role keep; do
+    [ -f "$outside/$name" ] || fail "$ctx: '$name' was deleted through the aliased lock"
+  done
+}
+
 
 test_singleton_start() {
   local dir state fakebin out1 out2 pid1 pid2 live i
@@ -407,6 +435,98 @@ test_lock_paused_mid_acquire_claim_fails_during_steal() {
   pid=${out#*pid=}; pid=${pid%% *}
   [ -n "$pid" ] || fail "stealer claim did not record a pid: $out"
   pass "paused mid-acquire claimant backs off to active stealer"
+}
+
+test_lock_stale_alias_recovery_spares_the_aliased_dir() {
+  local dead out target newpid
+  dead=$(dead_pid)
+  make_aliased_lock lock-alias-stale "$dead"
+  out=$(FM_STATE_OVERRIDE="$ALIAS_STATE" bash -c '
+    . "$1"
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    printf "rc=%s pid=%s target=%s\n" "$rc" "$(cat "$2/pid" 2>/dev/null || true)" "$(readlink "$2" 2>/dev/null || true)"
+  ' _ "$LIB" "$ALIAS_LOCK" 2>/dev/null)
+  assert_aliased_outside_intact "$ALIAS_OUTSIDE" "stale recovery through an aliased lock"
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "aliased stale lock was not reclaimed, so the lock is wedged: $out" ;;
+  esac
+  target=${out#*target=}
+  target=${target%% *}
+  [ "$target" != "$ALIAS_OUTSIDE" ] || fail "reclaimed lock still points at the aliased directory: $out"
+  newpid=${out#*pid=}
+  newpid=${newpid%% *}
+  [ -n "$newpid" ] && [ "$newpid" != "$dead" ] || fail "reclaimed lock did not record a new holder: $out"
+  pass "stale recovery through an aliased lock frees the lock and deletes nothing outside it"
+}
+
+test_lock_stale_alias_recovery_reports_the_anomaly() {
+  local dead err
+  dead=$(dead_pid)
+  make_aliased_lock lock-alias-report "$dead"
+  err="$ALIAS_DIR/recovery.err"
+  FM_STATE_OVERRIDE="$ALIAS_STATE" bash -c '
+    . "$1"
+    fm_lock_try_acquire "$2" || exit 7
+  ' _ "$LIB" "$ALIAS_LOCK" > /dev/null 2>"$err" || fail "aliased stale lock was not reclaimed"
+  grep -qF "$ALIAS_OUTSIDE" "$err" || fail "stale recovery did not name the aliased directory on stderr: $(cat "$err")"
+  grep -qF "$ALIAS_LOCK" "$err" || fail "stale recovery did not name the lock on stderr: $(cat "$err")"
+  pass "stale recovery through an aliased lock reports the anomaly on stderr"
+}
+
+test_lock_release_spares_an_aliased_dir() {
+  local err out
+  make_aliased_lock lock-alias-release "$(dead_pid)"
+  err="$ALIAS_DIR/release.err"
+  # Release only discards an owner directory whose pid names the releasing
+  # process, so the releaser stamps its own pid into the aliased directory.
+  out=$(FM_STATE_OVERRIDE="$ALIAS_STATE" bash -c '
+    . "$1"
+    printf "%s\n" "${BASHPID:-$$}" > "$3/pid"
+    fm_lock_release "$2"
+    if [ -L "$2" ] || [ -e "$2" ]; then lock=present; else lock=gone; fi
+    printf "lock=%s\n" "$lock"
+  ' _ "$LIB" "$ALIAS_LOCK" "$ALIAS_OUTSIDE" 2>"$err")
+  assert_aliased_outside_intact "$ALIAS_OUTSIDE" "release through an aliased lock"
+  case "$out" in
+    *"lock=gone"*) ;;
+    *) fail "release left the aliased lock in place, so the lock is wedged: $out" ;;
+  esac
+  grep -qF "$ALIAS_OUTSIDE" "$err" || fail "release did not name the aliased directory on stderr: $(cat "$err")"
+  pass "release through an aliased lock frees the lock and deletes nothing outside it"
+}
+
+test_lock_stale_recovery_cleans_a_genuine_owner_dir() {
+  local dir state lockdir dead err out old
+  dir=$(make_case lock-genuine-owner)
+  state="$dir/state"
+  lockdir="$state/.contend.lock"
+  dead=$(dead_pid)
+  err="$dir/recovery.err"
+  out=$(FM_STATE_OVERRIDE="$state" bash -c '
+    . "$1"
+    owner=$(fm_lock_owner_dir "$2") || exit 20
+    printf "%s\n" "$3" > "$owner/pid"
+    printf "%s\n" autoarm > "$owner/role"
+    ln -s "$owner" "$2" || exit 21
+    if fm_lock_try_acquire "$2"; then rc=0; else rc=1; fi
+    if [ -d "$owner" ]; then old=present; else old=gone; fi
+    printf "rc=%s old=%s changed=%s\n" "$rc" "$old" \
+      "$([ "$(readlink "$2" 2>/dev/null || true)" != "$owner" ] && echo yes || echo no)"
+  ' _ "$LIB" "$lockdir" "$dead" 2>"$err")
+  case "$out" in
+    *"rc=0"*) ;;
+    *) fail "genuine stale owner directory was not reclaimed: $out" ;;
+  esac
+  case "$out" in
+    *"changed=yes"*) ;;
+    *) fail "reclaimed lock still points at the stale owner directory: $out" ;;
+  esac
+  old=${out#*old=}
+  old=${old%% *}
+  [ "$old" = gone ] || fail "stale recovery left the genuine owner directory behind: $out"
+  [ ! -s "$err" ] || fail "genuine stale recovery reported an anomaly: $(cat "$err")"
+  pass "stale recovery still cleans up a genuine owner directory"
 }
 
 test_watch_restart_rejects_reused_pid() {
@@ -1051,6 +1171,10 @@ test_lock_does_not_steal_live_lock
 test_lock_empty_pid_uses_minimum_grace
 test_lock_late_claim_loses_after_recreate
 test_lock_paused_mid_acquire_claim_fails_during_steal
+test_lock_stale_alias_recovery_spares_the_aliased_dir
+test_lock_stale_alias_recovery_reports_the_anomaly
+test_lock_release_spares_an_aliased_dir
+test_lock_stale_recovery_cleans_a_genuine_owner_dir
 test_watch_restart_rejects_reused_pid
 test_watch_restart_attaches_to_healthy_peer
 test_watcher_self_evicts_on_lock_takeover
