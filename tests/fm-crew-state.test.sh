@@ -714,6 +714,49 @@ test_gated_running_run_on_absent_head_stays_unattributed() {
   pass "gate-parked runs with top-level status running stay unattributed on an absent head"
 }
 
+# Second-review blocking regression: the runs view is BOUNDED (`--limit`) and
+# the installed CLI emits no truncation signal, so a slice that filled the
+# limit may hide a second live same-branch candidate beyond it. Trusting a
+# sole-live count from such a view bound a run while the task's actual run sat
+# outside the slice, and the wrong run's progress then suppresses the real
+# stall alarm - the silent direction. A full slice must refuse the
+# dispensation on both paths; the same view under a roomier limit is provably
+# complete and must still bind.
+test_truncated_runs_view_refuses_absent_head_dispensation() {
+  reset_fakes
+  local d absent out
+  d=$(new_case truncated-runs-view)
+  make_repo_on_branch "$d/wt" fm/feat-tr
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-tr.meta" "window=fm:fm-feat-tr" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  # The slice holds ONLY the corresponding live row and is exactly as large as
+  # the requested limit: nothing proves no second live candidate lies beyond.
+  FM_FAKE_RUNS_LIST="  running    fm/feat-tr $(printf '%.7s' "$absent")  2026-08-10 22:05"
+  export FM_CREW_STATE_RUNS_LIMIT=1
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-tr)"
+  out=$(run_crew_progress "$d" feat-tr)
+  [ "$out" = "progress: none" ] \
+    || fail "a possibly-truncated runs view was trusted as uniqueness proof on the full path: $out"
+  # Coarse path: only the runs list speaks for this branch - same refusal.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  out=$(run_crew_progress "$d" feat-tr)
+  [ "$out" = "progress: none" ] \
+    || fail "a possibly-truncated runs view was trusted on the coarse path: $out"
+  # Control: the SAME single-row view under a roomier limit is complete, so
+  # the refusals above are attributable to truncation alone.
+  export FM_CREW_STATE_RUNS_LIMIT=50
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-tr)"
+  out=$(run_crew_progress "$d" feat-tr)
+  case "$out" in
+    "progress: working/"*) ;;
+    *) fail "a complete under-limit view no longer binds the sole live run: $out" ;;
+  esac
+  unset FM_CREW_STATE_RUNS_LIMIT
+  pass "a runs view that filled its limit refuses the absent-head dispensation"
+}
+
 # ---------------------------------------------------------------------------
 # (a) active run-step is authoritative
 test_active_run_is_authoritative() {
@@ -1848,5 +1891,6 @@ test_coarse_running_row_with_absent_sha_attributes
 test_run_progress_defers_wedge_on_absent_rebased_head
 test_two_live_unresolvable_candidates_fail_closed
 test_gated_running_run_on_absent_head_stays_unattributed
+test_truncated_runs_view_refuses_absent_head_dispensation
 
 echo "all fm-crew-state tests passed"

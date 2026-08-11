@@ -409,21 +409,33 @@ nm_ci_checks_state() {
 #                         their head relation
 #   NM_RUNS_LIVE_SHA      the LAST-counted running row's short-sha; meaningful
 #                         only when NM_RUNS_LIVE_N is exactly 1
-# An empty/unavailable list leaves all three at their empty defaults, which
-# every consumer reads as "cannot bind".
+#   NM_RUNS_TRUNCATED     1 when the returned row count filled the requested
+#                         limit, so the view MAY be incomplete and a live
+#                         same-branch row could sit beyond the slice
+# An empty/unavailable list leaves the first three at their empty defaults,
+# which every consumer reads as "cannot bind".
+# The installed `no-mistakes runs` (v1.31.2) documents --limit only as
+# "maximum number of runs to display", orders by creation time, and emits no
+# truncation signal, so a full slice is the only honest incompleteness signal
+# available; a newer CLI exposing a live-runs-only or completeness-marked
+# query would let the consumers prove the active set instead of refusing on
+# possible truncation.
 NM_RUNS_MATCH_STATUS=''
 NM_RUNS_LIVE_N=0
 NM_RUNS_LIVE_SHA=''
+NM_RUNS_TRUNCATED=0
 nm_scan_runs_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha
+  local branch=$1 out row st rest br sha total=0
   NM_RUNS_MATCH_STATUS=''
   NM_RUNS_LIVE_N=0
   NM_RUNS_LIVE_SHA=''
+  NM_RUNS_TRUNCATED=0
   out=$(nm_run runs --limit "$FM_CREW_STATE_RUNS_LIMIT")
   [ -n "$out" ] || return 0
   while IFS= read -r row; do
     row=$(trim "$row")
     [ -n "$row" ] || continue
+    total=$((total + 1))
     st=${row%% *}
     rest=${row#* }
     rest=$(trim "$rest")
@@ -441,6 +453,7 @@ nm_scan_runs_for_branch() {  # <branch>
       NM_RUNS_MATCH_STATUS=$st
     fi
   done <<< "$out"
+  [ "$total" -ge "$FM_CREW_STATE_RUNS_LIMIT" ] && NM_RUNS_TRUNCATED=1
   return 0
 }
 
@@ -456,7 +469,9 @@ nm_scan_runs_for_branch() {  # <branch>
 # same branch and nm_run_attributes_here rejected that answer: the sole live
 # row is then a coarser view of the very run the detailed surface just refused
 # (gated, terminal, ambiguous, or diverged), and binding it here would launder
-# the rejection through the fallback. Strict-match rows still bind - head
+# the rejection through the fallback. A possibly-truncated view
+# (NM_RUNS_TRUNCATED) also refuses the dispensation: a sole-live count from an
+# incomplete slice proves nothing. Strict-match rows still bind - head
 # identity is ownership proof on its own.
 nm_runs_status_for_branch() {  # <branch> <allow-unresolvable:1|0>
   nm_scan_runs_for_branch "$1"
@@ -465,6 +480,7 @@ nm_runs_status_for_branch() {  # <branch> <allow-unresolvable:1|0>
     return 0
   fi
   [ "${2:-1}" = 1 ] || return 0
+  [ "$NM_RUNS_TRUNCATED" = 0 ] || return 0
   if [ "$NM_RUNS_LIVE_N" = 1 ] \
     && [ "$(fm_nm_head_relation "$WT" "$NM_RUNS_LIVE_SHA")" = unresolvable ]; then
     printf 'running'
@@ -507,7 +523,24 @@ CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true
 #     row's sha is itself unresolvable here, and it corresponds to the axi
 #     run's head - two live same-branch candidates cannot be told apart, and
 #     binding the wrong one would let its progress mask a genuinely stalled
-#     task, which is precisely the alarm this must never silence.
+#     task, which is precisely the alarm this must never silence;
+#   - the runs view did NOT fill its requested limit (NM_RUNS_TRUNCATED): a
+#     full slice may hide a second live candidate beyond it, and the installed
+#     CLI offers no completeness signal (see nm_scan_runs_for_branch), so a
+#     sole-live count from a possibly-incomplete view is refused rather than
+#     trusted. Raising the limit would only move that boundary, not remove it.
+# STATED RESIDUAL, deliberately not papered over: a stale-but-agreeing view -
+# one whose snapshot still shows the corresponding sole live row while
+# omitting a second candidate that went live after the snapshot was taken -
+# passes every condition above, and no freshness or generation signal exists
+# on the installed CLI to rule it out. The truncation refusal does not cover
+# it; it is accepted as the residual risk of the dispensation.
+# The refusal direction is deliberately NOISY, never silent: whenever
+# corroboration is empty, unavailable, ambiguous, mismatched, or possibly
+# truncated, a genuinely healthy mid-flight run reads unattributed and its
+# crew may draw a visible wedge alarm - that alarm is recoverable, a
+# suppressed one is not. Read a surprising false wedge on a validating crew
+# against these conditions first.
 # A terminal or gate-parked run whose head never reached this repo stays
 # unbound exactly as before - that is the reused-branch stale-run shape the
 # strict rule exists to reject - so a cancelled, superseded, or long-parked
@@ -528,6 +561,7 @@ nm_run_attributes_here() {
     *) return 1 ;;
   esac
   nm_scan_runs_for_branch "$CREW_BRANCH"
+  [ "$NM_RUNS_TRUNCATED" = 0 ] || return 1
   [ "$NM_RUNS_LIVE_N" = 1 ] || return 1
   [ "$(fm_nm_head_relation "$WT" "$NM_RUNS_LIVE_SHA")" = unresolvable ] || return 1
   nm_sha_corresponds "$run_head" "$NM_RUNS_LIVE_SHA"
