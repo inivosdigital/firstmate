@@ -15,6 +15,14 @@
 // constructs so their bodies are classified by command position rather than
 // falling back to a raw whole-string match. The CLI entry point at the bottom
 // runs only when this module is invoked directly, never on import.
+//
+// Two properties hold this together once a program branches or loops, and both
+// are load-bearing. The variable model is a may-analysis: it may conclude that a
+// name is possibly dangerous, never that it is safe, so taint accumulates and no
+// branch, later assignment, or line ordering ever removes it. And because
+// parsing a construct is not understanding it, a block program that produced no
+// refusal is still handed to the unchanged raw check, over the part of itself
+// that runs. See docs/arm-pretool-check.md "Block constructs".
 
 import path from "node:path";
 import { realpathSync } from "node:fs";
@@ -259,6 +267,7 @@ export class Lexer {
 
   skipHeredocBodies() {
     for (const heredoc of this.pendingHeredocs) {
+      const start = this.index;
       let found = false;
       let body = "";
       while (this.index < this.source.length) {
@@ -279,6 +288,9 @@ export class Lexer {
         break;
       }
       heredoc.token.heredoc = body;
+      // Where the body and its terminator sit in the source, so a caller that
+      // has decided a body is data can take it back out of the raw text.
+      heredoc.token.heredocRange = [start, this.index];
     }
     this.pendingHeredocs = [];
   }
@@ -492,12 +504,14 @@ function splitBlockProgram(tokens) {
   const separators = [];
   const roles = [];
   const loopVariables = [];
+  const adjacency = [];
   const stack = [];
   let current = [];
   let header = null;
   let subject = null;
   let patternOpen = false;
   let hasBlocks = false;
+  let lastSeparator = "";
   let error = "";
 
   const fail = (message) => {
@@ -508,15 +522,22 @@ function splitBlockProgram(tokens) {
     nodes.push(current);
     roles.push(role);
     loopVariables.push(loopVariable || "");
+    // The operators immediately either side of this node. `separators` is a
+    // program-wide list that does not line up with `nodes` once structural
+    // keywords come and go, and callers need to know whether a given node is
+    // handing its output to another command.
+    adjacency.push({ before: lastSeparator, after: "" });
     current = [];
   };
   const closeSimple = (separator) => {
     if (current.length > 0) {
       emit("command");
       separators.push(separator);
+      adjacency.at(-1).after = separator;
     } else if (separator !== "newline") {
       separators.push(separator);
     }
+    lastSeparator = separator;
   };
 
   for (const token of tokens) {
@@ -531,6 +552,8 @@ function splitBlockProgram(tokens) {
         current = header.words;
         emit("for-list", header.variable);
         separators.push(token.value);
+        adjacency.at(-1).after = token.value;
+        lastSeparator = token.value;
         header = null;
         continue;
       }
@@ -672,10 +695,17 @@ function splitBlockProgram(tokens) {
   }
   if (error) {
     const plain = splitProgram(tokens);
-    return { ...plain, roles: plain.nodes.map(() => "command"), loopVariables: plain.nodes.map(() => ""), hasBlocks, error };
+    return {
+      ...plain,
+      roles: plain.nodes.map(() => "command"),
+      loopVariables: plain.nodes.map(() => ""),
+      adjacency: plain.nodes.map(() => ({ before: "", after: "" })),
+      hasBlocks,
+      error,
+    };
   }
   while (separators.length >= nodes.length && separators.at(-1) === "newline") separators.pop();
-  return { nodes, separators, roles, loopVariables, hasBlocks, error };
+  return { nodes, separators, roles, loopVariables, adjacency, hasBlocks, error };
 }
 
 function isAssignment(value) {
@@ -919,7 +949,15 @@ function assignmentName(word) {
   return match ? match[1] : "";
 }
 
-function contextWithAssignments(context, words) {
+// A refusal control may only ever conclude that a name is possibly dangerous,
+// never that it is safe. Dropping a binding when the name is reassigned reads
+// the program as one straight line, which it is only until it branches or
+// loops: a sibling `else` arm would clear a binding the taken arm made, and a
+// loop body's later line runs before its earlier one on the second iteration.
+// So in a program that contains blocks, taint accumulates and is never removed.
+// Straight-line programs keep the previous last-writer-wins semantics exactly,
+// which is why no non-block verdict moves.
+function contextWithAssignments(context, words, monotone = false) {
   const protectedVariables = new Set(context.protectedVariables || []);
   const watcherPatterns = new Set(context.watcherPatterns || []);
   const watcherPids = new Set(context.watcherPids || []);
@@ -928,11 +966,11 @@ function contextWithAssignments(context, words) {
     if (!name) continue;
     const value = word.value.slice(word.value.indexOf("=") + 1);
     if (rawMentionsProtected(value) || wordReferencesAny(word, protectedVariables)) protectedVariables.add(name);
-    else protectedVariables.delete(name);
+    else if (!monotone) protectedVariables.delete(name);
     if (/fm-watch/.test(value) || wordReferencesAny(word, watcherPatterns)) watcherPatterns.add(name);
-    else watcherPatterns.delete(name);
+    else if (!monotone) watcherPatterns.delete(name);
     if (wordReferencesAny(word, watcherPids)) watcherPids.add(name);
-    else watcherPids.delete(name);
+    else if (!monotone) watcherPids.delete(name);
   }
   return { ...context, protectedVariables, watcherPatterns, watcherPids };
 }
@@ -940,7 +978,7 @@ function contextWithAssignments(context, words) {
 // A `for` loop variable takes its values from the header word list, so it earns
 // the same watcher bindings contextWithAssignments would give it, including a
 // pid binding from an executed watcher-wide pgrep in the list.
-function bindLoopVariable(context, name, words, substitutionResults) {
+function bindLoopVariable(context, name, words, substitutionResults, monotone = false) {
   if (!name) return;
   const referencesProtected = words.some((word) => rawMentionsProtected(word.value) || wordReferencesAny(word, context.protectedVariables));
   const referencesPattern = words.some((word) => /fm-watch/.test(word.value) || wordReferencesAny(word, context.watcherPatterns));
@@ -953,8 +991,134 @@ function bindLoopVariable(context, name, words, substitutionResults) {
     [referencesPid, context.watcherPids],
   ]) {
     if (matched) names.add(name);
-    else names.delete(name);
+    else if (!monotone) names.delete(name);
   }
+}
+
+// Names a command binds from input the parser does not model. `read` is the
+// common one, and whatever feeds it - a pipeline into the loop, a redirection or
+// process substitution attached to `done`, a here-string - is exactly what this
+// parser does not follow. Over-collecting here only adds taint, so options and
+// their values are not filtered out.
+function readBoundNames(position) {
+  if (basename(position.command?.value || "") !== "read") return [];
+  return position.words
+    .slice(position.index + 1)
+    .filter((word) => word.literal && word.subs.length === 0 && /^[A-Za-z_][A-Za-z0-9_]*$/.test(word.value))
+    .map((word) => word.value);
+}
+
+// A word's value holds its literal text but not the text of its command
+// substitutions, so a purely syntactic pass has to ask for those separately.
+// `P=$(pgrep -f fm-watch)` has the value `P=` and everything that matters in a
+// substitution the seed never runs.
+function wordSourceText(word, value) {
+  if (word.subs.length === 0) return value;
+  return `${value} ${word.subs.map((substitution) => substitution.content).join(" ")}`;
+}
+
+// Taint only grows, so the seed below settles in as many passes as the longest
+// chain of one binding feeding the next. Two covers everything realistic; the
+// limit bounds the cost on a pathological program, and not settling within it
+// is reported so the caller can refuse rather than analyse a partial seed.
+const SEED_PASS_LIMIT = 4;
+
+// Every assignment in a block program is in effect everywhere in it: an `if`
+// arm's binding outlives the construct whatever the sibling arms do, and a loop
+// body's last line has already run by the time its first line runs again. This
+// is the unordered-set reading of that, repeated because one binding can feed
+// the next, and seeded into the analysis so a use that textually precedes its
+// definition still sees it.
+//
+// It is deliberately syntactic: it never runs the nested analysis, so it cannot
+// tell `P=$(pgrep -f fm-watch)` from any other substitution naming a watcher and
+// taints both. Unknown counts as tainted, never as safe.
+function seedBlockTaint(program, context, command) {
+  const protectedVariables = new Set(context.protectedVariables || []);
+  const watcherPatterns = new Set(context.watcherPatterns || []);
+  const watcherPids = new Set(context.watcherPids || []);
+  // A name read from unmodelled input holds an unknown value. That only has to
+  // count as a watcher value when the program names a watcher somewhere; an
+  // ordinary `while read -r p; do kill $p; done` over unrelated pids is not
+  // this control's business.
+  const unknownIsWatcher = /fm-watch/.test(normalizeLineContinuations(command));
+  const positions = program.nodes.map((tokens) => commandPosition(tokens));
+  const size = () => protectedVariables.size + watcherPatterns.size + watcherPids.size;
+  let converged = false;
+  for (let pass = 0; pass < SEED_PASS_LIMIT && !converged; pass += 1) {
+    const before = size();
+    for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
+      if (program.roles?.[nodeIndex] === "for-list") {
+        const name = program.loopVariables[nodeIndex];
+        if (!name) continue;
+        const words = program.nodes[nodeIndex]
+          .filter((token) => token.type === "word")
+          .map((word) => ({ word, text: wordSourceText(word, word.value) }));
+        if (words.some(({ word, text }) => rawMentionsProtected(text) || wordReferencesAny(word, protectedVariables))) protectedVariables.add(name);
+        if (words.some(({ word, text }) => /fm-watch/.test(text) || wordReferencesAny(word, watcherPatterns))) watcherPatterns.add(name);
+        if (words.some(({ word, text }) => wordReferencesAny(word, watcherPids) || (/fm-watch/.test(text) && word.subs.length > 0))) watcherPids.add(name);
+        continue;
+      }
+      const position = positions[nodeIndex];
+      for (const word of position.words) {
+        const name = assignmentName(word);
+        if (!name) continue;
+        const text = wordSourceText(word, word.value.slice(word.value.indexOf("=") + 1));
+        if (rawMentionsProtected(text) || wordReferencesAny(word, protectedVariables)) protectedVariables.add(name);
+        if (/fm-watch/.test(text) || wordReferencesAny(word, watcherPatterns)) watcherPatterns.add(name);
+        if (wordReferencesAny(word, watcherPids) || (/fm-watch/.test(text) && word.subs.length > 0)) watcherPids.add(name);
+      }
+      if (!unknownIsWatcher) continue;
+      for (const name of readBoundNames(position)) {
+        protectedVariables.add(name);
+        watcherPatterns.add(name);
+        watcherPids.add(name);
+      }
+    }
+    converged = size() === before;
+  }
+  return { protectedVariables, watcherPatterns, watcherPids, converged };
+}
+
+// Whether this node's here-document bodies are data and nothing else. The
+// parser has to be able to name the command that consumes them, and that
+// command must neither be a shell reading its script from stdin nor hand its
+// stdout or its bodies anywhere else: `cat <<EOF` prints the body, but
+// `cat <<EOF | bash` runs it, `cat <<EOF > f` stores it for later, and a body
+// attached to `done` goes wherever the loop sends its input, which is not
+// modelled. Anything short of a positive answer leaves the body in the text.
+function heredocBodiesAreData(tokens, adjacent) {
+  const position = commandPosition(tokens);
+  if (!position.command || !position.command.literal || position.command.subs.length > 0) return false;
+  if (position.unresolvedWrapperOption || shellInvocation(position)) return false;
+  for (const side of [adjacent?.before, adjacent?.after]) {
+    if (side === "|" || side === "|&") return false;
+  }
+  return tokens.every((token) => token.type !== "redir" || Array.isArray(token.heredocRange));
+}
+
+// The part of the program that actually runs: the whole command with the
+// here-document bodies the parser positively identified as data cut out. This
+// is not a here-document-aware regex - the parser decided which bodies are data
+// and which are commands, and the unchanged raw check simply reads what is left.
+function executableProgramText(command, program) {
+  const ranges = [];
+  for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
+    const tokens = program.nodes[nodeIndex];
+    const heredocs = tokens.filter((token) => token.type === "redir" && Array.isArray(token.heredocRange));
+    if (heredocs.length === 0 || !heredocBodiesAreData(tokens, program.adjacency?.[nodeIndex])) continue;
+    for (const token of heredocs) ranges.push(token.heredocRange);
+  }
+  if (ranges.length === 0) return command;
+  ranges.sort((left, right) => left[0] - right[0]);
+  let text = "";
+  let cursor = 0;
+  for (const [start, end] of ranges) {
+    if (start < cursor) continue;
+    text += command.slice(cursor, start);
+    cursor = end;
+  }
+  return text + command.slice(cursor);
 }
 
 function nodeHasRedirection(tokens) {
@@ -994,6 +1158,15 @@ function analyzeProgram(command, context, depth = 0) {
   // Block syntax the scanner could not fit into a well-formed construct keeps
   // the whole program on the conservative path, raw fallback included.
   if (program.error) unsupported = true;
+  // Branching and looping make the running context a may-analysis: bindings
+  // accumulate, and the ones the whole program can produce are in force from
+  // its first line.
+  const monotone = program.hasBlocks && !program.error;
+  if (monotone) {
+    const seed = seedBlockTaint(program, activeContext, command);
+    activeContext = { ...activeContext, protectedVariables: seed.protectedVariables, watcherPatterns: seed.watcherPatterns, watcherPids: seed.watcherPids };
+    if (!seed.converged) unsupported = true;
+  }
 
   for (let nodeIndex = 0; nodeIndex < program.nodes.length; nodeIndex += 1) {
     const tokens = program.nodes[nodeIndex];
@@ -1003,7 +1176,7 @@ function analyzeProgram(command, context, depth = 0) {
     // unchanged and contributes only its loop-variable binding below.
     const nodeContext = forList
       ? { ...activeContext, protectedVariables: new Set(activeContext.protectedVariables), watcherPatterns: new Set(activeContext.watcherPatterns), watcherPids: new Set(activeContext.watcherPids) }
-      : contextWithAssignments(activeContext, position.words);
+      : contextWithAssignments(activeContext, position.words, monotone);
     const firstName = basename(position.words[0]?.value || "");
     if (["if", "then", "else", "elif", "fi", "for", "while", "until", "case", "esac", "do", "done", "function", "time", "coproc"].includes(firstName)) {
       unsupported = true;
@@ -1040,7 +1213,7 @@ function analyzeProgram(command, context, depth = 0) {
     }
 
     if (forList) {
-      bindLoopVariable(nodeContext, program.loopVariables[nodeIndex], position.words, substitutionResults);
+      bindLoopVariable(nodeContext, program.loopVariables[nodeIndex], position.words, substitutionResults, monotone);
       pgrepWatcher ||= nodePgrepWatcher;
       nestedProtected ||= nodeNestedProtected;
       activeContext = nodeContext;
@@ -1106,13 +1279,25 @@ function analyzeProgram(command, context, depth = 0) {
   }
 
   const directProtected = nodeInfos.some((info) => Boolean(info.protectedKind));
-  const protectedFound = directProtected || nestedProtected || unclassifiableProtected;
+  let protectedFound = directProtected || nestedProtected || unclassifiableProtected;
   if (unclassifiableProtected) unsupported = true;
   // A block construct can never be a blessed arm: arming is a standalone final
   // command after approved setup nodes, so a protected execution reached
   // through a condition, loop body, or case arm stays unclassifiable.
   if (program.hasBlocks && protectedFound) unsupported = true;
-  const broadKillFound = broadKill || (unsupported && rawMentionsBroadKill(command));
+  // Second layer. Parsing a construct is not understanding it: this model will
+  // keep meeting data flow it does not represent, and until now the raw check
+  // only ran on the unsupported path, so a block that parsed cleanly bought a
+  // permit no straight-line program could. Give a parsed block program the same
+  // unchanged check over the part of it that runs. Whatever the model misses,
+  // the bytes are still there.
+  const rawChecked = unsupported || program.hasBlocks;
+  const scanned = unsupported || program.error ? command : executableProgramText(command, program);
+  const broadKillFound = broadKill || (rawChecked && rawMentionsBroadKill(scanned));
+  if (rawChecked && rawMentionsProtected(scanned)) {
+    protectedFound = true;
+    unsupported = true;
+  }
   if (unsupported && (protectedFound || rawMentionsProtected(command) || broadKillFound)) {
     return { error: "unsupported compound grammar", protectedFound: true, broadKill: broadKillFound, pgrepWatcher, watcherPids: activeContext.watcherPids, program, nodeInfos };
   }

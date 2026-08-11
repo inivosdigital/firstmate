@@ -272,7 +272,51 @@ test_block_construct_inert_data_allowed() {
     assert_policy "block-$shape-cat-heredoc" allow "$(block_wrap "$shape" "$data")"
   done
   assert_policy block-until-python-heredoc allow "$(block_wrap until $'python3 <<\'EOF\'\npkill -f fm-watch\nEOF')"
-  assert_policy block-until-quoted-data allow "$(block_wrap until "echo 'pkill -f fm-watch'")"
+  # A here-document body is data only when the command consuming it can be named
+  # and does nothing else with it. Piping it into a shell or storing it in a file
+  # both put the body back in play, so both stay refused.
+  assert_policy block-until-heredoc-into-shell $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<\'EOF\' | bash\npkill -f fm-watch\nEOF')"
+  assert_policy block-until-heredoc-to-file $'deny\tbroad-watcher-kill' "$(block_wrap until $'cat <<\'EOF\' > /tmp/o\npkill -f fm-watch\nEOF')"
+  # Quoted text is an argument to a command that runs, not a body the parser has
+  # identified as data, so it keeps the verdict it has always had inside a block.
+  assert_policy block-until-quoted-data $'deny\tbroad-watcher-kill' "$(block_wrap until "echo 'pkill -f fm-watch'")"
+}
+
+# The defect this suite missed in its first round: a name bound in one part of a
+# construct and used in another. Wrapping a whole body in one construct cannot
+# reach it, because the binding and the use travel together.
+test_block_construct_binding_outlives_its_branch() {
+  # A sibling branch does not clear a binding the taken branch made.
+  assert_policy dataflow-if-else-pid $'deny\tbroad-watcher-kill' 'if true; then P=$(pgrep -f fm-watch); else P=1; fi; kill $P'
+  assert_policy dataflow-if-else-pattern $'deny\tbroad-watcher-kill' 'if [ -n "$X" ]; then Q=fm-watch; else Q=none; fi; pkill -f $Q'
+  assert_policy dataflow-elif-pattern $'deny\tbroad-watcher-kill' 'if false; then Q=none; elif true; then Q=fm-watch; else Q=none; fi; pkill -f $Q'
+  assert_policy dataflow-case-pattern $'deny\tbroad-watcher-kill' 'case x in a) Q=fm-watch ;; *) Q=none ;; esac; pkill -f $Q'
+  assert_policy dataflow-if-else-protected $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch.sh; else A=x; fi; $A'
+  assert_policy dataflow-if-else-protected-background $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch.sh; else A=x; fi; $A &'
+  assert_policy dataflow-if-else-protected-redirect $'deny\tunclassifiable-protected-command' 'if true; then A=bin/fm-watch-arm.sh; else A=x; fi; $A > /tmp/o'
+  assert_policy dataflow-case-protected $'deny\tunclassifiable-protected-command' 'case x in a) S=bin/fm-watch.sh ;; *) S=true ;; esac; bash $S'
+  # A later assignment does not clear an earlier one either.
+  assert_policy dataflow-reassigned-pattern $'deny\tbroad-watcher-kill' 'if true; then Q=fm-watch; fi; Q=none; pkill -f $Q'
+  # Inside a loop body the last line has already run by the time the first line
+  # runs again, so a use that textually precedes its definition still sees it.
+  assert_policy dataflow-loop-carried-pid $'deny\tbroad-watcher-kill' 'while true; do kill $P; P=$(pgrep -f fm-watch); done'
+  assert_policy dataflow-loop-carried-pattern $'deny\tbroad-watcher-kill' 'while true; do pkill -f $Q; Q=fm-watch; done'
+  assert_policy dataflow-loop-carried-protected $'deny\tunclassifiable-protected-command' 'while true; do $A; A=bin/fm-watch.sh; done'
+  # A value routed through a second name carries the binding with it.
+  assert_policy dataflow-indirect $'deny\tbroad-watcher-kill' 'if true; then Q=fm-watch; else Q=none; fi; R=$Q; pkill -f $R'
+}
+
+# Values arriving from input the parser does not follow. Unknown has to count as
+# a watcher value whenever the program names a watcher, never as a safe one.
+test_block_construct_unmodelled_input_is_tainted() {
+  assert_policy dataflow-pgrep-into-while $'deny\tbroad-watcher-kill' 'pgrep -f fm-watch | while read -r p; do kill $p; done'
+  assert_policy dataflow-process-substitution $'deny\tbroad-watcher-kill' 'while read -r p; do kill $p; done < <(pgrep -f fm-watch)'
+  assert_policy dataflow-here-string $'deny\tbroad-watcher-kill' 'while read -r p; do kill $p; done <<< $(pgrep -f fm-watch)'
+  assert_policy dataflow-heredoc-on-done $'deny\tbroad-watcher-kill' $'while read -r l; do bash -c "$l"; done <<EOF\npkill -f fm-watch\nEOF'
+  assert_policy dataflow-eval-from-branch $'deny\tbroad-watcher-kill' 'if true; then C="pkill -f fm-watch"; else C=true; fi; eval $C'
+  # A read loop over unrelated process ids names no watcher, so it stays allowed:
+  # the taint follows the watcher mention, not the shape.
+  assert_policy dataflow-read-loop-unrelated allow 'while read -r p; do kill $p; done < /tmp/pids'
 }
 
 test_block_construct_executed_kill_denied() {
@@ -364,6 +408,58 @@ test_block_construct_never_more_permissive() {
     done
   done
   pass "block constructs are never more permissive than the same body at top level"
+}
+
+# Splits a two-part body so the binding and the use sit in different parts of the
+# construct: sibling arms, before and after it, or reversed inside a loop. The
+# whole-body wrapper above keeps them together and so cannot reach this class.
+block_split_wrap() {
+  local shape=$1 bind=$2 use=$3
+  case "$shape" in
+    if-else) printf 'if true; then\n%s\nelse\nZ=none\nfi\n%s' "$bind" "$use" ;;
+    if-else-other) printf 'if true; then\nZ=none\nelse\n%s\nfi\n%s' "$bind" "$use" ;;
+    case-arm) printf 'case x in\na)\n%s\n;;\n*)\nZ=none\n;;\nesac\n%s' "$bind" "$use" ;;
+    then-reassign) printf 'if true; then\n%s\nfi\nZ=none\n%s' "$bind" "$use" ;;
+    loop-reversed) printf 'while true; do\n%s\n%s\ndone' "$use" "$bind" ;;
+    loop-forward) printf 'while true; do\n%s\n%s\ndone' "$bind" "$use" ;;
+    *) fail "unknown split shape: $shape" ;;
+  esac
+}
+
+# The same never-more-permissive guarantee for split bodies. Each pair denies at
+# top level as a plain sequence, so every distribution of it must deny too.
+test_block_construct_split_binding_never_more_permissive() {
+  local pair bind use shape bare wrapped
+  local -a splits=(
+    'Z=fm-watch|pkill -f $Z'
+    'Z=$(pgrep -f fm-watch)|kill $Z'
+    'Z="fm-watch"|pkill -f "$Z"'
+    'Z=bin/fm-watch.sh|$Z'
+    'Z=bin/fm-watch-arm.sh|bash $Z'
+    'Z=bin/fm-watch.sh|exec $Z'
+  )
+  local -a shapes=(if-else if-else-other case-arm then-reassign loop-reversed loop-forward)
+  for pair in "${splits[@]}"; do
+    bind=${pair%%|*}
+    use=${pair#*|}
+    bare=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$bind; $use") \
+      || fail "split corpus pair failed to classify: $bind; $use"
+    case "$bare" in
+      deny*) : ;;
+      # Guards the corpus: a pair that stopped denying as a plain sequence would
+      # make every distribution below pass without testing anything.
+      *) fail "split corpus pair must deny as a sequence, got '$bare': $bind; $use" ;;
+    esac
+    for shape in "${shapes[@]}"; do
+      wrapped=$(node "$POLICY" --root "$ROOT" --home "$ROOT" --command "$(block_split_wrap "$shape" "$bind" "$use")") \
+        || fail "split wrapped pair failed to classify: $shape / $bind; $use"
+      case "$wrapped" in
+        deny*) : ;;
+        *) fail "$shape split made '$bind; $use' more permissive: $wrapped" ;;
+      esac
+    done
+  done
+  pass "splitting a binding from its use across a construct is never more permissive"
 }
 
 # --- CLI parsing -------------------------------------------------------------
@@ -577,11 +673,14 @@ test_shellcheck_clean() {
 test_full_acceptance_matrix
 test_direct_policy_contract
 test_block_construct_inert_data_allowed
+test_block_construct_binding_outlives_its_branch
+test_block_construct_unmodelled_input_is_tainted
 test_block_construct_executed_kill_denied
 test_block_construct_shell_heredoc_denied
 test_block_construct_protected_execution_unclassifiable
 test_block_construct_malformed_falls_back
 test_block_construct_never_more_permissive
+test_block_construct_split_binding_never_more_permissive
 test_command_equals_form
 test_background_flag_accepted_and_non_gating
 test_unknown_flag_errors

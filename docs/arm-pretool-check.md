@@ -111,6 +111,7 @@ No other wrapper is approved.
 
 Inline environment assignments, `env`, `sudo`, `nohup`, nested shells, `eval`, subshell groups, substitutions, redirections, pipelines, asynchronous lists, `disown`, unrelated list nodes, block constructs, and unsupported compound syntax are not blessed.
 A protected execution reached through an `if` condition or branch, a loop body, or a `case` arm is denied with `unclassifiable-protected-command`, because arming is only ever a standalone final command after approved setup nodes.
+That covers a protected path routed through a variable one of those parts binds, such as `if true; then A=bin/fm-watch.sh; else A=x; fi; $A`.
 
 ## Broad watcher kills
 
@@ -123,19 +124,36 @@ Quoted text such as `echo 'pkill -f fm-watch'` is data and is allowed.
 
 Unsupported compound grammar - a construct the classifier does not model - is failed closed for broad kills the same way it is for protected executions.
 When the command carries such grammar and its raw bytes reference both a `fm-watch` target and a `pkill` or `kill` verb, the classifier cannot prove which command position the kill occupies, so it denies with `broad-watcher-kill` rather than allowing.
-This backstop is gated on the grammar being unsupported: in grammar the classifier does model, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` remain allowed.
+In straight-line grammar the classifier models, command-position analysis is authoritative, so data mentions such as `echo 'pkill -f fm-watch'` remain allowed.
+Programs containing block constructs are the exception: they re-run this same check over their executable portion even when the grammar was modelled, which the block-construct section below describes.
 
 ### Block constructs
 
 The classifier models `if/then/elif/else/fi`, `for`, `while`, and `until` loops, and `case`, including nesting.
 Their conditions, bodies, and arms are analyzed as ordinary commands, so the same command-position rules apply inside a construct as outside it.
-An executed kill is still denied wherever it sits: `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done` all deny with `broad-watcher-kill`.
+An executed kill is denied wherever it sits: `while true; do pkill -f fm-watch; done`, `for x in 1; do pkill -f fm-watch; done`, `case x in x) pkill -f fm-watch ;; esac`, and `until false; do kill $(pgrep -f fm-watch); done` all deny with `broad-watcher-kill`.
+
+Once a program branches or loops, the variable model becomes a may-analysis: it may conclude that a name is possibly dangerous, never that it is safe.
+Inside a program containing blocks, a watcher binding accumulates and is never removed, so a sibling `else` or `case` arm cannot clear what another arm bound and a later assignment cannot clear an earlier one.
+Every binding the program can make is also in force from its first line, because a loop body's last line has already run by the time its first line runs again.
+So `if true; then P=$(pgrep -f fm-watch); else P=1; fi; kill $P` and `while true; do kill $P; P=$(pgrep -f fm-watch); done` both deny, as do their `pkill` and protected-path equivalents.
 A `for` loop variable inherits the watcher bindings of the list it iterates, so `for p in $(pgrep -f fm-watch); do kill $p; done` denies through the same executed-`pgrep` rule as its one-line form.
-Inert data is correspondingly allowed: a forbidden pattern that only ever reaches a `cat` heredoc body is allowed inside a construct exactly as it is outside one, while a `bash` heredoc carrying the same bytes is denied in both places.
+A name read from input the parser does not follow - `read`, a pipeline into a loop, a redirection or process substitution attached to `done`, a here-string - holds an unknown value, and unknown counts as a watcher value whenever the program names a watcher anywhere, which is what denies `pgrep -f fm-watch | while read -r p; do kill $p; done`.
+A read loop that names no watcher is unaffected.
+
+Parsing a construct is not the same as understanding it, so a second layer runs behind the analysis.
+When a program contains blocks and the analysis has produced no refusal, the unchanged raw check of the conservative path above is re-run over the part of the program that actually runs: the whole command with the here-document bodies the parser positively identified as data cut out.
+The check itself is not here-document-aware; the parser decides which bodies are data, and the check reads what is left.
+
+Inert data is allowed on that basis: a forbidden pattern that only ever reaches a `cat` or `python3` here-document body is allowed inside a construct exactly as it is outside one, while a `bash` here-document carrying the same bytes is denied in both places.
 This matters for the `until` wait idiom, which is the supported way to poll for a condition where chained `sleep` waits are unavailable.
+A body counts as data only when the command consuming it can be named and does nothing else with it, so `cat <<EOF | bash` and `cat <<EOF > /tmp/o` keep their bodies in view and stay denied.
+Quoted text and other argument data inside a construct are not here-document bodies and keep the verdict they have always had, so `while true; do echo 'pkill -f fm-watch'; done` still denies.
 
 Block syntax the scanner cannot fit into a well-formed construct - an unclosed loop, a stray `done` or `esac`, an arithmetic `for`, a substitution in a `case` subject or pattern - keeps the whole command on the conservative path above.
-The regression suite pins the resulting guarantee directly: wrapping a body in any of these constructs never produces a more permissive verdict than the same body at top level.
+The regression suite pins two guarantees.
+Wrapping a body in any of these constructs never produces a more permissive verdict than the same body at top level, and neither does splitting a binding from its use across the construct - into sibling arms, across the construct's end, or reversed inside a loop body.
+The second is the one that matters: the first cannot reach a defect that needs the binding and the use in different places.
 
 ## Stable reason codes
 
@@ -242,7 +260,7 @@ Every native-path automatic marker was present and every deny sentinel remained 
 
 `tests/fm-arm-pretool-check.test.sh` owns the adversarial acceptance matrix.
 Every row runs through Codex-shaped stdin, Claude-shaped stdin, Grok-shaped stdin, OpenCode-shaped CLI, and Pi-shaped CLI entry forms.
-The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and their never-more-permissive-than-top-level guarantee, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
+The suite also verifies real newline bytes, direct classifier reason codes, comments, heredoc data, block constructs and both their never-more-permissive-than-top-level guarantees, bindings that outlive a branch or travel backwards around a loop, values arriving from unmodelled loop input, malformed and unsupported protected syntax, constructed dynamic payloads, malformed transport fail-open behavior, missing runtime fail-open behavior, output shapes, and exact adapter field forwarding plus exit-2 mapping.
 
 Run:
 
