@@ -444,6 +444,22 @@ test_codex_omits_invalid_max_effort() {
   pass "codex omits unsupported max effort instead of passing a bad config value"
 }
 
+test_codex_threads_max_effort_for_5_6_family() {
+  local rec id out status launch
+  id=profile-codex-max56-z4b
+  rec=$(make_spawn_case profile-codex-max56 codex "$id")
+  read_case_record "$rec"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --model gpt-5.6-sol --effort max)
+  status=$?
+  expect_code 0 "$status" "codex spawn with gpt-5.6-sol max effort should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-sol max
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-sol' -c 'model_reasoning_effort=\"max\"' --dangerously-bypass-approvals-and-sandbox" \
+    "codex launch did not thread max reasoning effort for the gpt-5.6 family"
+  pass "codex threads max effort for the gpt-5.6 family only"
+}
+
 test_grok_threads_model_and_reasoning_effort() {
   local rec id out status launch
   id=profile-grok-z5
@@ -716,6 +732,7 @@ test_claude_threads_model_and_effort
 test_only_claude_launch_carries_autocompact_window
 test_codex_threads_model_and_effort
 test_codex_omits_invalid_max_effort
+test_codex_threads_max_effort_for_5_6_family
 test_grok_threads_model_and_reasoning_effort
 test_grok_omits_invalid_max_reasoning_effort
 test_grok_omits_invalid_xhigh_reasoning_effort
