@@ -26,8 +26,13 @@
 #      branch whose head was rewritten or diverged must not be attributed.
 #      A run matches when its head equals the worktree HEAD, or the worktree HEAD
 #      is an ancestor of the run head (pipeline fix commits advanced the run on
-#      the same line of history). Local work that advanced past the run head, or
-#      diverged from it, invalidates attribution.
+#      the same line of history). An actively-executing run (running/fixing/ci,
+#      no outcome yet) also matches when its head is not an object in this repo
+#      at all: no-mistakes executes runs in its own private worktree, so a
+#      rebased or fix-advanced head reaches this repo only at push (see
+#      nm_run_attributes_here). Local work that advanced past a resolvable run
+#      head, or diverged from it, invalidates attribution, and a terminal or
+#      gate-parked run with a locally-absent head stays unattributed.
 #      The run-step is AUTHORITATIVE: running/fixing -> working, ci -> working,
 #      awaiting_approval/fix_review -> parked (with gate findings), terminal
 #      passed/checks-passed -> done, failed/cancelled -> failed. EXCEPT: while
@@ -393,11 +398,16 @@ nm_runs_status_for_branch() {  # <branch>
     rest=$(trim "$rest")
     sha=${rest%% *}
     if [ "$br" = "$branch" ]; then
-      # Same code-identity rule as axi status: skip a same-branch row whose
-      # short-sha does not match this worktree (rewritten or advanced tip).
-      if ! nm_coarse_head_matches_worktree "$sha"; then
-        continue
-      fi
+      # Same code-identity rule as axi status: a resolvable short-sha must
+      # match this worktree (equal, or local is ancestor of run tip), while a
+      # sha that is not an object here binds only a still-`running` row - the
+      # mid-flight pipeline-worktree shape nm_run_attributes_here explains -
+      # never a terminal row from a previous incarnation of a reused branch.
+      case "$(fm_nm_head_relation "$WT" "$sha")" in
+        match) ;;
+        unresolvable) [ "$st" = running ] || continue ;;
+        *) continue ;;
+      esac
       printf '%s' "$st"
       return 0
     fi
@@ -409,20 +419,35 @@ nm_runs_status_for_branch() {  # <branch>
 # scratch worktree); with no branch there is no run to attribute to this crew.
 CREW_BRANCH=$(git -C "$WT" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
 
-# 0 if the active axi-status run's head field matches this worktree's code
-# identity. Branch match is a precondition (caller). Rule owned by
-# fm_nm_head_matches_worktree in bin/fm-nm-run-lib.sh.
-nm_run_head_matches_worktree() {
-  local run_head
+# 0 if the active axi-status run binds to this worktree's code identity.
+# Branch match is a precondition (caller); the head relation itself is owned by
+# fm_nm_head_relation in bin/fm-nm-run-lib.sh. A strict `match` always binds.
+# An `unresolvable` head - not an object in this repo at all - additionally
+# binds only while the run is actively executing (no outcome yet and top-level
+# status running/fixing/ci): no-mistakes executes the run in its own private
+# worktree, so from the rebase step onward the run head exists only there
+# until push, and demanding local resolvability misread every such mid-flight
+# run as unattributed (the 2026-08-10 false-wedge incident: a healthy
+# nine-minute review step on a rebased head kept wedge-escalating because
+# --run-progress reported none). A terminal or gate-parked run whose head
+# never reached this repo stays unbound exactly as before - that is the
+# reused-branch stale-run shape the strict rule exists to reject - so a
+# cancelled, superseded, or long-parked historical run cannot claim a crew
+# that has already rebuilt its branch.
+nm_run_attributes_here() {
+  local run_head outcome
   run_head=$(strip_quotes "$(nm_field head)")
-  fm_nm_head_matches_worktree "$WT" "$run_head"
-}
-
-# Coarse runs-list rows are "<status> <branch> <short-sha> ...". 0 if the short
-# sha for this branch row matches the worktree head under the same rules as
-# nm_run_head_matches_worktree (equal, or local is ancestor of run tip).
-nm_coarse_head_matches_worktree() {  # <short-sha>
-  fm_nm_head_matches_worktree "$WT" "$1"
+  case "$(fm_nm_head_relation "$WT" "$run_head")" in
+    match) return 0 ;;
+    unresolvable) ;;
+    *) return 1 ;;
+  esac
+  outcome=$(strip_quotes "$(nm_field outcome)")
+  [ -z "$outcome" ] || return 1
+  case "$(strip_quotes "$(nm_field status)")" in
+    running|fixing|ci) return 0 ;;
+    *) return 1 ;;
+  esac
 }
 
 HAVE_RUN=0
@@ -438,7 +463,7 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
   RUN_OUT=$(nm_run axi status)
   if [ -n "$RUN_OUT" ]; then
     run_branch=$(strip_quotes "$(nm_field branch)")
-    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_head_matches_worktree; then
+    if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_attributes_here; then
       HAVE_RUN=1
     else
       # The active-or-most-recent run is for another branch, or same branch with

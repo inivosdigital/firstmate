@@ -49,6 +49,19 @@ make_repo_on_branch() {  # <dir> <branch>
   export FM_FAKE_RUN_HEAD
 }
 
+# No-mistakes executes a run in its OWN private worktree (a gate-repo clone),
+# not the crew's: from the rebase step onward the run head is a commit the task
+# worktree's repo cannot resolve at all until the pipeline pushes (live
+# incident evidence, 2026-08-10: "not a valid object in this repo"). Model that
+# by cloning the worktree and rewriting its tip in the clone, so the echoed sha
+# is a real commit that exists only in the pipeline's repo.
+make_absent_pipeline_head() {  # <wt-dir> <clone-dir> -> echoes absent sha
+  local wt=$1 clone=$2
+  git clone -q "$wt" "$clone" 2>/dev/null
+  git -C "$clone" commit -q --amend --allow-empty --no-edit -m 'rebased by pipeline' 2>/dev/null
+  git -C "$clone" rev-parse HEAD
+}
+
 # A fakebin with a fake `no-mistakes` (serves the env-driven run output) and a
 # fake `tmux` (serves a busy or idle pane). The fake no-mistakes mirrors the real
 # command surface the helper uses: `axi status`, `axi status --run <id>` (the
@@ -459,6 +472,179 @@ test_run_progress_reports_none_without_an_attributed_run() {
   out=$(run_crew_progress "$d" no-such-task)
   [ "$out" = "progress: none" ] || fail "expected 'progress: none' for an unknown task, got: $out"
   pass "--run-progress reports none for a crew with no attributed run"
+}
+
+# The incident's exact step table: rebase has rewritten the head, review is the
+# long-running live step behind the idle pane.
+run_rebased_review() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[3]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,0
+    review,running,0,0
+EOF
+}
+
+run_rebased_review_done_test_running() {  # <branch>
+  cat <<EOF
+run:
+  id: "01RUN"
+  branch: $1
+  status: running
+  head: "${FM_FAKE_RUN_HEAD:-abc1234}"
+  pr: ""
+  findings: none
+  steps[4]{step,status,findings,duration_ms}:
+    intent,completed,0,0
+    rebase,completed,0,0
+    review,completed,0,0
+    test,running,0,0
+EOF
+}
+
+# THE 2026-08-10 regression (beamanalyzer-security-hardening): a live run
+# advancing on a rebased head that exists only in the pipeline's own worktree
+# was never attributed, --run-progress reported none, and the healthy crew
+# wedge-escalated three times into a demanded deep inspection. A live run on a
+# locally-unresolvable head must attribute, and its token must still advance on
+# structural progress so the deferral renews for the right reason.
+test_run_progress_attributes_live_run_on_absent_rebased_head() {
+  reset_fakes
+  local d absent out1 out2 out
+  d=$(new_case progress-rebased-head)
+  make_repo_on_branch "$d/wt" fm/feat-rb
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-rb.meta" "window=fm:fm-feat-rb" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  git -C "$d/wt" rev-parse --verify "$absent^{commit}" >/dev/null 2>&1 \
+    && fail "fixture defect: the rebased head resolved inside the task worktree"
+  FM_FAKE_RUN_HEAD=$absent
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-rb)"
+  out1=$(run_crew_progress "$d" feat-rb)
+  case "$out1" in "progress: working/"*) ;; *) fail "a live run on a rebased head absent from this repo was not attributed: $out1" ;; esac
+  assert_contains "$out1" "review:running" "token did not carry the live review step"
+  # Still unresolvable, but the pipeline moves a step: the token must change.
+  FM_FAKE_AXI_STATUS="$(run_rebased_review_done_test_running fm/feat-rb)"
+  out2=$(run_crew_progress "$d" feat-rb)
+  [ "$out1" != "$out2" ] || fail "progress token unchanged after the rebased-head run advanced a step: $out1"
+  assert_contains "$out2" "test:running" "advanced token did not carry the new live step"
+  # And the ordinary state read agrees the crew is legitimately mid-validation.
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-rb)"
+  out=$(run_crew_state "$d" feat-rb)
+  assert_contains "$out" "state: working" "live rebased-head run did not read working"
+  assert_contains "$out" "source: run-step" "live rebased-head run did not stay run-step authoritative"
+  pass "a live run on a rebased head absent from the task worktree still attributes and advances"
+}
+
+# Disconfirming counterpart: the unresolvable-head dispensation is for LIVE
+# runs only. A terminal or gate-parked run whose head never reached this repo
+# is the reused-branch stale-run shape and must stay unattributed, or a
+# cancelled/superseded/historical-parked run could claim a crew that has
+# already rebuilt its branch.
+test_stale_run_on_absent_head_stays_unattributed() {
+  reset_fakes
+  local d absent out
+  d=$(new_case stale-absent-head)
+  make_repo_on_branch "$d/wt" fm/feat-sa
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-sa.meta" "window=fm:fm-feat-sa" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: rebuilding from the pre-invalidation base\n' > "$d/state/feat-sa.status"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-sa
+  # Terminal run (outcome set) on the absent head: never attributed.
+  FM_FAKE_AXI_STATUS="$(run_failed fm/feat-sa)"
+  out=$(run_crew_progress "$d" feat-sa)
+  [ "$out" = "progress: none" ] || fail "a terminal run on an absent head was attributed: $out"
+  out=$(run_crew_state "$d" feat-sa)
+  assert_not_contains "$out" "source: run-step" "a terminal run on an absent head must not become run-step"
+  assert_contains "$out" "source: status-log" "terminal absent-head run must fall back to current-state sources"
+  # Gate-parked run on the absent head: also never attributed - parked needs
+  # firstmate either way, and binding it would resurrect the historical
+  # parked-run masking incident in unresolvable form.
+  FM_FAKE_AXI_STATUS="$(run_parked fm/feat-sa)"
+  out=$(run_crew_progress "$d" feat-sa)
+  [ "$out" = "progress: none" ] || fail "a gate-parked run on an absent head was attributed: $out"
+  out=$(run_crew_state "$d" feat-sa)
+  assert_not_contains "$out" "parked at" "a gate-parked run on an absent head must not mask current state"
+  pass "terminal and gate-parked runs on an absent head stay unattributed"
+}
+
+# The same dispensation on the coarse runs-list fallback: a still-running row
+# whose short-sha this repo cannot resolve is the mid-flight pipeline shape and
+# binds; a terminal row with an absent sha stays skipped.
+test_coarse_running_row_with_absent_sha_attributes() {
+  reset_fakes
+  local d absent out
+  d=$(new_case coarse-absent-sha)
+  make_repo_on_branch "$d/wt" fm/feat-ca
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-ca.meta" "window=fm:fm-feat-ca" "worktree=$d/wt" "kind=ship" "harness=claude"
+  printf 'working: implementation under way\n' > "$d/state/feat-ca.status"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_BUSY=0
+  arm_idle_record "$d/state" feat-ca
+  # The repo-wide axi answer is another crew's run; only the runs list carries
+  # this branch, at the pipeline's locally-absent rebased sha.
+  FM_FAKE_AXI_STATUS="$(run_running fm/other-crew)"
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  running    fm/other-crew aaaaaaa  2026-08-10 22:10
+  running    fm/feat-ca $(printf '%.7s' "$absent")  2026-08-10 22:05
+EOF
+)"
+  out=$(run_crew_state "$d" feat-ca)
+  assert_contains "$out" "state: working" "coarse running row on an absent sha did not read working"
+  assert_contains "$out" "source: run-step" "coarse running row on an absent sha was not attributed"
+  out=$(run_crew_progress "$d" feat-ca)
+  case "$out" in "progress: working/coarse/running/"*) ;; *) fail "coarse absent-sha run did not emit the coarse progress token: $out" ;; esac
+  # A terminal row at the same absent sha must stay skipped.
+  FM_FAKE_RUNS_LIST="$(cat <<EOF
+  completed  fm/feat-ca $(printf '%.7s' "$absent")  2026-08-09 20:00  https://github.com/o/r/pull/9
+EOF
+)"
+  out=$(run_crew_progress "$d" feat-ca)
+  [ "$out" = "progress: none" ] || fail "a terminal coarse row on an absent sha was attributed: $out"
+  pass "coarse fallback binds a running row on an absent sha, skips terminal ones"
+}
+
+# End to end through the REAL helper: the shared wedge policy
+# (crew_run_progress_defers_wedge, bin/fm-classify-lib.sh) must DEFER for the
+# incident geometry - live run, rebased head only the pipeline's repo can
+# resolve - instead of escalating a healthy crew. This is the watcher-facing
+# half of the regression above; the classifier-level policy itself is pinned in
+# tests/fm-watch-triage.test.sh over a stubbed reader.
+test_run_progress_defers_wedge_on_absent_rebased_head() {
+  reset_fakes
+  local d absent
+  d=$(new_case progress-wedge-e2e)
+  make_repo_on_branch "$d/wt" fm/feat-we
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-we.meta" "window=fm:fm-feat-we" "worktree=$d/wt" "kind=ship"
+  absent=$(make_absent_pipeline_head "$d/wt" "$d/pipe")
+  FM_FAKE_RUN_HEAD=$absent
+  FM_FAKE_AXI_STATUS="$(run_rebased_review fm/feat-we)"
+  # The live-run dead-agent guard is not under test here; pin it alive so the
+  # verdict is attributable to attribution alone (same pattern as the
+  # fm-watch-triage.test.sh policy cases).
+  # shellcheck disable=SC2329 # invoked indirectly via the sourced fm-classify-lib.sh
+  fm_backend_agent_alive() { printf 'alive'; }
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" \
+    crew_run_progress_defers_wedge feat-we "$d/state" \
+    || fail "the incident geometry (live run, rebased head absent locally) escalated instead of deferring"
+  [ -s "$d/state/.run-progress-feat-we" ] \
+    || fail "no progress marker was stamped for the deferred rebased-head run"
+  grep -Fq 'review:running' "$d/state/.run-progress-feat-we" \
+    || fail "the progress marker did not record the live step token"
+  unset -f fm_backend_agent_alive
+  pass "crew_run_progress_defers_wedge defers the incident geometry end to end"
 }
 
 # ---------------------------------------------------------------------------
@@ -1589,5 +1775,9 @@ test_run_progress_changes_when_the_run_advances
 test_run_progress_ignores_a_ticking_duration
 test_run_progress_phase_separates_finished_from_advancing
 test_run_progress_reports_none_without_an_attributed_run
+test_run_progress_attributes_live_run_on_absent_rebased_head
+test_stale_run_on_absent_head_stays_unattributed
+test_coarse_running_row_with_absent_sha_attributes
+test_run_progress_defers_wedge_on_absent_rebased_head
 
 echo "all fm-crew-state tests passed"
