@@ -109,15 +109,26 @@ state_value() { # <id>; prints recovery-grade state
 }
 
 print_route() { # <id>
-  local id=$1 harness traceparent
+  local id=$1 harness traceparent spawned
   remote_endpoint_require "$id"
   harness=$(fm_meta_get "$REMOTE_ENDPOINT_META" harness)
   traceparent=$(fm_meta_get "$REMOTE_ENDPOINT_META" traceparent)
+  # When this endpoint was created, from its own record, so the parent dates the
+  # worker by the endpoint rather than by the call that asked about it: a launch
+  # that finds this endpoint already alive returns this same route unchanged, and
+  # an epoch minted on the parent side would then say "created now" about a
+  # worker that has been running, or stuck, since long before. Reported only when
+  # this record names exactly one readable epoch; a record predating the field,
+  # or carrying two, reports none and leaves the parent without a start rather
+  # than with a wrong one.
+  spawned=$(fm_backend_meta_exact_value "$REMOTE_ENDPOINT_META" spawned || true)
+  case "$spawned" in ''|*[!0-9]*) spawned= ;; esac
   printf 'schema=fm-remote-secondmate-control.v1\n'
   printf 'backend=%s\n' "$REMOTE_ENDPOINT_BACKEND"
   printf 'target=%s\n' "$REMOTE_ENDPOINT_TARGET"
   printf 'herdr_session=%s\n' "$REMOTE_HERDR_SESSION"
   printf 'harness=%s\n' "$harness"
+  [ -z "$spawned" ] || printf 'spawned=%s\n' "$spawned"
   [ -z "$traceparent" ] || printf 'traceparent=%s\n' "$traceparent"
 }
 

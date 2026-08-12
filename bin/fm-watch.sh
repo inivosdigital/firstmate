@@ -378,11 +378,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # The spawned= field inside that same file is a different thing and is read: it
 # is content rather than a filesystem timestamp, fm-spawn writes it once and
 # carries it forward across relaunches, and both rewriters above preserve every
-# line they do not own, so nothing can advance it while a call runs. The gen
-# token carries the same epoch for an armed incarnation. Both formats are owned
-# by their writers (bin/fm-busy-event.sh, bin/fm-spawn.sh); if either changes,
-# the parse below fails and the task loses only that floor, which alarms rather
-# than suppresses.
+# line they do not own, so nothing can advance it while a call runs. That holds
+# only for a field with exactly one value, which is why the read below refuses a
+# duplicated one rather than taking either: those same preserving rewriters
+# would carry a second line through untouched, and the field is only immutable
+# while there is one of it. The gen token carries the same epoch for an armed
+# incarnation. Both formats are owned by their writers (bin/fm-busy-event.sh,
+# bin/fm-spawn.sh); if either changes, the parse below fails and the task loses
+# only that floor, which alarms rather than suppresses.
 #
 # Time is wall clock: no monotonic epoch is readable by a fresh watcher process
 # on every supported platform, and none is needed here. A forward step only
@@ -475,9 +478,18 @@ busy_spawn_epoch() {  # <task> <now>
 # The same floor for a task whose harness arms nothing. A task metadata file
 # written before fm-spawn recorded the field has none, which leaves the bound
 # exactly where it was for that task rather than inventing a start.
+#
+# Read through the exactly-one reader the endpoint identity already uses, never
+# through fm_meta_get: that one answers with the LAST matching line, so a second
+# spawned= line appended after the first would be the value this bound trusts,
+# and a later one postpones the alarm for as long as lines keep arriving. Two of
+# them is not a start this side can identify, so it counts as no proof at all
+# and the pane is bounded on whatever older proof survives.
 busy_meta_spawn_epoch() {  # <task> <now>
-  local task=$1 now=$2 epoch
-  epoch=$(fm_meta_get "$STATE/$task.meta" spawned)
+  local task=$1 now=$2 meta epoch
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  epoch=$(fm_backend_meta_exact_value "$meta" spawned) || return 1
   case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
   [ "$epoch" -le "$now" ] || return 1
   printf '%s' "$epoch"

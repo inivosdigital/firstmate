@@ -362,6 +362,33 @@ else
   }
 fi
 
+# spawn_epoch_for_record: the spawned= epoch a rewrite of <meta> must carry, or
+# empty when it must carry none. The local meta write below uses this; the remote
+# route has its own rule, because a launch there can hand back an endpoint that
+# was already alive rather than starting one.
+#
+# Exactly one readable epoch is carried forward unchanged, because the field
+# dates the task rather than this launch. A record naming no epoch is stamped
+# with now, the launch this call is making. Anything else - two of them, or one
+# this side cannot read - leaves no value that can be identified as the task's
+# start, and none may be invented in its place: the bound that reads this field
+# then treats the task as having no start, which alarms for a look rather than
+# granting another full bound of silence to a worker that may already be stuck.
+spawn_epoch_for_record() {  # <meta>
+  local meta=$1 epoch
+  if [ -f "$meta" ]; then
+    if epoch=$(fm_backend_meta_exact_value "$meta" spawned); then
+      case "$epoch" in ''|*[!0-9]*) return 0 ;; esac
+      printf '%s' "$epoch"
+      return 0
+    fi
+    if grep -q '^spawned=' "$meta" 2>/dev/null; then
+      return 0
+    fi
+  fi
+  date +%s
+}
+
 spawn_remote_secondmate() {
   local id=$1 remote host root home harness positional model effort backend out rc meta tmp spawned
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
@@ -572,16 +599,31 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  # The spawn epoch, on the same terms as the traceparent above: what the remote
+  # endpoint actually carries, never what this side would like to stamp on it.
   # This route rewrites the whole file on every launch, including a liveness
-  # relaunch, so it carries the existing spawn epoch forward rather than
-  # stamping a new one; see the field's contract at the local meta write below.
-  spawned=$(fm_meta_get "$meta" spawned)
-  case "$spawned" in ''|*[!0-9]*) spawned=$(date +%s) ;; esac
+  # relaunch, and a launch here does not always create an endpoint - an endpoint
+  # already alive is returned as it stands. Stamping now would then date a worker
+  # that may have been stuck for hours as created this second and buy it another
+  # full bound of silence, so this side never mints one: it keeps its own record's
+  # epoch when that record has exactly one, otherwise adopts the epoch the remote
+  # endpoint reports for itself, and otherwise writes no epoch at all and lets the
+  # route count as having no start.
+  spawned=
+  if [ -f "$meta" ]; then
+    spawned=$(fm_backend_meta_exact_value "$meta" spawned || true)
+  fi
+  case "$spawned" in
+    ''|*[!0-9]*)
+      spawned=$(printf '%s\n' "$out" | sed -n 's/^spawned=//p' | tail -1)
+      case "$spawned" in ''|*[!0-9]*) spawned= ;; esac
+      ;;
+  esac
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
     echo "endpoint_task_id=$id"
-    echo "spawned=$spawned"
+    [ -z "$spawned" ] || echo "spawned=$spawned"
     echo "worktree=$home"
     echo "project=$root"
     echo "harness=$harness"
@@ -2325,16 +2367,16 @@ META_WINDOW=$T
 # that do not - codex, kimi, grok, muse, herdr-native - have nothing else until
 # their first turn ends.
 # Written once and never advanced: a relaunch through this script keeps the
-# recorded epoch, because a later stamp could only defer that alarm, and an
-# unparseable one is replaced rather than carried. bin/fm-pr-check.sh and
-# bin/fm-x-lib.sh rewrite this file but preserve every line they do not own, so
-# the value survives them.
-SPAWNED=$(fm_meta_get "$STATE/$ID.meta" spawned)
-case "$SPAWNED" in ''|*[!0-9]*) SPAWNED=$(date +%s) ;; esac
+# recorded epoch, because a later stamp could only defer that alarm.
+# bin/fm-pr-check.sh and bin/fm-x-lib.sh rewrite this file but preserve every
+# line they do not own, so the value survives them - and so would a second
+# spawned= line, which is why spawn_epoch_for_record refuses to choose between
+# two of them rather than canonizing the later one into the file it writes here.
+SPAWNED=$(spawn_epoch_for_record "$STATE/$ID.meta")
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
-  echo "spawned=$SPAWNED"
+  [ -z "$SPAWNED" ] || echo "spawned=$SPAWNED"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

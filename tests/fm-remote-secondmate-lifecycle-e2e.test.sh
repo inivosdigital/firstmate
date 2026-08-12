@@ -730,6 +730,47 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
   || fail "remote endpoint delivery observation did not execute on its own host"
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
+# A launch against an endpoint that is already alive returns that endpoint as it
+# stands and creates nothing. The parent must date the worker by the endpoint,
+# never by this call: a record written here saying "created now" would give a
+# worker that has been stuck for hours another full bound of silence before its
+# first possible wedge alarm.
+reuse_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
+cp "$reuse_route_meta" "$TMP_ROOT/remote-ios-before-reuse.meta"
+cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-reuse.meta"
+reuse_launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$reuse_launches_before" -gt 0 ] \
+  || fail "setup: no endpoint had been created yet, so the count below could not detect a new one"
+
+# The endpoint knows when it was created; the parent's own record has lost the
+# field, as a record written before it existed has.
+reuse_endpoint_epoch=$(( $(date +%s) - 9000 ))
+grep -v '^spawned=' "$TMP_ROOT/remote-ios-before-reuse.meta" > "$reuse_route_meta"
+printf 'spawned=%s\n' "$reuse_endpoint_epoch" >> "$reuse_route_meta"
+grep -v '^spawned=' "$TMP_ROOT/parent-ios-before-reuse.meta" > "$PARENT/state/ios.meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-reuse-dated.out" 2>&1 \
+  || fail "relaunch against a live remote endpoint failed: $(cat "$TMP_ROOT/spawn-reuse-dated.out")"
+reuse_recorded=$(grep '^spawned=' "$PARENT/state/ios.meta" | cut -d= -f2- | paste -sd, -)
+[ "$reuse_recorded" = "$reuse_endpoint_epoch" ] \
+  || fail "reusing a live endpoint recorded '$reuse_recorded' instead of the endpoint's own creation epoch $reuse_endpoint_epoch"
+
+# Neither side knows: the parent records no creation epoch rather than inventing
+# one, which leaves the route counted as having no start.
+grep -v '^spawned=' "$TMP_ROOT/remote-ios-before-reuse.meta" > "$reuse_route_meta"
+grep -v '^spawned=' "$TMP_ROOT/parent-ios-before-reuse.meta" > "$PARENT/state/ios.meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-reuse-legacy.out" 2>&1 \
+  || fail "relaunch against a live legacy remote endpoint failed: $(cat "$TMP_ROOT/spawn-reuse-legacy.out")"
+reuse_recorded=$(grep '^spawned=' "$PARENT/state/ios.meta" | cut -d= -f2- | paste -sd, -)
+[ -z "$reuse_recorded" ] \
+  || fail "reusing a live endpoint with no recorded creation epoch minted '$reuse_recorded'"
+
+reuse_launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
+[ "$reuse_launches_before" -eq "$reuse_launches_after" ] \
+  || fail "the reuse cases created a new remote endpoint, so they did not exercise endpoint reuse"
+mv -f "$TMP_ROOT/remote-ios-before-reuse.meta" "$reuse_route_meta"
+mv -f "$TMP_ROOT/parent-ios-before-reuse.meta" "$PARENT/state/ios.meta"
+pass "reusing a live remote endpoint dates the route by the endpoint and never mints a creation epoch"
+
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"
 legacy_pane=$(sed -n 's/^herdr_pane_id=//p' "$remote_route_meta")

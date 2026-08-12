@@ -160,6 +160,8 @@ Raw launch commands are not accepted for remote secondmates.
 Backends that already refuse secondmate launch, currently Orca and cmux, remain unsupported on the remote host.
 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
+A launch against an endpoint that is already alive returns that endpoint as it stands, so the primary records the creation epoch the remote reports for that endpoint rather than the time of the launch call.
+An endpoint that reports none leaves the primary's record without that field, since a time stamped here would date a worker by the call that asked about it.
 
 Send routed requests normally:
 

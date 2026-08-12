@@ -2637,6 +2637,54 @@ test_meta_spawn_epoch_quiets_a_freshly_created_unreadable_pane() {
   pass "a freshly created task on a harness the contract cannot read is not escalated as a possible wedge"
 }
 
+# Two creation epochs are not a start. Every writer that rewrites a task's
+# record preserves the lines it does not own, so a second spawned= line survives
+# indefinitely once present, and a reader that takes the last value would let
+# each newly appended line postpone this alarm again. The record must name one
+# epoch to count as proof; two of them count as none, and the pane is bounded on
+# whatever older proof survives.
+#
+# The fixture and its counterfactual are the reviewer's duplicate-spawned probe
+# from the independent review of 515f00b, kept in the shape it was run in.
+test_duplicate_meta_spawn_epochs_are_not_a_start() {
+  local dir state fakebin out capture_file window key sig pid old fresh
+  dir=$(make_case busy-meta-spawn-duplicate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-meta-duplicate"
+  printf 'thinking\nCtrl+c:cancel\n' > "$capture_file"
+  printf 'working: setup complete\n' > "$state/busy-duplicate.status"
+  sig=$(seen_sig "$state/busy-duplicate.status"); printf '%s' "$sig" > "$state/.seen-busy-duplicate_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  old=$(( $(date +%s) - 4000 ))
+  fresh=$(date +%s)
+
+  # An old epoch past the bound, followed by a fresh one appended after it.
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\nspawned=%s\n' \
+    "$window" "$old" "$fresh" > "$state/busy-duplicate.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "a second creation epoch suppressed the bound: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "a record with two creation epochs did not flag a possible wedge: $(cat "$out")"
+
+  # The counterfactual the probe paired it with: the same pane with the appended
+  # line removed alarms too, so the case above cannot pass merely because
+  # something other than the epoch kept it quiet.
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$old" \
+    > "$state/busy-duplicate.meta"
+  rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || { reap "$pid"; fail "the single old creation epoch stopped alarming: $(cat "$out")"; }
+  grep -F "possible wedge" "$out" >/dev/null \
+    || fail "the single old creation epoch did not flag a possible wedge: $(cat "$out")"
+  pass "a record naming two creation epochs counts as naming none"
+}
+
 # A creation epoch the clock has moved under is not evidence either. A record
 # stamped in the future would otherwise sit permanently under the bound, with
 # nothing able to age past it, so it is read as no record at all and the task
@@ -4091,6 +4139,7 @@ test_backward_clock_steps_do_not_suppress_the_bound
 test_spawn_epoch_anchors_a_task_with_no_turn_yet
 test_meta_spawn_epoch_anchors_an_unarmed_task
 test_meta_spawn_epoch_quiets_a_freshly_created_unreadable_pane
+test_duplicate_meta_spawn_epochs_are_not_a_start
 test_future_meta_spawn_epoch_does_not_suppress_the_bound
 test_busy_record_rewritten_mid_call_does_not_defer_the_bound
 test_busy_pane_resumed_call_past_the_bound_still_wedges

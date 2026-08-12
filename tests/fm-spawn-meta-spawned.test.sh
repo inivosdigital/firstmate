@@ -8,7 +8,9 @@
 # the bound needs from this writer is that the field is there after any spawn,
 # and that a second spawn over an existing record keeps the epoch already there
 # rather than stamping a new one, since a later stamp could only postpone that
-# alarm. A value the bound cannot read is no record, so it is replaced instead.
+# alarm. A record that names two epochs, or one this side cannot read, names no
+# start at all: the rewrite carries none forward rather than choosing one, and
+# the task is bounded as having no start until its next turn ends.
 #
 # Drives the REAL bin/fm-spawn.sh, following tests/fm-memcap.test.sh's spawn
 # fixture: a fake tmux answers the pane-cwd query with a real git worktree
@@ -66,9 +68,17 @@ run_spawn() {  # <home> <id> <proj> <pane> <fakebin> [extra-args...]
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" "$@" 2>&1
 }
 
-# The recorded epoch, or empty when the field is absent.
+# The recorded epoch as the shared metadata reader would resolve it: the LAST
+# matching line. Only for cases that have established the field appears once -
+# a duplicate case asserted through this would report whichever line came last
+# and call that the record's value, which is the very confusion under test.
 spawned_of() {  # <meta>
   grep '^spawned=' "$1" 2>/dev/null | tail -1 | cut -d= -f2- || true
+}
+
+# Every recorded epoch in file order, comma separated, selecting nothing.
+spawned_values() {  # <meta>
+  grep '^spawned=' "$1" 2>/dev/null | cut -d= -f2- | paste -sd, - || true
 }
 
 # One line, not an accumulating history: the bound reads the last value, so a
@@ -134,11 +144,46 @@ EOF
   pass "a relaunch carries the recorded creation epoch forward instead of stamping a new one"
 }
 
-# A value the bound cannot parse is no record at all, so it is replaced rather
-# than carried: the endpoint is being created at this moment, which is the one
-# thing this writer knows for certain.
-test_unreadable_recorded_epoch_is_replaced() {
-  local tmp proj wt fakebin out meta before after epoch
+# A record already naming two epochs names no single one, and this writer may
+# not settle that by keeping either: writing the later one back as the sole
+# value would make an appended line permanent and push the wedge alarm out by a
+# full bound every time one appears. The rewritten record carries no epoch, so
+# the task counts as having no start until its next turn ends.
+#
+# The fixture is the reviewer's respawn-duplicate probe from the independent
+# review of 515f00b, whose run showed before_count=2 collapsing to after_count=1
+# holding the later value. Asserted through spawned_values, which selects
+# nothing, because the reader that selects the last value is what hid this.
+test_respawn_does_not_canonize_a_duplicate_epoch() {
+  local tmp proj wt fakebin out meta old fresh
+  tmp=$(fm_test_tmproot fm-spawn-meta-spawned-duplicate)
+  read -r proj wt fakebin <<EOF
+$(spawn_fixture "$tmp")
+EOF
+  meta="$tmp/home/state/spawned-duplicate.meta"
+
+  out=$(run_spawn "$tmp/home" spawned-duplicate "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
+  assert_contains "$out" "spawned spawned-duplicate" "first spawn should succeed"
+
+  old=$(( $(date +%s) - 9000 ))
+  fresh=$(date +%s)
+  set_spawned "$meta" "$old"
+  printf 'spawned=%s\n' "$fresh" >> "$meta"
+  [ "$(spawned_values "$meta")" = "$old,$fresh" ] \
+    || fail "setup: the record does not hold both epochs in order: $(spawned_values "$meta")"
+
+  out=$(run_spawn "$tmp/home" spawned-duplicate "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
+  assert_contains "$out" "spawned spawned-duplicate" "relaunch should succeed"
+  [ "$(spawned_values "$meta")" = "" ] \
+    || fail "a relaunch settled an ambiguous record on '$(spawned_values "$meta")' instead of leaving it without one"
+  pass "a relaunch over two recorded epochs writes neither back"
+}
+
+# A value the bound cannot parse names no epoch either, and the same rule
+# applies: this writer carries an epoch forward, it does not invent one to
+# stand in for a value it cannot read.
+test_unreadable_recorded_epoch_is_dropped() {
+  local tmp proj wt fakebin out meta
   tmp=$(fm_test_tmproot fm-spawn-meta-spawned-corrupt)
   read -r proj wt fakebin <<EOF
 $(spawn_fixture "$tmp")
@@ -149,18 +194,14 @@ EOF
   assert_contains "$out" "spawned spawned-corrupt" "first spawn should succeed"
   set_spawned "$meta" yesterday
 
-  before=$(date +%s)
   out=$(run_spawn "$tmp/home" spawned-corrupt "$proj" "$wt" "$fakebin" codex --mode no-mistakes --yolo off)
-  after=$(date +%s)
   assert_contains "$out" "spawned spawned-corrupt" "relaunch should succeed"
-
-  epoch=$(spawned_of "$meta")
-  case "$epoch" in ''|*[!0-9]*) fail "an unreadable creation epoch was carried forward: '$epoch'" ;; esac
-  [ "$epoch" -ge "$before" ] && [ "$epoch" -le "$after" ] \
-    || fail "replacement creation epoch $epoch is outside the spawn window $before..$after"
-  pass "an unreadable creation epoch is replaced at the next spawn"
+  [ "$(spawned_values "$meta")" = "" ] \
+    || fail "an unreadable creation epoch became '$(spawned_values "$meta")' instead of none"
+  pass "an unreadable creation epoch is dropped rather than replaced with a fresh one"
 }
 
 test_spawn_records_the_creation_epoch
 test_relaunch_keeps_the_recorded_epoch
-test_unreadable_recorded_epoch_is_replaced
+test_respawn_does_not_canonize_a_duplicate_epoch
+test_unreadable_recorded_epoch_is_dropped
