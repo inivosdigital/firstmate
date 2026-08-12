@@ -338,7 +338,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # ---------------------------------------------------------------------------
 # The bound measures how long a pane has been busy with no sign the worker got
 # anywhere, so its start is the newest thing that positively proves the current
-# call had not begun yet. Exactly three things prove that, and nothing else may:
+# call had not begun yet. Exactly four things prove that, and nothing else may:
 #   - state/.last-idle-<key>: the newest poll at which a watcher of this home
 #     got an exact idle verdict for that pane from the busy-state contract
 #     (busy_observe below). An unknown verdict is not that verdict - it says the
@@ -352,7 +352,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 #     hung call produces neither, so the marker is read as "the worker got
 #     somewhere here", never as a call start;
 #   - the epoch inside the task's busy-contract gen token, minted once when
-#     fm-spawn armed this incarnation: the call cannot predate the task.
+#     fm-spawn armed this incarnation: the call cannot predate the task;
+#   - state/<task>.meta's spawned= field, written once by fm-spawn when the task
+#     was created and carried unchanged through every rewrite of that file. It
+#     is the same floor the gen token gives an armed harness, extended to the
+#     harnesses that arm nothing (codex, kimi, grok, muse, herdr-native), whose
+#     first call would otherwise have no start at all until its first turn ends.
+#     A task silent because it has not started talking yet is not a task that
+#     wedged.
 #
 # Everything else is "I do not know", and "I do not know" never moves the start
 # forward. This alarm exists so a silently wedged worker cannot sit dead
@@ -368,10 +375,14 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # for reasons that have nothing to do with the call - the hazard
 # bin/fm-tier-guard.sh:11-16 already documents - and a start that advances on
 # unrelated activity defers the alarm for as long as that activity continues.
-# The gen token carries a spawn epoch written once and never rewritten for the
-# incarnation, so it is used instead. Its format is owned by
-# bin/fm-busy-event.sh; if that changes, the parse below fails and the task
-# loses only this floor, which alarms rather than suppresses.
+# The spawned= field inside that same file is a different thing and is read: it
+# is content rather than a filesystem timestamp, fm-spawn writes it once and
+# carries it forward across relaunches, and both rewriters above preserve every
+# line they do not own, so nothing can advance it while a call runs. The gen
+# token carries the same epoch for an armed incarnation. Both formats are owned
+# by their writers (bin/fm-busy-event.sh, bin/fm-spawn.sh); if either changes,
+# the parse below fails and the task loses only that floor, which alarms rather
+# than suppresses.
 #
 # Time is wall clock: no monotonic epoch is readable by a fresh watcher process
 # on every supported platform, and none is needed here. A forward step only
@@ -432,7 +443,7 @@ busy_observe() {  # <window-key> <busy-state>
   printf '%s %s\n' "$anchor" "$now" > "$f"
 }
 
-# The three proofs above, each as an epoch or a failure. A value later than
+# The four proofs above, each as an epoch or a failure. A value later than
 # <now> is not evidence: the clock moved under it, so it is reported absent
 # rather than kept as a start in the future that nothing could ever age past.
 busy_idle_anchor() {  # <window-key> <now>
@@ -461,6 +472,17 @@ busy_spawn_epoch() {  # <task> <now>
   printf '%s' "$epoch"
 }
 
+# The same floor for a task whose harness arms nothing. A task metadata file
+# written before fm-spawn recorded the field has none, which leaves the bound
+# exactly where it was for that task rather than inventing a start.
+busy_meta_spawn_epoch() {  # <task> <now>
+  local task=$1 now=$2 epoch
+  epoch=$(fm_meta_get "$STATE/$task.meta" spawned)
+  case "$epoch" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$epoch" -le "$now" ] || return 1
+  printf '%s' "$epoch"
+}
+
 # busy_turn_over_age: 0 iff at least BUSY_TURN_MAX_SECS has passed since the
 # newest of those proofs, or if there is no proof at all. The caller has already
 # established that this poll did not see the pane idle, and routes a crossed
@@ -472,7 +494,8 @@ busy_turn_over_age() {  # <task> <window-key>
   started=
   for c in "$(busy_idle_anchor "$key" "$now")" \
            "$(busy_turn_epoch "$task" "$now")" \
-           "$(busy_spawn_epoch "$task" "$now")"; do
+           "$(busy_spawn_epoch "$task" "$now")" \
+           "$(busy_meta_spawn_epoch "$task" "$now")"; do
     [ -n "$c" ] || continue
     if [ -z "$started" ] || [ "$c" -gt "$started" ]; then started=$c; fi
   done

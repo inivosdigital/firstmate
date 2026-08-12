@@ -714,6 +714,12 @@ assert_grep 'herdr_session=fm-remote' "$REMOTE_HOME/state/parent-route/ios.meta"
 assert_grep '--session fm-remote' "$HERDR_LOG" "remote launch did not target the fm-remote session"
 assert_no_grep '--session default' "$HERDR_LOG" "remote launch targeted the interactive default session"
 assert_grep 'window=remote:ios' "$PARENT/state/ios.meta" "parent metadata pretended the endpoint was local"
+# The creation epoch the busy-turn bound reads is written on this route too, so
+# a remote secondmate is not the one endpoint with no start of its own.
+route_spawned=$(grep '^spawned=' "$PARENT/state/ios.meta" | tail -1 | cut -d= -f2-)
+case "$route_spawned" in
+  ''|*[!0-9]*) fail "parent metadata omitted the remote route's creation epoch" ;;
+esac
 assert_present "$PARENT/state/procevent/remote-reply-ios.source" "remote spawn did not arm its reply source"
 publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.sh"
 [ "$(remote_env "$ROOT/bin/fm-on.sh" ios fm-remote-secondmate-control.sh state ios)" = alive ] \

@@ -2558,6 +2558,111 @@ test_spawn_epoch_anchors_a_task_with_no_turn_yet() {
   pass "a task's spawn epoch keeps a fresh first turn quiet and still reaches the bound when that turn never ends"
 }
 
+# The same floor for the harnesses that arm nothing. Grok, codex, kimi and muse
+# mint no gen token, so until a poll saw such a task idle or its first turn
+# ended it had no start at all, and one busy from launch alarmed from launch.
+# The epoch in its own metadata is that start: a task which has not talked yet
+# is measured from when it was created. It is a floor and not a reprieve - it
+# never advances, so a first turn that never ends still reaches the bound. Grok
+# here because the contract reads its pane exactly, so the case turns on the
+# bound rather than on the unreadable-pane path.
+test_meta_spawn_epoch_anchors_an_unarmed_task() {
+  local dir state fakebin out capture_file window key sig pid
+  dir=$(make_case busy-meta-spawn-epoch); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-meta-spawn"
+  printf 'thinking\nCtrl+c:cancel\n' > "$capture_file"
+  printf 'working: setup complete\n' > "$state/busy-meta.status"
+  sig=$(seen_sig "$state/busy-meta.status"); printf '%s' "$sig" > "$state/.seen-busy-meta_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  # Phase A: created a moment ago, first turn still running, no completed turn,
+  # no gen token, and no poll has ever seen it idle. The recorded creation
+  # epoch is the only thing that can hold it under the bound.
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(date +%s)" \
+    > "$state/busy-meta.meta"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    reap "$pid"; fail "a task created a moment ago was escalated as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a task created a moment ago started a wedge timer"; }
+  reap "$pid"
+
+  # Phase B: the same task, created 4000s ago and still on that first turn.
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(( $(date +%s) - 4000 ))" \
+    > "$state/busy-meta.meta"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a task 4000s into a first turn that never ended was not escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a task 4000s past its creation did not flag a possible wedge: $(cat "$out")"
+  pass "a task's recorded creation epoch anchors an unarmed harness's first turn and still reaches the bound"
+}
+
+# The same floor on the harness that needs it most. Codex reports nothing the
+# contract can read and its pane ticks, so a fresh codex task takes the bound's
+# unreadable-pane path, where with no proof at all it escalated within seconds
+# of being created and again on every wedge interval after that. Its recorded
+# creation epoch keeps it quiet until the bound is genuinely crossed.
+test_meta_spawn_epoch_quiets_a_freshly_created_unreadable_pane() {
+  local dir state fakebin out capture_file window key sig pid ticker n
+  dir=$(make_case busy-meta-spawn-unreadable); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-meta-unreadable"
+  printf 'esc to interrupt\n' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=codex\nspawned=%s\n' "$window" "$(date +%s)" \
+    > "$state/busy-codex.meta"
+  printf 'working: setup complete\n' > "$state/busy-codex.status"
+  sig=$(seen_sig "$state/busy-codex.status"); printf '%s' "$sig" > "$state/.seen-busy-codex_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+
+  ( n=0; while :; do n=$((n + 1)); printf 'thinking (%ds)\nesc to interrupt\n' "$n" > "$capture_file"; sleep 0.3; done ) &
+  ticker=$!
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 40; then
+    kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+    reap "$pid"
+    fail "a task created a moment ago was escalated as a possible wedge: $(cat "$out")"
+  fi
+  kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+  [ ! -s "$out" ] || { reap "$pid"; fail "a freshly created task printed a wake reason: $(cat "$out")"; }
+  [ ! -e "$state/.wedge-escalations-$key" ] || { reap "$pid"; fail "a freshly created task accumulated a wedge escalation"; }
+  reap "$pid"
+  pass "a freshly created task on a harness the contract cannot read is not escalated as a possible wedge"
+}
+
+# A creation epoch the clock has moved under is not evidence either. A record
+# stamped in the future would otherwise sit permanently under the bound, with
+# nothing able to age past it, so it is read as no record at all and the task
+# falls back to whatever older proof survives. A no-regression guard rather than
+# a discriminator: it passes against the revision before this floor existed too,
+# because a task with no proof at all escalates for a different reason. It
+# exists so a later change to this proof cannot start trusting a future stamp.
+test_future_meta_spawn_epoch_does_not_suppress_the_bound() {
+  local dir state fakebin out capture_file window sig pid
+  dir=$(make_case busy-meta-spawn-future); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-meta-future"
+  printf 'thinking\nCtrl+c:cancel\n' > "$capture_file"
+  printf 'working: setup complete\n' > "$state/busy-future.status"
+  sig=$(seen_sig "$state/busy-future.status"); printf '%s' "$sig" > "$state/.seen-busy-future_status"
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(( $(date +%s) + 7200 ))" \
+    > "$state/busy-future.meta"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 100 || fail "a creation epoch in the future suppressed the bound: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a creation epoch in the future did not flag a possible wedge: $(cat "$out")"
+  pass "a creation epoch left in the future by a clock step is read as no record at all"
+}
+
 # A harness's own busy events cannot postpone the bound. Two armed adapters write
 # busy repeatedly inside one call - OpenCode on session.status type retry while
 # its session stays latched, Pi on every agent_start - so a foreground call that
@@ -2784,11 +2889,13 @@ test_repeated_inconsistent_idle_records_do_not_defer_the_bound() {
 }
 
 # The documented cost of failing this alarm toward the captain, held to what the
-# code actually does. A harness with no armed spawn epoch and no completed turn
-# (grok, muse, and any adapter the contract cannot read) gives a watcher nothing
-# that proves when its call began, so it is treated as over the bound - and that
-# repeats on the wedge cadence for as long as the condition holds rather than
-# costing a single look, reaching demand-deep-inspection like any other repeat.
+# code actually does. A record carrying none of the four proofs - no idle
+# sighting, no completed turn, no gen token, and no recorded creation epoch,
+# which is a task whose metadata was written before fm-spawn recorded that field
+# - gives a watcher nothing that proves when its call began, so it is treated as
+# over the bound. That repeats on the wedge cadence for as long as the condition
+# holds rather than costing a single look, reaching demand-deep-inspection like
+# any other repeat.
 test_unarmed_harness_realarms_until_its_first_turn_completes() {
   local dir state fakebin out capture_file window key sig pid n
   dir=$(make_case busy-unarmed-realarm); state="$dir/state"; fakebin="$dir/fakebin"
@@ -3982,6 +4089,9 @@ test_repeated_blind_gaps_do_not_move_the_start
 test_repeated_metadata_rewrites_do_not_defer_the_bound
 test_backward_clock_steps_do_not_suppress_the_bound
 test_spawn_epoch_anchors_a_task_with_no_turn_yet
+test_meta_spawn_epoch_anchors_an_unarmed_task
+test_meta_spawn_epoch_quiets_a_freshly_created_unreadable_pane
+test_future_meta_spawn_epoch_does_not_suppress_the_bound
 test_busy_record_rewritten_mid_call_does_not_defer_the_bound
 test_busy_pane_resumed_call_past_the_bound_still_wedges
 test_repeated_unknown_verdicts_do_not_move_the_start

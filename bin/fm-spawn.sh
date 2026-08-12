@@ -363,7 +363,7 @@ else
 fi
 
 spawn_remote_secondmate() {
-  local id=$1 remote host root home harness positional model effort backend out rc meta tmp
+  local id=$1 remote host root home harness positional model effort backend out rc meta tmp spawned
   local remote_backend remote_target remote_harness remote_herdr_session registry_lock remote_lock remote_generation
   local remote_traceparent remote_recorded_traceparent
   local -a launch_args
@@ -572,10 +572,16 @@ spawn_remote_secondmate() {
   # reports it here so the parent does not deny the agent's actual identity.
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
+  # This route rewrites the whole file on every launch, including a liveness
+  # relaunch, so it carries the existing spawn epoch forward rather than
+  # stamping a new one; see the field's contract at the local meta write below.
+  spawned=$(fm_meta_get "$meta" spawned)
+  case "$spawned" in ''|*[!0-9]*) spawned=$(date +%s) ;; esac
   tmp="$meta.tmp.$$"
   {
     echo "window=remote:$id"
     echo "endpoint_task_id=$id"
+    echo "spawned=$spawned"
     echo "worktree=$home"
     echo "project=$root"
     echo "harness=$harness"
@@ -2311,9 +2317,24 @@ fi
 
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
+# spawned=<epoch>: when this task's endpoint record was first created. It is the
+# one proof of life every harness has, and the busy-turn bound reads it so a task
+# that has not completed a turn yet is measured from its own spawn instead of
+# having no start at all (bin/fm-watch.sh's busy_turn_over_age). Harnesses that
+# arm the busy contract carry the same floor inside their gen token; the ones
+# that do not - codex, kimi, grok, muse, herdr-native - have nothing else until
+# their first turn ends.
+# Written once and never advanced: a relaunch through this script keeps the
+# recorded epoch, because a later stamp could only defer that alarm, and an
+# unparseable one is replaced rather than carried. bin/fm-pr-check.sh and
+# bin/fm-x-lib.sh rewrite this file but preserve every line they do not own, so
+# the value survives them.
+SPAWNED=$(fm_meta_get "$STATE/$ID.meta" spawned)
+case "$SPAWNED" in ''|*[!0-9]*) SPAWNED=$(date +%s) ;; esac
 {
   echo "window=$META_WINDOW"
   echo "endpoint_task_id=$ID"
+  echo "spawned=$SPAWNED"
   echo "worktree=$WT"
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"

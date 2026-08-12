@@ -400,8 +400,12 @@ teardown_task() {  # <id> <home>
     "$ROOT/bin/fm-teardown.sh" "$id" --force
 }
 
+# The creation epoch is normalized alongside the container ids: the two spawns
+# being compared happen at different moments, so that field differs for reasons
+# that have nothing to do with the projection path under test.
 normalize_meta() {  # <meta>
   sed -E \
+    -e 's|^spawned=.*$|spawned=<epoch>|' \
     -e 's|^window=.*$|window=<herdr-container-id>|' \
     -e 's|^herdr_workspace_id=.*$|herdr_workspace_id=<herdr-container-id>|' \
     -e 's|^herdr_tab_id=.*$|herdr_tab_id=<herdr-container-id>|' \
