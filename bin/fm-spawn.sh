@@ -600,24 +600,24 @@ spawn_remote_secondmate() {
   remote_recorded_traceparent=$(printf '%s\n' "$out" | sed -n 's/^traceparent=//p' | tail -1)
   fm_trace_context_valid "$remote_recorded_traceparent" || remote_recorded_traceparent=
   # The spawn epoch, on the same terms as the traceparent above: what the remote
-  # endpoint actually carries, never what this side would like to stamp on it.
-  # This route rewrites the whole file on every launch, including a liveness
-  # relaunch, and a launch here does not always create an endpoint - an endpoint
-  # already alive is returned as it stands. Stamping now would then date a worker
-  # that may have been stuck for hours as created this second and buy it another
-  # full bound of silence, so this side never mints one: it keeps its own record's
-  # epoch when that record has exactly one, otherwise adopts the epoch the remote
-  # endpoint reports for itself, and otherwise writes no epoch at all and lets the
-  # route count as having no start.
-  spawned=
-  if [ -f "$meta" ]; then
-    spawned=$(fm_backend_meta_exact_value "$meta" spawned || true)
-  fi
+  # endpoint answers about itself, and nothing else. The bound this field feeds
+  # measures the age of that endpoint's current call, so the endpoint is the only
+  # side that knows the answer, and a launch here does not always create one - an
+  # endpoint already alive is returned as it stands.
+  #
+  # This side's own copy of the field is a cache of some earlier answer, so it is
+  # not consulted at all. Preferring it would keep whatever the record already
+  # held when a reused endpoint reports nothing, including a value stamped by a
+  # writer that minted one, and a worker stuck for hours would stay quiet for
+  # another full bound on exactly the records that were already wrong.
+  #
+  # One reported numeric epoch is the endpoint's answer. No line, several lines,
+  # or an unreadable one is no answer, and none may be substituted for it: the
+  # rewritten record then carries no epoch and the route counts as having no
+  # start, which alarms for a look rather than granting that silence.
+  spawned=$(printf '%s\n' "$out" | sed -n 's/^spawned=//p')
   case "$spawned" in
-    ''|*[!0-9]*)
-      spawned=$(printf '%s\n' "$out" | sed -n 's/^spawned=//p' | tail -1)
-      case "$spawned" in ''|*[!0-9]*) spawned= ;; esac
-      ;;
+    ''|*[!0-9]*) spawned= ;;
   esac
   tmp="$meta.tmp.$$"
   {

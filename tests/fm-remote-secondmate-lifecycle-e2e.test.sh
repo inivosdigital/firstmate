@@ -731,10 +731,12 @@ publish_healthy_watcher_identity "$PARENT/state" "$PARENT" "$ROOT/bin/fm-watch.s
 pass "remote spawn launches on the remote-local backend and records a host-qualified route"
 
 # A launch against an endpoint that is already alive returns that endpoint as it
-# stands and creates nothing. The parent must date the worker by the endpoint,
-# never by this call: a record written here saying "created now" would give a
-# worker that has been stuck for hours another full bound of silence before its
-# first possible wedge alarm.
+# stands and creates nothing. The parent must date the worker by that endpoint's
+# own answer and by nothing else, neither this call's clock nor the value its own
+# record happens to hold: either substitute would give a worker that has been
+# stuck for hours another full bound of silence before its first possible wedge
+# alarm. Each case below therefore sets the two sides to disagree, so a run that
+# read the wrong one records the wrong thing rather than the same thing.
 reuse_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$reuse_route_meta" "$TMP_ROOT/remote-ios-before-reuse.meta"
 cp "$PARENT/state/ios.meta" "$TMP_ROOT/parent-ios-before-reuse.meta"
@@ -742,17 +744,36 @@ reuse_launches_before=$(grep -c '^tab create' "$HERDR_LOG" || true)
 [ "$reuse_launches_before" -gt 0 ] \
   || fail "setup: no endpoint had been created yet, so the count below could not detect a new one"
 
-# The endpoint knows when it was created; the parent's own record has lost the
-# field, as a record written before it existed has.
+# The two sides disagree, which is the only shape that shows which one is being
+# read: the parent's record holds a later epoch of its own while the endpoint
+# reports an older one. The endpoint's answer is what the record must end up
+# with, since the parent's copy is a cache of some earlier answer and the bound
+# is measuring the endpoint.
 reuse_endpoint_epoch=$(( $(date +%s) - 9000 ))
+reuse_parent_epoch=$(( $(date +%s) - 60 ))
 grep -v '^spawned=' "$TMP_ROOT/remote-ios-before-reuse.meta" > "$reuse_route_meta"
 printf 'spawned=%s\n' "$reuse_endpoint_epoch" >> "$reuse_route_meta"
 grep -v '^spawned=' "$TMP_ROOT/parent-ios-before-reuse.meta" > "$PARENT/state/ios.meta"
+printf 'spawned=%s\n' "$reuse_parent_epoch" >> "$PARENT/state/ios.meta"
 remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-reuse-dated.out" 2>&1 \
   || fail "relaunch against a live remote endpoint failed: $(cat "$TMP_ROOT/spawn-reuse-dated.out")"
 reuse_recorded=$(grep '^spawned=' "$PARENT/state/ios.meta" | cut -d= -f2- | paste -sd, -)
 [ "$reuse_recorded" = "$reuse_endpoint_epoch" ] \
-  || fail "reusing a live endpoint recorded '$reuse_recorded' instead of the endpoint's own creation epoch $reuse_endpoint_epoch"
+  || fail "reusing a live endpoint kept '$reuse_recorded' instead of the endpoint's own creation epoch $reuse_endpoint_epoch"
+
+# The same disagreement with the endpoint silent: the parent holds a usable epoch
+# and the reused endpoint reports none. A record the earlier minting writer
+# touched holds exactly that, a fabricated later value, so keeping it would carry
+# the fabrication forward and buy a stuck worker another full bound. The field
+# goes away instead.
+grep -v '^spawned=' "$TMP_ROOT/remote-ios-before-reuse.meta" > "$reuse_route_meta"
+grep -v '^spawned=' "$TMP_ROOT/parent-ios-before-reuse.meta" > "$PARENT/state/ios.meta"
+printf 'spawned=%s\n' "$reuse_parent_epoch" >> "$PARENT/state/ios.meta"
+remote_env "$ROOT/bin/fm-spawn.sh" ios --secondmate > "$TMP_ROOT/spawn-reuse-silent.out" 2>&1 \
+  || fail "relaunch against a silent live remote endpoint failed: $(cat "$TMP_ROOT/spawn-reuse-silent.out")"
+reuse_recorded=$(grep '^spawned=' "$PARENT/state/ios.meta" | cut -d= -f2- | paste -sd, -)
+[ -z "$reuse_recorded" ] \
+  || fail "a reused endpoint reporting no creation epoch left the parent's own '$reuse_recorded' in the record"
 
 # Neither side knows: the parent records no creation epoch rather than inventing
 # one, which leaves the route counted as having no start.
@@ -769,7 +790,7 @@ reuse_launches_after=$(grep -c '^tab create' "$HERDR_LOG" || true)
   || fail "the reuse cases created a new remote endpoint, so they did not exercise endpoint reuse"
 mv -f "$TMP_ROOT/remote-ios-before-reuse.meta" "$reuse_route_meta"
 mv -f "$TMP_ROOT/parent-ios-before-reuse.meta" "$PARENT/state/ios.meta"
-pass "reusing a live remote endpoint dates the route by the endpoint and never mints a creation epoch"
+pass "a reused live remote endpoint is dated by the endpoint's own answer, and by nothing else"
 
 remote_route_meta="$REMOTE_HOME/state/parent-route/ios.meta"
 cp "$remote_route_meta" "$TMP_ROOT/remote-ios-before-default-session.meta"

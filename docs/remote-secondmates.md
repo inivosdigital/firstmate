@@ -162,6 +162,7 @@ Backends that already refuse secondmate launch, currently Orca and cmux, remain 
 Startup liveness recovery relaunches a dead or missing remote second mate through this same command, so recovery passes the same readiness gate rather than a weaker one.
 A launch against an endpoint that is already alive returns that endpoint as it stands, so the primary records the creation epoch the remote reports for that endpoint rather than the time of the launch call.
 An endpoint that reports none leaves the primary's record without that field, since a time stamped here would date a worker by the call that asked about it.
+The endpoint's answer is the only source for that field on this route: a value already sitting in the primary's own record is a cache of an earlier answer and never overrides or stands in for the current one.
 
 Send routed requests normally:
 
