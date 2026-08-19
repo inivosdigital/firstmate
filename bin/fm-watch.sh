@@ -34,10 +34,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only until BUSY_TURN_MAX_SECS has passed since the
 #                          newest positive proof its current call had not yet
-#                          started (busy_turn_over_age owns what counts as proof,
-#                          including the degenerate all-spawn-epoch case for a
-#                          worker continuously busy since spawn, and what a pane
-#                          with no proof at all is treated as);
+#                          started (busy_turn_over_age owns what counts as
+#                          proof, including the worker's own demonstrated
+#                          forward progress, and what a pane with no proof at
+#                          all is treated as);
 #                          past that bound busy_turn_over_age routes it through
 #                          the same wedge timer, so it surfaces with the
 #                          identical "stale: ..." reason, escalation count, and
@@ -161,19 +161,19 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # including long tool calls, builds, or test runs.
 #
 # A worker that stays continuously busy from spawn onward never refreshes the
-# idle-anchor or turn-ended proofs, so busy_turn_over_age falls back to its
-# spawn-epoch proofs and the bound degrades into "time since spawn" for that
-# worker - crossed permanently partway through any long task and then
-# re-alarming every STALE_ESCALATE_SECS for the rest of its life. Tune this
-# value above the longest legitimate uninterrupted busy stretch this fleet
-# actually sees, not an arbitrary round number, and account for that
-# degenerate case, not just an ordinary idle-refreshed pane. Raising it buys
-# fewer false wedge escalations against a healthy long-running worker, at the
-# cost that a genuinely hung foreground call can now hide behind a busy
-# footer for up to this long before THIS alarm catches it - it is not
-# undetectable in that window, since the heartbeat sweep still reviews the
-# whole fleet and this escalation was never the only automatic check, but the
-# window is real and grows with this number.
+# idle-anchor or turn-ended proofs, so for that worker this value is measured
+# from whatever it last demonstrably got done - a ref it moved in its own
+# checkout - and, before it has moved one, from its creation epoch. Tune the
+# value above the longest legitimate stretch a worker in this fleet spends
+# between two such moments, not an arbitrary round number, since a healthy
+# worker in a long uninterrupted build, test run, or investigation refreshes
+# nothing until it lands something. Raising it buys fewer false wedge
+# escalations against a healthy long-running worker, at the cost that a
+# genuinely hung foreground call can now hide behind a busy footer for up to
+# this long before THIS alarm catches it - it is not undetectable in that
+# window, since the heartbeat sweep still reviews the whole fleet and this
+# escalation was never the only automatic check, but the window is real and
+# grows with this number.
 BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-14400}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
@@ -355,7 +355,7 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # ---------------------------------------------------------------------------
 # The bound measures how long a pane has been busy with no sign the worker got
 # anywhere, so its start is the newest thing that positively proves the current
-# call had not begun yet. Exactly four things prove that, and nothing else may:
+# call had not begun yet. Exactly five things prove that, and nothing else may:
 #   - state/.last-idle-<key>: the newest poll at which a watcher of this home
 #     got an exact idle verdict for that pane from the busy-state contract
 #     (busy_observe below). An unknown verdict is not that verdict - it says the
@@ -377,6 +377,20 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 #     first call would otherwise have no start at all until its first turn ends.
 #     A task silent because it has not started talking yet is not a task that
 #     wedged.
+#   - the epoch stamped on the last entry of the HEAD reflog inside the task's
+#     own recorded worktree (busy_progress_epoch below): work the worker
+#     demonstrably finished. A ref it moved at 14:00 cannot have been moved by a
+#     call that was already hung before 14:00, so the current call began no
+#     earlier than that - the same shape of evidence as a completed turn, from a
+#     source no harness renders. The entry's own epoch is read rather than the
+#     reflog file's mtime because git rewrites that file wholesale during
+#     maintenance while preserving every entry's stamp; see busy_progress_epoch.
+#     This is the only proof a worker continuously busy since spawn can refresh:
+#     it never goes idle for a poll to see and its turn never ends, so without
+#     it the four above collapse to its creation epoch and the bound degrades
+#     into "time since the task started", crossed permanently partway through
+#     any long task and then re-alarming every STALE_ESCALATE_SECS for the rest
+#     of that task's life while it commits away in plain sight.
 #
 # Everything else is "I do not know", and "I do not know" never moves the start
 # forward. This alarm exists so a silently wedged worker cannot sit dead
@@ -403,6 +417,18 @@ wedge_timer_check() {  # <window> <since-file> <triage-label> <escalation-count-
 # incarnation. Both formats are owned by their writers (bin/fm-busy-event.sh,
 # bin/fm-spawn.sh); if either changes, the parse below fails and the task loses
 # only that floor, which alarms rather than suppresses.
+#
+# Two other timestamps that look like progress are deliberately not read.
+# The semantic busy-state record's own timestamp is not an anchor because an
+# adapter rewrites it INSIDE a running call (OpenCode on each session.status
+# retry, Pi on each agent_start), so a hung call would defer its own bound for
+# as long as those writes continued. state/<task>.status's mtime is not one
+# either: bin/fm-send.sh appends the resolved line that closes a decision and
+# bin/fm-pending-reply-lib.sh appends its own, both from firstmate's side, so
+# that mtime is not evidence about the worker at all. The reflog read below has
+# neither problem, because it reads an entry the worker's own ref movement
+# stamped rather than a timestamp anything else can restamp, which is why it,
+# and not the status file, carries progress here.
 #
 # Time is wall clock: no monotonic epoch is readable by a fresh watcher process
 # on every supported platform, and none is needed here. A forward step only
@@ -512,6 +538,108 @@ busy_meta_spawn_epoch() {  # <task> <now>
   printf '%s' "$epoch"
 }
 
+# The worker's own demonstrated forward progress, as the epoch git stamped on
+# the last entry of the HEAD reflog in the checkout state/<task>.meta records as
+# this task's worktree.
+#
+# git journals every movement of that worktree's HEAD there, stamping each entry
+# with the wall clock at which it happened, so the last entry's epoch is the
+# moment the worker last moved where its branch points. That entry, and not the
+# reflog file's mtime, is the signal, because the file's mtime answers a
+# different question than it appears to:
+#
+#   - git rewrites the whole file during ordinary maintenance. `git gc` runs
+#     `git reflog expire --all` even when nothing is old enough to expire, and
+#     --all covers the per-worktree HEAD reflog of every linked worktree in the
+#     repository. Every pool slot is a linked worktree of one project clone, so
+#     a sibling task's commit, an operator's pull, or the fetch this fleet's own
+#     sync performs can trip auto-gc and stamp a fresh mtime on the reflog of a
+#     worker that has done nothing for hours - resetting the bound of exactly
+#     the wedged worker this alarm exists to surface. The rewrite preserves
+#     every entry's own stamp untouched, which is why the entry is what is read.
+#   - the mtime also moves for ref updates that are not forward progress at all:
+#     a reset --hard that leaves HEAD where it was, a switch or checkout to the
+#     branch already checked out, a no-op rebase, a stash push. A hung agent
+#     runs none of these, so this matters less than the rewrite above, but it is
+#     the same sentence being wrong in the same direction.
+#
+# Reading the entry costs the format: a reflog line is
+# `<old> <new> <who> <epoch> <tz>[TAB<message>]`, and this parses the epoch out
+# of it. That format is stable and documented, and anything unparseable returns
+# 1, so a change to it costs this proof rather than silently inventing one.
+#
+# The read is confined to a task worktree. A kind=secondmate record is refused
+# outright: a secondmate home is a persistent home rather than a disposable task
+# worktree, firstmate itself fast-forwards it before launch and on convergence
+# so its ref motion is not that task's progress, and for a remote secondmate the
+# recorded path names a directory on another host, which resolved locally could
+# match an unrelated repository and hand this task a stranger's history as its
+# proof.
+#
+# This runs on every poll for every busy task, so it costs exactly one fork:
+# the metadata read and the .git indirection are shell builtins, the epoch is
+# parsed with shell expansions, and nothing here runs git. Measured on an ARM64
+# Orange Pi against a 15s poll, the whole read costs 8-11ms per call - level
+# with the turn-ended proof above, and dominated by the fork itself rather than
+# by the read inside it. Reading the last entry is cheaper than the mtime this
+# replaced (3.4ms against 3.7ms for the bare read) because tail seeks from the
+# end, so the cost does not track reflog length: it measured the same on a
+# 5000-entry, 680KB reflog as on a three-line one. A git subprocess answering
+# the same question measured 6-9ms on that host on its own, which would land on
+# top of this function's fork rather than instead of it.
+#
+# Every failure is silent and costs the task only this proof, leaving it on
+# whichever of the other four survives: a kind=secondmate record, no readable
+# single worktree= field (one written before the field existed, or a duplicated
+# one), no .git at that path, a .git file that does not name a git directory, no
+# reflog at all (git writes none when core.logAllRefUpdates is off), or a last
+# entry this cannot parse an epoch out of. A worker that lands nothing therefore
+# gets nothing here, which is the direction this alarm is deliberately biased in.
+busy_progress_epoch() {  # <task> <now>
+  local task=$1 now=$2 meta line wt='' n=0 sm='' gitdir m
+  meta="$STATE/$task.meta"
+  [ -f "$meta" ] || return 1
+  # The recorded worktree, read in one builtin pass rather than through
+  # fm_backend_meta_exact_value's greps, because unlike spawned= this read runs
+  # for its own sake and a fork here is worth more than the shared reader. The
+  # exactly-one discipline is the same and for the same reason: the rewriters
+  # that preserve lines they do not own would carry a second worktree= through
+  # untouched, so two of them is not a path this side can identify.
+  while IFS= read -r line || [ -n "$line" ]; do
+    case "$line" in
+      worktree=*) n=$((n + 1)); wt=${line#worktree=} ;;
+      kind=secondmate) sm=1 ;;
+    esac
+  done < "$meta"
+  [ -z "$sm" ] || return 1
+  [ "$n" -eq 1 ] || return 1
+  case "$wt" in /*) ;; *) return 1 ;; esac
+  if [ -d "$wt/.git" ]; then
+    gitdir="$wt/.git"
+  elif [ -f "$wt/.git" ]; then
+    # A linked worktree's .git is a one-line pointer file; git accepts an
+    # absolute or a worktree-relative target there, so both are resolved.
+    IFS= read -r line < "$wt/.git" 2>/dev/null || return 1
+    case "$line" in
+      'gitdir: '?*) gitdir=${line#gitdir: } ;;
+      *) return 1 ;;
+    esac
+    case "$gitdir" in /*) ;; *) gitdir="$wt/$gitdir" ;; esac
+  else
+    return 1
+  fi
+  # The last entry, not the file's mtime. tail seeks from the end, so this does
+  # not read the whole reflog. Trailing fields are stripped right to left: the
+  # message after the separating tab, then the timezone, leaving the epoch.
+  m=$(tail -n 1 "$gitdir/logs/HEAD" 2>/dev/null) || return 1
+  m=${m%%$'\t'*}
+  m=${m% *}
+  m=${m##* }
+  case "$m" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$m" -le "$now" ] || return 1
+  printf '%s' "$m"
+}
+
 # busy_turn_over_age: 0 iff at least BUSY_TURN_MAX_SECS has passed since the
 # newest of those proofs, or if there is no proof at all. The caller has already
 # established that this poll did not see the pane idle, and routes a crossed
@@ -524,7 +652,8 @@ busy_turn_over_age() {  # <task> <window-key>
   for c in "$(busy_idle_anchor "$key" "$now")" \
            "$(busy_turn_epoch "$task" "$now")" \
            "$(busy_spawn_epoch "$task" "$now")" \
-           "$(busy_meta_spawn_epoch "$task" "$now")"; do
+           "$(busy_meta_spawn_epoch "$task" "$now")" \
+           "$(busy_progress_epoch "$task" "$now")"; do
     [ -n "$c" ] || continue
     if [ -z "$started" ] || [ "$c" -gt "$started" ]; then started=$c; fi
   done

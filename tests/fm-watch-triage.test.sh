@@ -161,6 +161,59 @@ idle_anchor_of() {  # <state-dir> <window-key>
   cut -d' ' -f1 "$1/.last-idle-$2" 2>/dev/null || true
 }
 
+# A task worktree carrying real git ref movement, dated at <progress-epoch>:
+# the demonstrated-progress proof bin/fm-watch.sh ages the busy bound from. Real
+# git, in one of the two shapes a task worktree actually has - a linked worktree
+# whose .git is a pointer file (what bin/fm-spawn.sh hands a task), or a plain
+# checkout whose .git is a directory - so both resolution paths are exercised
+# rather than mocked, and each shape carries a test whose recent-progress phase
+# fails if that shape's lookup stops resolving. Appends worktree= to the task
+# metadata, so call it after that file is written.
+seed_task_progress() {  # <state-dir> <id> <worktree-path> <progress-epoch> [linked]
+  local state=$1 id=$2 wt=$3 epoch=$4 linked=${5:-} repo
+  # init.defaultBranch is set rather than passed as `git init -b`, which only
+  # exists from git 2.28; unknown config is ignored by older versions, the -b
+  # flag is not.
+  # core.logAllRefUpdates is pinned with the rest: git writes no reflog at all
+  # when it is globally false, and the reflog is what this fixture dates.
+  local -a cfg=(-c user.email=fm@test -c user.name=fm -c commit.gpgsign=false
+                -c core.logAllRefUpdates=true)
+  if [ -n "$linked" ]; then
+    repo="$wt.origin"
+    git -c init.defaultBranch=main init -q "$repo" || return 1
+    git -C "$repo" "${cfg[@]}" commit -q --allow-empty -m "seed" || return 1
+    git -C "$repo" worktree add -q -b "task-$id" "$wt" || return 1
+  else
+    git -c init.defaultBranch=main init -q "$wt" || return 1
+  fi
+  git -C "$wt" "${cfg[@]}" commit -q --allow-empty -m "landed work" || return 1
+  printf 'worktree=%s\n' "$wt" >> "$state/$id.meta"
+  set_task_progress "$state" "$id" "$epoch"
+}
+
+# Re-date an already-seeded worktree's last landed work, so one fixture can be
+# driven across the bound with nothing else about it changing. Dates the reflog
+# ENTRY, which is what bin/fm-watch.sh reads, and moves the file's mtime with it
+# so the fixture stays coherent; task_reflog_file below is how a test drives the
+# two apart on purpose.
+set_task_progress() {  # <state-dir> <id> <progress-epoch>
+  local state=$1 id=$2 epoch=$3 log
+  log=$(task_reflog_file "$state" "$id") || return 1
+  sed -E -i "s/> [0-9]+ ([+-][0-9]{4})/> $epoch \1/" "$log" || return 1
+  set_mtime "$epoch" "$log"
+}
+
+# The HEAD reflog backing a seeded task worktree, in whichever of the two shapes
+# seed_task_progress built.
+task_reflog_file() {  # <state-dir> <id>
+  local state=$1 id=$2 wt gitdir
+  wt=$(sed -n 's/^worktree=//p' "$state/$id.meta" | tail -1)
+  [ -n "$wt" ] || return 1
+  gitdir=$(sed -n 's/^gitdir: //p' "$wt/.git" 2>/dev/null)
+  [ -n "$gitdir" ] || gitdir="$wt/.git"
+  printf '%s' "$gitdir/logs/HEAD"
+}
+
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
@@ -2311,6 +2364,235 @@ test_busy_pane_default_turn_age_bound_is_14400s() {
   pass "the production default busy-turn-age bound is 14400s (2h under does not wedge, 5h over does)"
 }
 
+# --- demonstrated forward progress is a proof of life -----------------------
+# 2026-08-18 ba-bracket-designer incident: a worker busy from the moment it
+# launched never went idle for a poll to see and never ended a turn, so the
+# idle-anchor and turn-ended proofs never moved and the remaining two were both
+# its creation epoch. Its bound therefore measured time since the TASK began
+# rather than time since its CURRENT call began, was crossed permanently once
+# that much elapsed, and re-alarmed every FM_STALE_ESCALATE_SECS for the rest of
+# the task's life: sixteen consecutive demand-deep-inspection escalations
+# against a worker at 15% CPU that was landing commits between the alarms.
+# Ref movement in the task's own worktree is read as a further proof, because
+# work the worker demonstrably finished at 14:00 cannot have been finished by a
+# call that was already hung before 14:00.
+
+test_busy_pane_recent_progress_holds_off_the_bound() {
+  local dir state fakebin out capture_file window key pane_hash sig pid born
+  dir=$(make_case busy-progress-holds); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-progress"
+  born=$(( $(date +%s) - 200000 ))
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawned=%s\n' "$window" "$born" \
+    > "$state/busy-progress.meta"
+  # Continuously busy since a creation epoch far past the bound, with every
+  # other proof pinned there too - the incident's shape, in which only landed
+  # work can hold the pane under the bound.
+  record_pi_busy "$state" busy-progress "$born"
+  printf 'working: setup complete\n' > "$state/busy-progress.status"
+  sig=$(seen_sig "$state/busy-progress.status"); printf '%s' "$sig" > "$state/.seen-busy-progress_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  seed_idle_anchor "$state" "$key" "$born"
+  set_mtime "$born" "$state/busy-progress.turn-ended"
+  prime_turnend_seen "$state/busy-progress.turn-ended"
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  seed_task_progress "$state" busy-progress "$dir/worktree" "$(( $(date +%s) - 120 ))" linked \
+    || fail "could not seed a task worktree with landed work"
+
+  # The production default bound is deliberately left in place, and
+  # FM_STALE_ESCALATE_SECS=1 makes any wedge timer that does start escalate at
+  # once, so this phase cannot pass by merely being slow to alarm.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy worker that landed work two minutes ago was escalated as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "a busy worker's recent landed work still started a wedge timer"
+  [ ! -s "$out" ] || fail "a busy worker with recent landed work printed a wake reason: $(cat "$out")"
+  reap "$pid"
+
+  # Divergence: age that landed work back to the creation epoch and change
+  # NOTHING else. The same fixture must now start the timer, so the phase above
+  # cannot have passed for any reason other than the progress proof.
+  set_task_progress "$state" busy-progress "$born"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_path_exists "$state/.stale-since-$key" 40; then
+    reap "$pid"; fail "aging the landed work past the bound did not start a wedge timer, so the phase above proves nothing: $(cat "$out")"
+  fi
+  reap "$pid"
+  pass "a busy worker's recent landed work holds the bound off, and aging that work alone starts the wedge timer"
+}
+
+test_busy_pane_without_progress_still_trips_the_bound() {
+  local dir state fakebin out capture_file window key pane_hash sig pid born
+  dir=$(make_case busy-progress-absent); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-noprogress"
+  born=$(( $(date +%s) - 200000 ))
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawned=%s\n' "$window" "$born" \
+    > "$state/busy-noprogress.meta"
+  record_pi_busy "$state" busy-noprogress "$born"
+  printf 'working: setup complete\n' > "$state/busy-noprogress.status"
+  sig=$(seen_sig "$state/busy-noprogress.status"); printf '%s' "$sig" > "$state/.seen-busy-noprogress_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  seed_idle_anchor "$state" "$key" "$born"
+  set_mtime "$born" "$state/busy-noprogress.turn-ended"
+  prime_turnend_seen "$state/busy-noprogress.turn-ended"
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # The same fixture as above apart from the single thing under test, and in the
+  # other worktree shape: this one's .git is a directory rather than a pointer
+  # file, so the resolution branch test 1 does not reach is the one carrying
+  # this test.
+  seed_task_progress "$state" busy-noprogress "$dir/worktree" "$(( $(date +%s) - 120 ))" \
+    || fail "could not seed a task worktree with landed work"
+
+  # Phase A0: recent landed work must hold this shape's bound off too. Without
+  # this phase a broken plain-directory lookup would look identical to stale
+  # work, because both leave the pane over the bound, and every later assertion
+  # here would pass with the proof never resolved at all.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a plain-checkout worker that landed work two minutes ago was escalated as a possible wedge: $(cat "$out")"
+  fi
+  [ ! -e "$state/.stale-since-$key" ] || fail "a plain-checkout worker's recent landed work still started a wedge timer, so its .git directory was not resolved"
+  reap "$pid"
+
+  # Now age that work to the creation epoch, changing nothing else.
+  set_task_progress "$state" busy-noprogress "$born"
+  : > "$out"
+
+  # Phase A: past the bound under the production default, absorbed but the
+  # wedge timer starts.
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_live "$pid" 30; then
+    reap "$pid"; fail "a busy worker with no landed work escalated before the wedge threshold: $(cat "$out")"
+  fi
+  [ -s "$state/.stale-since-$key" ] || fail "a busy worker whose last landed work predates the bound did not start a wedge timer"
+  reap "$pid"
+
+  # Phase B: backdate the wedge timer past the threshold; the hung call this
+  # bound exists for still escalates with the same reason and marker.
+  echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
+  : > "$out"
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=240 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 40 || fail "a busy worker with no landed work did not wedge-escalate past the bound"
+  grep -F "stale: $window" "$out" >/dev/null || fail "the no-progress escalation did not print the stale wake: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "the no-progress escalation did not flag a possible wedge: $(cat "$out")"
+  pass "a busy worker whose last landed work is older than the bound still wedge-escalates"
+}
+
+# git rewrites a worktree's whole HEAD reflog during ordinary maintenance:
+# `git gc` runs `git reflog expire --all` even when nothing expires, and --all
+# reaches the per-worktree reflog of every linked worktree in the repository.
+# Every pool slot is a linked worktree of one project clone, so a sibling task's
+# commit or this fleet's own fetch can restamp the reflog FILE of a worker that
+# has done nothing for hours. The rewrite preserves each ENTRY's own epoch, so
+# the entry is what the bound reads; this pins that, because reading the file's
+# mtime instead would let routine maintenance reset a wedged worker's bound and
+# suppress the alarm this whole mechanism exists to raise.
+test_busy_pane_reflog_rewrite_is_not_progress() {
+  local dir state fakebin out capture_file window key pane_hash sig pid born log
+  dir=$(make_case busy-progress-gc); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-gc"
+  born=$(( $(date +%s) - 200000 ))
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=ship\nharness=pi\nspawned=%s\n' "$window" "$born" \
+    > "$state/busy-gc.meta"
+  record_pi_busy "$state" busy-gc "$born"
+  printf 'working: setup complete\n' > "$state/busy-gc.status"
+  sig=$(seen_sig "$state/busy-gc.status"); printf '%s' "$sig" > "$state/.seen-busy-gc_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  seed_idle_anchor "$state" "$key" "$born"
+  set_mtime "$born" "$state/busy-gc.turn-ended"
+  prime_turnend_seen "$state/busy-gc.turn-ended"
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # A worker hung since it was created: its last landed work is its creation
+  # epoch, far past the bound.
+  seed_task_progress "$state" busy-gc "$dir/worktree" "$born" linked \
+    || fail "could not seed a task worktree with stale landed work"
+
+  # Exactly what gc does to that reflog: every entry keeps the epoch it was
+  # written with, the file itself is rewritten so its mtime becomes now. No git
+  # command takes part in the assertion below; only the watcher's own verdict
+  # about a worker that has demonstrably done nothing is being judged.
+  log=$(task_reflog_file "$state" busy-gc) || fail "could not locate the seeded reflog"
+  touch "$log"
+  grep -Eq "> $born [+-][0-9]{4}" "$log" \
+    || fail "the gc simulation changed an entry's own epoch, so it does not model gc"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_path_exists "$state/.stale-since-$key" 40; then
+    reap "$pid"; fail "a rewrite of the reflog file hid a worker hung for 200000s: no wedge timer started: $(cat "$out")"
+  fi
+  reap "$pid"
+  pass "a maintenance rewrite of the reflog file is not mistaken for the worker landing work"
+}
+
+# A secondmate home is not a task worktree. firstmate fast-forwards it before
+# every launch and whenever an update converges a live one, so ref motion there
+# is firstmate's, not that secondmate's progress; and for a remote secondmate the
+# recorded path names a directory on the REMOTE host, which resolved against this
+# filesystem could match an unrelated local repository entirely. Only a paused
+# secondmate reaches the bound at all, so this pins the one path that can.
+test_busy_secondmate_ref_motion_is_not_its_progress() {
+  local dir state fakebin out capture_file window key pane_hash sig pid born
+  dir=$(make_case busy-progress-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
+  out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-sm"
+  born=$(( $(date +%s) - 200000 ))
+  printf 'Working...' > "$capture_file"
+  printf 'window=%s\nkind=secondmate\nharness=pi\nspawned=%s\n' "$window" "$born" \
+    > "$state/busy-sm.meta"
+  record_pi_busy "$state" busy-sm "$born"
+  printf 'paused: awaiting the captain\n' > "$state/busy-sm.status"
+  sig=$(seen_sig "$state/busy-sm.status"); printf '%s' "$sig" > "$state/.seen-busy-sm_status"
+  key=$(printf '%s' "$window" | tr ':/.' '___')
+  seed_idle_anchor "$state" "$key" "$born"
+  set_mtime "$born" "$state/busy-sm.turn-ended"
+  prime_turnend_seen "$state/busy-sm.turn-ended"
+  pane_hash=$(hash_text "Working...")
+  printf '%s' "$pane_hash" > "$state/.hash-$key"
+  printf '1\n' > "$state/.count-$key"
+  # Ref motion two minutes ago in the recorded home. If that counted as this
+  # secondmate's own progress it would hold the bound off; it must not.
+  seed_task_progress "$state" busy-sm "$dir/worktree" "$(( $(date +%s) - 120 ))" linked \
+    || fail "could not seed a secondmate home with recent ref motion"
+
+  PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
+    FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_PAUSE_RESURFACE_SECS=999999 \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  if ! wait_path_exists "$state/.stale-since-$key" 40; then
+    reap "$pid"; fail "ref motion in a secondmate home was counted as that secondmate's progress and held its bound off: $(cat "$out")"
+  fi
+  reap "$pid"
+  pass "ref motion in a secondmate home is not counted as that secondmate's own progress"
+}
+
 # --- a worker resumed after a long pause is not a wedge ---------------------
 # 2026-08-11 pii-redactor-walking-skeleton incident: a worker sat parked ~10h on
 # a captain decision, took its next direction, and 244s into its first working
@@ -4131,6 +4413,10 @@ test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
 test_busy_pane_default_turn_age_bound_is_14400s
+test_busy_pane_recent_progress_holds_off_the_bound
+test_busy_pane_without_progress_still_trips_the_bound
+test_busy_pane_reflog_rewrite_is_not_progress
+test_busy_secondmate_ref_motion_is_not_its_progress
 test_busy_pane_resumed_after_long_pause_is_not_wedged
 test_busy_pane_with_no_trustworthy_start_escalates
 test_repeated_blind_gaps_do_not_move_the_start
