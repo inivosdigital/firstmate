@@ -2263,10 +2263,10 @@ test_busy_pane_repeated_escalation_reaches_demand_deep_inspection() {
 }
 
 # Behavioral proof that the production default (no FM_BUSY_TURN_MAX_SECS override
-# anywhere in this env) is 3600s: a completed turn 5 minutes old must not start a
-# wedge timer, while one 66 minutes old must - bracketing the default around 3600
-# without waiting a literal hour.
-test_busy_pane_default_turn_age_bound_is_3600s() {
+# anywhere in this env) is 14400s: a completed turn 2 hours old must not start a
+# wedge timer, while one 5 hours old must - bracketing the default around 14400
+# without waiting a literal four hours.
+test_busy_pane_default_turn_age_bound_is_14400s() {
   local dir state fakebin out capture_file window key pane_hash sig pid
   dir=$(make_case busy-default-turn-age); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-default"
@@ -2284,19 +2284,19 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
 
-  set_mtime $(( $(date +%s) - 300 )) "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - 7200 )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=999 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a 5-minute-old completed turn tripped the default busy-turn-age bound: $(cat "$out")"
+    reap "$pid"; fail "a 2-hour-old completed turn tripped the default busy-turn-age bound: $(cat "$out")"
   fi
-  [ ! -e "$state/.stale-since-$key" ] || fail "a 5-minute-old completed turn started a wedge timer under the default bound"
+  [ ! -e "$state/.stale-since-$key" ] || fail "a 2-hour-old completed turn started a wedge timer under the default bound"
   reap "$pid"
 
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-default.turn-ended"
+  set_mtime $(( $(date +%s) - 18000 )) "$state/busy-default.turn-ended"
   prime_turnend_seen "$state/busy-default.turn-ended"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
@@ -2304,11 +2304,11 @@ test_busy_pane_default_turn_age_bound_is_3600s() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   if ! wait_live "$pid" 30; then
-    reap "$pid"; fail "a 66-minute-old completed turn escalated before the wedge threshold under the default bound: $(cat "$out")"
+    reap "$pid"; fail "a 5-hour-old completed turn escalated before the wedge threshold under the default bound: $(cat "$out")"
   fi
-  [ -s "$state/.stale-since-$key" ] || fail "a 66-minute-old completed turn did not start a wedge timer under the default bound (default is not 3600s)"
+  [ -s "$state/.stale-since-$key" ] || fail "a 5-hour-old completed turn did not start a wedge timer under the default bound (default is not 14400s)"
   reap "$pid"
-  pass "the production default busy-turn-age bound is 3600s (5min under does not wedge, 66min over does)"
+  pass "the production default busy-turn-age bound is 14400s (2h under does not wedge, 5h over does)"
 }
 
 # --- a worker resumed after a long pause is not a wedge ---------------------
@@ -2346,8 +2346,8 @@ test_busy_pane_resumed_after_long_pause_is_not_wedged() {
   seed_idle_anchor "$state" "$key" "$resumed"
   # No .hash-<key> seed: the resumed pane's elapsed-time footer changes every
   # poll, so every poll takes the new-hash branch, as the incident's pane did. The
-  # production default bound (3600s) is deliberately left in place, and
-  # STALE_ESCALATE_SECS=1 makes any wedge timer that does start escalate at once.
+  # production default bound is deliberately left in place (no override here),
+  # and STALE_ESCALATE_SECS=1 makes any wedge timer that does start escalate at once.
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2412,10 +2412,10 @@ test_repeated_blind_gaps_do_not_move_the_start() {
   printf 'working: setup complete\n' > "$state/busy-grok.status"
   sig=$(seen_sig "$state/busy-grok.status"); printf '%s' "$sig" > "$state/.seen-busy-grok_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  # Last seen not busy 4000s ago, past the production default 3600s bound, and no
-  # completed turn since. Metadata is fresh, so a fallback onto it would keep
+  # Last seen not busy 15000s ago, past the production default 14400s bound, and
+  # no completed turn since. Metadata is fresh, so a fallback onto it would keep
   # this pane quiet forever.
-  seeded=$(( $(date +%s) - 4000 ))
+  seeded=$(( $(date +%s) - 15000 ))
   seed_idle_anchor "$state" "$key" "$seeded"
 
   n=1
@@ -2450,7 +2450,7 @@ test_repeated_metadata_rewrites_do_not_defer_the_bound() {
   sig=$(seen_sig "$state/busy-meta.status"); printf '%s' "$sig" > "$state/.seen-busy-meta_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # Busy since well past the default bound, with no completed turn.
-  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 4000 ))
+  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 15000 ))
 
   # A rewrite landing between every poll, exactly as a PR-check or Relay update
   # would while the call runs.
@@ -2484,11 +2484,11 @@ test_backward_clock_steps_do_not_suppress_the_bound() {
   sig=$(seen_sig "$state/busy-clock.status"); printf '%s' "$sig" > "$state/.seen-busy-clock_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
 
-  # Phase A: the pane was seen idle at T and polled busy until T+4000, then the
+  # Phase A: the pane was seen idle at T and polled busy until T+15000, then the
   # clock stepped back to before T. Both stored epochs are now in the future, and
-  # the 4000s of busy time they measured must survive the step.
+  # the 15000s of busy time they measured must survive the step.
   now=$(date +%s)
-  seed_idle_anchor "$state" "$key" $(( now + 3000 )) $(( now + 7000 ))
+  seed_idle_anchor "$state" "$key" $(( now + 3000 )) $(( now + 18000 ))
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -2500,7 +2500,7 @@ test_backward_clock_steps_do_not_suppress_the_bound() {
   # future too. A marker the clock has moved under is not evidence a turn just
   # completed, so it cannot re-anchor the bound either.
   now=$(date +%s)
-  seed_idle_anchor "$state" "$key" $(( now + 3000 )) $(( now + 7000 ))
+  seed_idle_anchor "$state" "$key" $(( now + 3000 )) $(( now + 18000 ))
   set_mtime $(( now + 7200 )) "$state/busy-clock.turn-ended"
   prime_turnend_seen "$state/busy-clock.turn-ended"
   rm -f "$state/.stale-since-$key" "$state/.wedge-escalations-$key"
@@ -2544,17 +2544,17 @@ test_spawn_epoch_anchors_a_task_with_no_turn_yet() {
   [ ! -e "$state/.stale-since-$key" ] || fail "a freshly spawned task on its first turn started a wedge timer"
   reap "$pid"
 
-  # Phase B: the same task, armed 4000s ago and still on that first turn. The
+  # Phase B: the same task, armed 15000s ago and still on that first turn. The
   # spawn epoch does not advance, so the bound is reached.
-  record_pi_busy "$state" busy-spawn $(( $(date +%s) - 4000 ))
+  record_pi_busy "$state" busy-spawn $(( $(date +%s) - 15000 ))
   touch "$state/busy-spawn.meta"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "a task still on its first turn 4000s after spawn was not escalated: $(cat "$out")"
-  grep -F "possible wedge" "$out" >/dev/null || fail "a task 4000s into its first turn did not flag a possible wedge: $(cat "$out")"
+  wait_for_exit "$pid" 100 || fail "a task still on its first turn 15000s after spawn was not escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a task 15000s into its first turn did not flag a possible wedge: $(cat "$out")"
   pass "a task's spawn epoch keeps a fresh first turn quiet and still reaches the bound when that turn never ends"
 }
 
@@ -2590,16 +2590,16 @@ test_meta_spawn_epoch_anchors_an_unarmed_task() {
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a task created a moment ago started a wedge timer"; }
   reap "$pid"
 
-  # Phase B: the same task, created 4000s ago and still on that first turn.
-  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(( $(date +%s) - 4000 ))" \
+  # Phase B: the same task, created 15000s ago and still on that first turn.
+  printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(( $(date +%s) - 15000 ))" \
     > "$state/busy-meta.meta"
   : > "$out"
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  wait_for_exit "$pid" 100 || fail "a task 4000s into a first turn that never ended was not escalated: $(cat "$out")"
-  grep -F "possible wedge" "$out" >/dev/null || fail "a task 4000s past its creation did not flag a possible wedge: $(cat "$out")"
+  wait_for_exit "$pid" 100 || fail "a task 15000s into a first turn that never ended was not escalated: $(cat "$out")"
+  grep -F "possible wedge" "$out" >/dev/null || fail "a task 15000s past its creation did not flag a possible wedge: $(cat "$out")"
   pass "a task's recorded creation epoch anchors an unarmed harness's first turn and still reaches the bound"
 }
 
@@ -2654,7 +2654,7 @@ test_duplicate_meta_spawn_epochs_are_not_a_start() {
   printf 'working: setup complete\n' > "$state/busy-duplicate.status"
   sig=$(seen_sig "$state/busy-duplicate.status"); printf '%s' "$sig" > "$state/.seen-busy-duplicate_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  old=$(( $(date +%s) - 4000 ))
+  old=$(( $(date +%s) - 15000 ))
   fresh=$(date +%s)
 
   # An old epoch past the bound, followed by a fresh one appended after it.
@@ -2725,8 +2725,8 @@ test_busy_record_rewritten_mid_call_does_not_defer_the_bound() {
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-retry.meta"
   # One call, two busy events: the agent-start that opened it and a second one
   # the harness emitted just now, inside the same still-running call. The task
-  # was armed 4000s ago, so its spawn epoch cannot hold it under the bound.
-  gen="g$(( $(date +%s) - 4000 )).1.1"
+  # was armed 15000s ago, so its spawn epoch cannot hold it under the bound.
+  gen="g$(( $(date +%s) - 15000 )).1.1"
   printf '%s\n' "$gen" > "$state/busy-retry.busy-gen"
   "$ROOT/bin/fm-busy-event.sh" apply "$state" busy-retry busy --gen "$gen" \
     --source pi-ext --event agent-start
@@ -2738,11 +2738,11 @@ test_busy_record_rewritten_mid_call_does_not_defer_the_bound() {
   pane_hash=$(hash_text "Working... (4002.7s)")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
-  # What a watcher actually saw: not busy 4000s ago, past the default 3600s
+  # What a watcher actually saw: not busy 15000s ago, past the default 14400s
   # bound, with no turn completed since. No turn-ended marker exists at all and
   # the metadata is fresh, so the two other things a bound could reach for -
   # the record's own timestamp and the metadata mtime - both say "just now".
-  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 4000 ))
+  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 15000 ))
 
   PATH="$fakebin:$PATH" FM_FAKE_TMUX_WINDOW="$window" FM_FAKE_TMUX_CAPTURE="$capture_file" \
     FM_STATE_OVERRIDE="$state" FM_STALE_ESCALATE_SECS=1 FM_POLL=1 FM_SIGNAL_GRACE=1 \
@@ -2769,10 +2769,10 @@ test_busy_pane_resumed_call_past_the_bound_still_wedges() {
     > "$state/busy-hung.status"
   sig=$(seen_sig "$state/busy-hung.status"); printf '%s' "$sig" > "$state/.seen-busy-hung_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  # Resumed after the same long park: last seen not busy 4000s ago, nothing
+  # Resumed after the same long park: last seen not busy 15000s ago, nothing
   # completed since, no turn-ended marker at all, and freshly written metadata
   # that no longer buys the call any time.
-  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 4000 ))
+  seed_idle_anchor "$state" "$key" $(( $(date +%s) - 15000 ))
   pane_hash=$(hash_text "Working... (4001.2s)")
   printf '%s' "$pane_hash" > "$state/.hash-$key"
   printf '1\n' > "$state/.count-$key"
@@ -2824,8 +2824,8 @@ test_repeated_unknown_verdicts_do_not_move_the_start() {
   sig=$(seen_sig "$state/busy-unknown.status"); printf '%s' "$sig" > "$state/.seen-busy-unknown_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
   # The one thing that does prove where this call began: a turn that completed
-  # 4000s ago, past the production default 3600s bound, with nothing since.
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-unknown.turn-ended"
+  # 15000s ago, past the production default 14400s bound, with nothing since.
+  set_mtime $(( $(date +%s) - 15000 )) "$state/busy-unknown.turn-ended"
   prime_turnend_seen "$state/busy-unknown.turn-ended"
 
   # A footer that ticks between polls, as the wedged pane in the incident did.
@@ -2875,7 +2875,7 @@ test_unknown_verdict_under_a_declared_pause_is_not_wedged() {
     > "$state/busy-parked.status"
   sig=$(seen_sig "$state/busy-parked.status"); printf '%s' "$sig" > "$state/.seen-busy-parked_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-parked.turn-ended"
+  set_mtime $(( $(date +%s) - 15000 )) "$state/busy-parked.turn-ended"
   prime_turnend_seen "$state/busy-parked.turn-ended"
 
   ( n=0; while :; do n=$((n + 1)); printf 'waiting (%ds)\nesc to interrupt\n' "$n" > "$capture_file"; sleep 0.3; done ) &
@@ -2910,9 +2910,9 @@ test_repeated_inconsistent_idle_records_do_not_defer_the_bound() {
   printf 'working: setup complete\n' > "$state/busy-impossible.status"
   sig=$(seen_sig "$state/busy-impossible.status"); printf '%s' "$sig" > "$state/.seen-busy-impossible_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
-  # The surviving trustworthy proof: a turn completed 4000s ago, past the
-  # production default 3600s bound.
-  set_mtime $(( $(date +%s) - 4000 )) "$state/busy-impossible.turn-ended"
+  # The surviving trustworthy proof: a turn completed 15000s ago, past the
+  # production default 14400s bound.
+  set_mtime $(( $(date +%s) - 15000 )) "$state/busy-impossible.turn-ended"
   prime_turnend_seen "$state/busy-impossible.turn-ended"
 
   n=1
@@ -4130,7 +4130,7 @@ test_busy_pane_stable_hash_escalates_past_turn_age_bound
 test_busy_pane_changing_hash_escalates_past_turn_age_bound
 test_busy_pane_turn_end_touch_resets_age
 test_busy_pane_repeated_escalation_reaches_demand_deep_inspection
-test_busy_pane_default_turn_age_bound_is_3600s
+test_busy_pane_default_turn_age_bound_is_14400s
 test_busy_pane_resumed_after_long_pause_is_not_wedged
 test_busy_pane_with_no_trustworthy_start_escalates
 test_repeated_blind_gaps_do_not_move_the_start

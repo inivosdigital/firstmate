@@ -34,8 +34,10 @@
 #                          (window_is_busy true) is exempt from the above, but
 #                          only until BUSY_TURN_MAX_SECS has passed since the
 #                          newest positive proof its current call had not yet
-#                          started (busy_turn_over_age owns what counts as proof
-#                          and what a pane with no proof at all is treated as);
+#                          started (busy_turn_over_age owns what counts as proof,
+#                          including the degenerate all-spawn-epoch case for a
+#                          worker continuously busy since spawn, and what a pane
+#                          with no proof at all is treated as);
 #                          past that bound busy_turn_over_age routes it through
 #                          the same wedge timer, so it surfaces with the
 #                          identical "stale: ..." reason, escalation count, and
@@ -157,7 +159,22 @@ STALE_ESCALATE_SECS=${FM_STALE_ESCALATE_SECS:-240}  # idle secs before a provabl
 # marker for human inspection only - never an automatic interrupt, signal, or
 # restart. Set generously above any legitimate uninterrupted busy stretch,
 # including long tool calls, builds, or test runs.
-BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-3600}
+#
+# A worker that stays continuously busy from spawn onward never refreshes the
+# idle-anchor or turn-ended proofs, so busy_turn_over_age falls back to its
+# spawn-epoch proofs and the bound degrades into "time since spawn" for that
+# worker - crossed permanently partway through any long task and then
+# re-alarming every STALE_ESCALATE_SECS for the rest of its life. Tune this
+# value above the longest legitimate uninterrupted busy stretch this fleet
+# actually sees, not an arbitrary round number, and account for that
+# degenerate case, not just an ordinary idle-refreshed pane. Raising it buys
+# fewer false wedge escalations against a healthy long-running worker, at the
+# cost that a genuinely hung foreground call can now hide behind a busy
+# footer for up to this long before THIS alarm catches it - it is not
+# undetectable in that window, since the heartbeat sweep still reviews the
+# whole fleet and this escalation was never the only automatic check, but the
+# window is real and grows with this number.
+BUSY_TURN_MAX_SECS=${FM_BUSY_TURN_MAX_SECS:-14400}
 # A crew that declared a pause is idling on a known external wait, so its stale
 # pane is absorbed rather than wedge-escalated.
 # A captain-held or paused crew whose agent has confidently exited uses the same
