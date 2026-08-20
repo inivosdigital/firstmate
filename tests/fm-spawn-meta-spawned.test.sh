@@ -49,6 +49,9 @@ spawn_fixture() {  # <tmp> -> echoes "<proj> <wt> <fakebin>"
   local tmp=$1 proj wt fakebin
   proj="$tmp/proj"
   fm_git_init_commit "$proj"
+  # A pooled worktree is refreshed from origin before launch, and a base that
+  # cannot be refreshed refuses the spawn, so the fixture needs a real origin.
+  fm_git_add_origin "$proj" "$proj.origin.git"
   wt="$tmp/pool-a1b2c3/1/proj"
   git -C "$proj" worktree add -q --detach "$wt" || fail "setup: worktree add failed"
   fakebin=$(make_spawn_fakebin "$tmp/fake")
