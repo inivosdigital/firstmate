@@ -70,6 +70,9 @@ test_two_worktrees_same_leaf_get_distinct_compose_names() {
   local tmp proj fakebin wt_a wt_b out_a out_b
   tmp=$(fm_test_tmproot fm-spawn-compose)
   proj=$(fm_git_init_commit "$tmp/proj" && printf '%s\n' "$tmp/proj")
+  # A pooled worktree is refreshed from origin before launch, and a base that
+  # cannot be refreshed refuses the spawn, so the fixture needs a real origin.
+  fm_git_add_origin "$proj" "$proj.origin.git"
   fakebin=$(make_spawn_fakebin "$tmp/fake")
 
   # Two pool-slot worktrees of the SAME project, sharing the leaf name
@@ -111,6 +114,9 @@ test_marker_is_git_excluded() {
   local tmp proj fakebin wt status_out
   tmp=$(fm_test_tmproot fm-spawn-compose-excl)
   proj=$(fm_git_init_commit "$tmp/proj" && printf '%s\n' "$tmp/proj")
+  # A pooled worktree is refreshed from origin before launch, and a base that
+  # cannot be refreshed refuses the spawn, so the fixture needs a real origin.
+  fm_git_add_origin "$proj" "$proj.origin.git"
   fakebin=$(make_spawn_fakebin "$tmp/fake")
 
   wt="$tmp/excltest-9ab1/3/excltest"

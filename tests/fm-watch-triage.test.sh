@@ -164,7 +164,8 @@ set_mtime() {  # <epoch> <file>
 }
 
 # Signature a primed .seen-* marker must hold so the per-poll signal scan does not
-# fire on a pre-existing status (mirrors fm-watch.sh's stat_sig exactly).
+# fire on a pre-existing status (mirrors fm-wake-lib.sh's fm_wake_signal_sig,
+# the shared owner of the size:mtime signature, exactly).
 seen_sig() {
   if [ "$(uname)" = Darwin ]; then stat -f '%z:%Fm' "$1" 2>/dev/null; else stat -c '%s:%Y' "$1" 2>/dev/null; fi
 }
