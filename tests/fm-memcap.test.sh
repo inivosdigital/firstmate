@@ -561,6 +561,11 @@ spawn_fixture() {  # <tmp> -> echoes "<proj> <wt> <fakebin> <sendlog>"
   local tmp=$1 proj wt fakebin sendlog
   proj="$tmp/proj"
   fm_git_init_commit "$proj"
+  # A ship spawn refreshes its pool worktree from origin and refuses to launch
+  # from a base it could not refresh, so the fixture needs a real remote. This
+  # builds the worktree by hand rather than through fm_git_worktree (it needs a
+  # detached pool-shaped path), so it registers the origin the same way.
+  fm_git_add_origin "$proj" "$proj.origin.git"
   wt="$tmp/pool-a1b2c3/1/proj"
   git -C "$proj" worktree add -q --detach "$wt" || fail "setup: worktree add failed"
   fakebin=$(make_spawn_fakebin "$tmp/fake" "$tmp/sendlog")
@@ -590,7 +595,8 @@ EOF
   assert_contains "$line" "bin/fm-memcap.sh" "the launch command should go through the wrapper"
   assert_contains "$line" "--max '3G'" "the launch command should carry the resolved ceiling"
   assert_contains "$line" "--label 'firstmate memcap-ship'" "the scope should be labelled with the task"
-  assert_contains "$line" "-- codex" "the original launch command must follow the wrapper unchanged"
+  assert_contains "$line" "-- env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex" \
+    "the original launch command must follow the wrapper unchanged"
   pass "fm-spawn: a launch is wrapped in the memory ceiling and the request is recorded"
 }
 
@@ -642,7 +648,7 @@ EOF
   line=$(launch_line "$sendlog")
   assert_not_contains "$line" "fm-memcap.sh" "'off' must leave the launch command exactly as it was"
   case "$line" in
-    codex*) : ;;
+    "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS codex"*) : ;;
     *) fail "'off' should launch the harness directly, got: $line" ;;
   esac
   pass "fm-spawn: an 'off' ceiling reproduces the pre-existing launch command byte for byte"

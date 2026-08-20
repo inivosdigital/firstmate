@@ -1903,6 +1903,7 @@ test_exited_declared_pause_and_live_gate_share_bounded_cadence() {
   [ ! -s "$state/.wake-queue" ] || { reap "$pid"; fail "a fresh live declared pause enqueued a wake during absorb"; }
   [ -e "$state/.paused-$key" ] || { reap "$pid"; fail "a fresh live declared pause did not latch the pause marker"; }
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Age the pause past the threshold: it must still re-surface as a bounded
   # recheck, exactly like the dead-agent case above - a live agent's pause is
@@ -2670,6 +2671,10 @@ test_busy_pane_recent_progress_holds_off_the_bound() {
   [ ! -e "$state/.stale-since-$key" ] || fail "a busy worker's recent landed work still started a wedge timer"
   [ ! -s "$out" ] || fail "a busy worker with recent landed work printed a wake reason: $(cat "$out")"
   reap "$pid"
+  # Stopping that watcher arms the downtime recovery marker, so acknowledge it
+  # here: otherwise the divergence phase's watcher spends its first poll
+  # resurfacing the interrupted cycle and exits before it ever reaches the bound.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-one stop"
 
   # Divergence: age that landed work back to the creation epoch and change
   # NOTHING else. The same fixture must now start the timer, so the phase above
@@ -2725,6 +2730,7 @@ test_busy_pane_without_progress_still_trips_the_bound() {
   fi
   [ ! -e "$state/.stale-since-$key" ] || fail "a plain-checkout worker's recent landed work still started a wedge timer, so its .git directory was not resolved"
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Now age that work to the creation epoch, changing nothing else.
   set_task_progress "$state" busy-noprogress "$born"
@@ -2741,6 +2747,7 @@ test_busy_pane_without_progress_still_trips_the_bound() {
   fi
   [ -s "$state/.stale-since-$key" ] || fail "a busy worker whose last landed work predates the bound did not start a wedge timer"
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Phase B: backdate the wedge timer past the threshold; the hung call this
   # bound exists for still escalates with the same reason and marker.
@@ -2815,7 +2822,7 @@ test_busy_pane_reflog_rewrite_is_not_progress() {
 # filesystem could match an unrelated local repository entirely. Only a paused
 # secondmate reaches the bound at all, so this pins the one path that can.
 test_busy_secondmate_ref_motion_is_not_its_progress() {
-  local dir state fakebin out capture_file window key pane_hash sig pid born
+  local dir state fakebin out capture_file window key pane_hash sig pid born anchor
   dir=$(make_case busy-progress-secondmate); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; capture_file="$dir/pane.txt"; window="test:fm-busy-sm"
   born=$(( $(date +%s) - 200000 ))
@@ -2842,10 +2849,18 @@ test_busy_secondmate_ref_motion_is_not_its_progress() {
     FM_POLL=1 FM_SIGNAL_GRACE=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
-  if ! wait_path_exists "$state/.stale-since-$key" 40; then
+  # A crossed bound under a declared pause is owned by the pause cadence, not the
+  # wedge timer, so the pause marker is what a crossed bound leaves behind here.
+  if ! wait_path_exists "$state/.paused-$key" 40; then
     reap "$pid"; fail "ref motion in a secondmate home was counted as that secondmate's progress and held its bound off: $(cat "$out")"
   fi
+  # An idle sighting would move the anchor to now and hold the bound off by
+  # itself, and would reach that same marker by the ordinary idle path - so
+  # without this the assertion above could pass while proving nothing.
+  anchor=$(idle_anchor_of "$state" "$key")
   reap "$pid"
+  [ "$anchor" = "$born" ] \
+    || fail "the pane was seen idle, so the bound is not what reached the pause cadence (anchor $anchor, seeded $born)"
   pass "ref motion in a secondmate home is not counted as that secondmate's own progress"
 }
 
@@ -2969,6 +2984,10 @@ test_repeated_blind_gaps_do_not_move_the_start() {
     anchor=$(idle_anchor_of "$state" "$key")
     [ "$anchor" = "$seeded" ] \
       || fail "blind gap $n moved the start forward (anchor '$anchor', expected $seeded)"
+    # Firstmate drains the queue before it re-arms, so each gap's own wake is
+    # acknowledged here; leaving it pending would make the next watcher resurface
+    # that wake instead of reaching the bound this gap is meant to exercise.
+    ack_stopped_cycle "$state" || fail "could not acknowledge blind gap $n's wake"
     n=$((n + 1))
   done
   pass "repeated blind gaps between watchers leave the start where the last idle sighting put it"
@@ -3033,6 +3052,10 @@ test_backward_clock_steps_do_not_suppress_the_bound() {
   pid=$!
   wait_for_exit "$pid" 100 || fail "a backward clock step suppressed a call already past the bound: $(cat "$out")"
   grep -F "possible wedge" "$out" >/dev/null || fail "a backward clock step did not flag a possible wedge: $(cat "$out")"
+  # That escalation stopped the cycle, so acknowledge it the way firstmate does
+  # before re-arming: otherwise phase B's watcher spends its one wake resurfacing
+  # this interrupted cycle and exits before the clock step is ever measured.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional phase-A stop"
 
   # Phase B: it steps back again, and a completed-turn marker is left in the
   # future too. A marker the clock has moved under is not evidence a turn just
@@ -3081,6 +3104,7 @@ test_spawn_epoch_anchors_a_task_with_no_turn_yet() {
   fi
   [ ! -e "$state/.stale-since-$key" ] || fail "a freshly spawned task on its first turn started a wedge timer"
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Phase B: the same task, armed 15000s ago and still on that first turn. The
   # spawn epoch does not advance, so the bound is reached.
@@ -3127,6 +3151,7 @@ test_meta_spawn_epoch_anchors_an_unarmed_task() {
   fi
   [ ! -e "$state/.stale-since-$key" ] || { reap "$pid"; fail "a task created a moment ago started a wedge timer"; }
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Phase B: the same task, created 15000s ago and still on that first turn.
   printf 'window=%s\nkind=ship\nharness=grok\nspawned=%s\n' "$window" "$(( $(date +%s) - 15000 ))" \
@@ -3205,6 +3230,7 @@ test_duplicate_meta_spawn_epochs_are_not_a_start() {
   wait_for_exit "$pid" 100 || { reap "$pid"; fail "a second creation epoch suppressed the bound: $(cat "$out")"; }
   grep -F "possible wedge" "$out" >/dev/null \
     || fail "a record with two creation epochs did not flag a possible wedge: $(cat "$out")"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional two-epoch stop"
 
   # The counterfactual the probe paired it with: the same pane with the appended
   # line removed alarms too, so the case above cannot pass merely because
@@ -3303,7 +3329,12 @@ test_busy_pane_resumed_call_past_the_bound_still_wedges() {
   printf 'Working... (4001.2s)' > "$capture_file"
   printf 'window=%s\nkind=ship\nharness=pi\n' "$window" > "$state/busy-hung.meta"
   record_pi_busy "$state" busy-hung $(( $(date +%s) - 200000 ))
-  printf 'working: setup complete\npaused: awaiting the captain on the redaction scope\n' \
+  # The park is over: the worker declared the pause and then declared itself
+  # resumed. A declared pause that still stands is owned by the pause cadence
+  # (test_busy_declared_pause_is_rechecked_not_wedge_escalated covers that), so
+  # the lifted declaration is what makes this a resumed call rather than a
+  # still-parked one, and the bound must apply to it in full.
+  printf 'working: setup complete\npaused: awaiting the captain on the redaction scope\nworking: redaction scope settled, resuming\n' \
     > "$state/busy-hung.status"
   sig=$(seen_sig "$state/busy-hung.status"); printf '%s' "$sig" > "$state/.seen-busy-hung_status"
   key=$(printf '%s' "$window" | tr ':/.' '___')
@@ -3326,6 +3357,7 @@ test_busy_pane_resumed_call_past_the_bound_still_wedges() {
   fi
   [ -s "$state/.stale-since-$key" ] || fail "a call running past the bound did not start a wedge timer"
   reap "$pid"
+  ack_stopped_cycle "$state" || fail "could not acknowledge the intentional stop before the next phase"
 
   # Phase B: backdate the wedge timer past the threshold; the next poll escalates.
   echo $(( $(date +%s) - 500 )) > "$state/.stale-since-$key"
