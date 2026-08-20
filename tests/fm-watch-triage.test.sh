@@ -1922,6 +1922,10 @@ test_exited_declared_pause_and_live_gate_share_bounded_cadence() {
   grep -F "awaiting external" "$out" >/dev/null || fail "a live declared pause recheck was not labeled awaiting-external"
   grep -F "possible wedge" "$out" >/dev/null && fail "a live declared pause recheck was mislabeled a possible wedge"
   [ ! -e "$state/.stale-since-$key" ] || fail "a live declared pause recheck retained a wedge timer"
+  # That recheck stopped the cycle, so acknowledge it before the churn phase
+  # below: an unacknowledged cycle would be resurfaced by the next watcher and
+  # read as the churn itself having woken firstmate.
+  ack_stopped_cycle "$state" || fail "could not acknowledge the live declared-pause recheck"
 
   # Simulate a churning pane hash on the SAME still-paused crew (a redrawn
   # timestamp, a cursor blink) - the exact live mechanism behind the fixed
@@ -3420,6 +3424,13 @@ test_repeated_unknown_verdicts_do_not_move_the_start() {
       kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
       fail "unknown verdict $n was recorded as an idle sighting: $(cat "$state/.last-idle-$key")"
     fi
+    # Firstmate drains the queue before it re-arms, so each escalation is
+    # acknowledged here; leaving it pending would make the next watcher resurface
+    # this one instead of producing the verdict that round is meant to exercise.
+    if ! ack_stopped_cycle "$state"; then
+      kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
+      fail "could not acknowledge unknown verdict $n's escalation"
+    fi
     n=$((n + 1))
   done
   kill "$ticker" 2>/dev/null || true; wait "$ticker" 2>/dev/null || true
@@ -3501,6 +3512,10 @@ test_repeated_inconsistent_idle_records_do_not_defer_the_bound() {
     anchor=$(idle_anchor_of "$state" "$key")
     [ "$anchor" = "$now" ] \
       || fail "impossible record $n was rewritten rather than rejected (anchor '$anchor', expected $now)"
+    # Firstmate drains the queue before it re-arms, so each round's escalation is
+    # acknowledged here; leaving it pending would make the next watcher resurface
+    # this one instead of re-judging the record that round reseeds.
+    ack_stopped_cycle "$state" || fail "could not acknowledge impossible record $n's escalation"
     n=$((n + 1))
   done
   pass "an idle record whose anchor postdates its own poll is rejected, however often it reappears"
@@ -3536,6 +3551,11 @@ test_unarmed_harness_realarms_until_its_first_turn_completes() {
       || fail "alarm $n did not report escalation $n: $(cat "$out")"
     [ "$(cat "$state/.wedge-escalations-$key" 2>/dev/null || echo 0)" = "$n" ] \
       || fail "alarm $n did not record escalation $n"
+    # Firstmate drains the queue before it re-arms, so each alarm is acknowledged
+    # here; leaving it pending would make the next watcher resurface this one
+    # instead of firing the next alarm this round is counting. The wedge
+    # escalation counter is untouched by the acknowledgement, so it still climbs.
+    ack_stopped_cycle "$state" || fail "could not acknowledge alarm $n"
     n=$((n + 1))
   done
   grep -F "demand-deep-inspection" "$out" >/dev/null \
