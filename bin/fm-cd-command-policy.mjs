@@ -50,10 +50,18 @@ function deny(code) {
   return { decision: "deny", code, reason: REASONS[code] };
 }
 
-function hasPathQualifiedCommandPrefix(position) {
+// `command` and `builtin` run their argument in the CURRENT shell, so both
+// `command cd x` and `builtin cd x` persist. Path-qualifying either word makes
+// it an ordinary external program - neither shell keyword is reachable through
+// a path - so a `cd` behind it is just an argument to that program and can
+// never move this shell. The shared classifier resolves wrapper words by
+// basename and so cannot tell the two apart; the distinction is drawn here.
+const SHELL_KEYWORD_RUNNERS = new Set(["command", "builtin"]);
+
+function hasPathQualifiedRunnerPrefix(position) {
   return position.words
     .slice(position.prefixAssignments, position.index)
-    .some((word) => word.value.includes("/") && word.value.split("/").at(-1) === "command");
+    .some((word) => word.value.includes("/") && SHELL_KEYWORD_RUNNERS.has(word.value.split("/").at(-1)));
 }
 
 function hasCommandQueryPrefix(position) {
@@ -83,7 +91,7 @@ function decision(command) {
     // substitutions (they contribute no top-level command word), and skips
     // leading assignments and wrappers to find the executed command word.
     const position = commandPosition(nodes[index]);
-    if (hasPathQualifiedCommandPrefix(position)) continue;
+    if (hasPathQualifiedRunnerPrefix(position)) continue;
     if (hasCommandQueryPrefix(position)) continue;
     let command = position.command;
     let wordIndex = position.index;
