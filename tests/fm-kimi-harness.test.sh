@@ -216,7 +216,7 @@ test_kimi_launch_then_send_is_verified() {
   assert_contains "$out" "spawned $id harness=kimi" "kimi spawn did not report success"
 
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_kimi_memcap_launch "$launch" "$id" "'$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" \
+  assert_kimi_memcap_launch "$launch" "$id" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$FAKEBIN_DIR/kimi' --model 'kimi-code/k3' --auto" \
     "kimi launch did not use the memcap-wrapped absolute binary, model, and --auto only"
   assert_not_contains "$launch" "--effort" "kimi launch emitted a nonexistent effort flag"
   assert_not_contains "$launch" "turn-ended" "kimi launch embedded a turn-end path"
@@ -473,7 +473,7 @@ test_kimi_falls_back_to_expanded_home_binary() {
   rc=$?
   expect_code 0 "$rc" "Kimi HOME fallback spawn should succeed"
   launch=$(cat "$CASE_DIR/launch.log")
-  assert_kimi_memcap_launch "$launch" "$id" "'$fallback' --auto" \
+  assert_kimi_memcap_launch "$launch" "$id" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS '$fallback' --auto" \
     "Kimi fallback did not expand HOME into an absolute executable under the memcap wrapper"
   pass "fm-spawn: Kimi fallback expands the active HOME"
 }
