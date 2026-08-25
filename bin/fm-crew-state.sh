@@ -93,6 +93,8 @@ STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 . "$SCRIPT_DIR/fm-busy-lib.sh"
 # shellcheck source=bin/fm-nm-run-lib.sh
 . "$SCRIPT_DIR/fm-nm-run-lib.sh"
+# shellcheck source=bin/fm-timeout-lib.sh
+. "$SCRIPT_DIR/fm-timeout-lib.sh"
 
 # --run-progress switches the output to the run PROGRESS TOKEN instead of the
 # current-state line: one opaque-but-stable string that changes if and only if
@@ -114,6 +116,11 @@ META="$STATE/$ID.meta"
 LOG="$STATE/$ID.status"
 NM_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_STATE_NM_TIMEOUT:-10}" 10)
 NM_KILL_AFTER=$(fm_sanitize_timeout_bound "${FM_CREW_STATE_NM_KILL_AFTER:-2}" 2)
+# Bound on the optional forge lookup a passed run's detail line uses to tell a
+# merged PR from one still open (see nm_pr_merge_state). Short on purpose: this
+# script runs on every supervision heartbeat, so a slow or unreachable forge
+# must degrade to "unknown" quickly rather than stall the caller.
+PR_TIMEOUT=$(fm_sanitize_timeout_bound "${FM_CREW_STATE_PR_TIMEOUT:-5}" 5)
 # How many of the most recent `no-mistakes runs` rows the cross-branch fallback
 # (nm_runs_status_for_branch, below) scans. Generous enough to still find a
 # branch's own run on a busy multi-crew fleet without listing the entire
@@ -421,6 +428,36 @@ nm_ci_checks_state() {
     *"checks passed"*|*"no CI checks reported - still monitoring"*) printf 'green' ;;
     *"no CI checks reported yet"*|*"checks failed"*|*"issues detected"*|*"CI checks running"*|*"base branch advanced"*"re-arming CI monitor timeout"*) printf 'not-ready' ;;
     *) printf 'unknown' ;;
+  esac
+}
+# A `passed` outcome means the pipeline's own steps passed - it says nothing
+# about whether the PR merged, closed unmerged, or is still sitting open, and
+# no-mistakes' run status carries no field that answers that (verified: its
+# TOON output has no merged/closed indicator anywhere, only the ci step's log
+# text nm_ci_checks_state already mines for the separate green-vs-monitoring
+# question). The only way to know is to ask the forge, so this looks up the
+# PR the run itself recorded (falling back to the task's own pr= metadata) and
+# reports what the forge says. Best-effort and bounded by PR_TIMEOUT: a missing
+# URL, a missing `gh`, a non-GitHub host, or a slow/failed lookup all resolve
+# to "unknown" rather than guessing merged or unmerged in either direction -
+# this runs on every supervision heartbeat and must never stall or fabricate.
+nm_pr_merge_state() {  # <pr-url>
+  local url=$1 state
+  [ -n "$url" ] || { printf 'unknown'; return; }
+  case "$url" in
+    *github.com/*) ;;
+    *) printf 'unknown'; return ;;
+  esac
+  command -v gh >/dev/null 2>&1 || { printf 'unknown'; return; }
+  state=$(fm_run_timed "$PR_TIMEOUT" gh pr view "$url" --json state -q .state 2>/dev/null) || {
+    printf 'unknown'
+    return
+  }
+  case "$state" in
+    MERGED) printf 'merged' ;;
+    CLOSED) printf 'closed' ;;
+    OPEN)   printf 'open' ;;
+    *)      printf 'unknown' ;;
   esac
 }
 # Coarse fallback for cross-branch attribution. `no-mistakes axi status` (bare)
@@ -785,7 +822,17 @@ if [ "$HAVE_RUN" = 1 ]; then
 
     if [ -n "$outcome" ]; then
       case "$outcome" in
-        passed)        RUN_STATE="done"; RUN_DETAIL="run passed: PR merged/closed" ;;
+        passed)
+          pr_url=$(strip_quotes "$(nm_field pr)")
+          [ -n "$pr_url" ] || pr_url=$(meta_value pr)
+          case "$(nm_pr_merge_state "$pr_url")" in
+            merged) pr_note="PR merged" ;;
+            closed) pr_note="PR closed (not merged)" ;;
+            open)   pr_note="PR still open (not merged)" ;;
+            *)      pr_note="PR merge state unknown" ;;
+          esac
+          RUN_STATE="done"; RUN_DETAIL="run passed: $pr_note"
+          ;;
         checks-passed) RUN_STATE="done"; RUN_DETAIL="checks green: PR ready for review" ;;
         failed)        RUN_STATE=failed; RUN_DETAIL="run failed" ;;
         cancelled)     RUN_STATE=failed; RUN_DETAIL="run cancelled" ;;

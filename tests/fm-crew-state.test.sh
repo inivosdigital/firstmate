@@ -155,7 +155,18 @@ case "${1:-}" in
 esac
 exit 0
 SH
-  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr"
+  cat > "$fb/gh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${FM_FAKE_GH_MISSING:-0}" = 1 ] && exit 127
+if [ "${1:-}" = pr ] && [ "${2:-}" = view ]; then
+  [ -n "${FM_FAKE_GH_PR_STATE:-}" ] || exit 1
+  printf '%s\n' "${FM_FAKE_GH_PR_STATE}"
+  exit 0
+fi
+exit 1
+SH
+  chmod +x "$fb/no-mistakes" "$fb/tmux" "$fb/herdr" "$fb/gh"
   printf '%s\n' "$fb"
 }
 
@@ -210,9 +221,12 @@ reset_fakes() {
   FM_FAKE_RUNS_HANG_SECS=""
   FM_FAKE_RUNS_LIST_AFTER_HANG=""
   FM_FAKE_RUNS_TORN_TAIL=""
+  FM_FAKE_GH_PR_STATE=""
+  FM_FAKE_GH_MISSING=0
   export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
   export FM_FAKE_RUNS_HANG_SECS FM_FAKE_RUNS_LIST_AFTER_HANG FM_FAKE_RUNS_TORN_TAIL
+  export FM_FAKE_GH_PR_STATE FM_FAKE_GH_MISSING
 }
 
 # --- run-object fixtures (TOON, as `no-mistakes axi status` emits) -----------
@@ -1207,10 +1221,52 @@ test_terminal_passed() {
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-d.meta" "window=fm:fm-feat-d" "worktree=$d/wt" "kind=ship"
   FM_FAKE_AXI_STATUS="$(run_passed fm/feat-d)"
+  FM_FAKE_GH_PR_STATE="MERGED"
   local out; out=$(run_crew_state "$d" feat-d)
   assert_contains "$out" "state: done" "passed run -> done"
   assert_contains "$out" "source: run-step" "passed -> run-step source"
+  assert_contains "$out" "PR merged" "passed run with a merged PR reports the merge"
   pass "terminal passed run is authoritative"
+}
+
+# A `passed` outcome means the pipeline's steps passed, not that the PR
+# merged: this helper used to hardcode "run passed: PR merged/closed" for
+# every passed run regardless of the PR's real state.
+# Observed on 2026-08-24: the helper reported "run passed: PR merged/closed"
+# for a run validated with --skip ci, while the PR itself was open and
+# unmerged on GitHub. Pins that a passed run whose forge lookup reports an
+# open PR never claims a merge or a close.
+test_terminal_passed_pr_open_not_merged() {
+  reset_fakes
+  local d; d=$(new_case passed-open)
+  make_repo_on_branch "$d/wt" fm/feat-open
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-open.meta" "window=fm:fm-feat-open" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-open)"
+  FM_FAKE_GH_PR_STATE="OPEN"
+  local out; out=$(run_crew_state "$d" feat-open)
+  assert_contains "$out" "state: done" "passed run stays done even when the PR is unmerged"
+  assert_not_contains "$out" "PR merged" "an open, unmerged PR must never be reported as merged"
+  assert_not_contains "$out" "PR merged/closed" "the old unevidenced merge claim must be gone"
+  assert_contains "$out" "PR still open (not merged)" "the detail line states the actual open PR state"
+  pass "passed run with an open unmerged PR reports no merge claim"
+}
+
+# No forge evidence available (gh missing) - the detail line must say the
+# merge state is unknown rather than defaulting to merged or unmerged.
+test_terminal_passed_pr_state_unknown() {
+  reset_fakes
+  local d; d=$(new_case passed-unknown)
+  make_repo_on_branch "$d/wt" fm/feat-unknown
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/feat-unknown.meta" "window=fm:fm-feat-unknown" "worktree=$d/wt" "kind=ship"
+  FM_FAKE_AXI_STATUS="$(run_passed fm/feat-unknown)"
+  FM_FAKE_GH_MISSING=1
+  local out; out=$(run_crew_state "$d" feat-unknown)
+  assert_contains "$out" "state: done" "passed run stays done with no forge evidence"
+  assert_not_contains "$out" "PR merged" "no evidence must never be reported as merged"
+  assert_contains "$out" "PR merge state unknown" "no evidence renders as unknown, not a guess"
+  pass "passed run with no forge evidence reports merge state as unknown"
 }
 
 test_terminal_failed() {
@@ -2074,6 +2130,8 @@ test_ci_fixing_after_green_stays_working
 test_top_level_fixing_ci_running_after_green_stays_working
 test_top_level_fixing_done_log_stays_working
 test_terminal_passed
+test_terminal_passed_pr_open_not_merged
+test_terminal_passed_pr_state_unknown
 test_terminal_failed
 test_cross_branch_attribution_via_runs_list
 test_cross_branch_attribution_picks_most_recent_row
