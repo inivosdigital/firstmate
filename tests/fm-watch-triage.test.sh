@@ -1638,10 +1638,10 @@ test_turn_ended_not_working_surfaced() {
 # points the watcher at a case-local config dir holding the flag. A case that must
 # NOT have it points at an empty one, so no developer's real config can leak in.
 churn_config() {  # <dir> [off]
-  local cfg="$1/config"
-  mkdir -p "$cfg"
-  [ "${2:-}" = off ] || : > "$cfg/turnend-churn-absorb"
-  printf '%s\n' "$cfg"
+  local cfg_dir="$1/config"
+  mkdir -p "$cfg_dir"
+  [ "${2:-}" = off ] || : > "$cfg_dir/turnend-churn-absorb"
+  printf '%s\n' "$cfg_dir"
 }
 
 # Wait until the watcher records an absorbed wake matching <needle> in its triage

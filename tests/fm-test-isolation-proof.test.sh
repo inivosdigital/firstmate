@@ -35,6 +35,9 @@ test_family_pool_json_identifies_admission() {
   skipped_json="$tmp/skipped-proof.json"
   mkdir -p "$repo/bin" "$repo/tests"
   cp "$PROOF" "$proof"
+  # The proof script resolves its interpreter through the shared python helper,
+  # so the fixture repo needs that library beside it to run at all.
+  cp "$ROOT/bin/fm-python-lib.sh" "$repo/bin/fm-python-lib.sh"
   cat >"$repo/bin/fm-test-run.sh" <<'SH'
 #!/usr/bin/env bash
 if { [ "$1" = --list ] || [ "$1" = --list-scheduled ]; } && [ "$2" = --family ]; then
