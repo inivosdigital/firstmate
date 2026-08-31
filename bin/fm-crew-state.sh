@@ -8,9 +8,8 @@
 # or blocked and the crew resumes (responds to the gate, the pipeline fixes, it
 # re-validates), the log's last line stays stale. This helper never infers the
 # current state from a tail of the log: it reads the authoritative source (a
-# no-mistakes run-step attributed to this crew's branch and current code
-# identity, else the pane busy-signature) and reconciles the possibly-stale log
-# against it.
+# no-mistakes run-step attributed under bin/fm-nm-run-lib.sh's contract, else
+# the pane busy-signature) and reconciles the possibly-stale log against it.
 #
 # The determinism lives entirely here - only run-step / pane / log reads plus
 # fixed mapping logic, no heuristics and no LLM. Output is one stable, parseable,
@@ -178,7 +177,7 @@ fi
 
 # --- status log ------------------------------------------------------------
 
-# Last non-empty status line, and its leading verb (the word before the colon).
+# Last non-empty status line; fm-classify-lib.sh owns leading-verb normalization.
 log_last_line() {
   [ -f "$LOG" ] || return 1
   grep -v '^[[:space:]]*$' "$LOG" 2>/dev/null | tail -1
@@ -277,7 +276,7 @@ crew_busy_verdict() {  # <target>
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
-# branch+head attribution rule below are thin wrappers over the ONE owner in
+# attribution helpers below are thin wrappers over the ONE owner in
 # bin/fm-nm-run-lib.sh, shared with fm-teardown.sh's pre-teardown run abort.
 # nm_run keeps fm_nm_run's fail-open contract (best-effort text, exit status
 # discarded) for the axi status/logs reads; the runs-list scan below is the
@@ -493,7 +492,11 @@ nm_pr_merge_state() {  # <pr-url>
 # unresolvable-head dispensation requires (nm_run_attributes_here). After a
 # call:
 #   NM_RUNS_MATCH_STATUS  newest same-branch row whose short-sha strictly
-#                         matches this worktree's code identity ('' if none)
+#                         matches this worktree's code identity ('' if none).
+#                         Strict matching stops at the first same-branch row
+#                         whose head this repo cannot resolve: that row is
+#                         unknown attribution, not a proven mismatch, so an
+#                         older superseded row must not answer past it
 #   NM_RUNS_LIVE_N        count of same-branch rows still `running`, whatever
 #                         their head relation
 #   NM_RUNS_LIVE_SHA      the LAST-counted running row's short-sha; meaningful
@@ -548,7 +551,7 @@ NM_RUNS_LIVE_SHA=''
 NM_RUNS_ROWS_TAINTED=0
 NM_RUNS_INCOMPLETE=0
 nm_scan_runs_for_branch() {  # <branch>
-  local branch=$1 out row st rest br sha total=0
+  local branch=$1 out row st rest br sha total=0 match_closed=0
   NM_RUNS_MATCH_STATUS=''
   NM_RUNS_LIVE_N=0
   NM_RUNS_LIVE_SHA=''
@@ -577,9 +580,16 @@ nm_scan_runs_for_branch() {  # <branch>
       NM_RUNS_LIVE_N=$((NM_RUNS_LIVE_N + 1))
       NM_RUNS_LIVE_SHA=$sha
     fi
-    if [ -z "$NM_RUNS_MATCH_STATUS" ] \
-      && [ "$(fm_nm_head_relation "$WT" "$sha")" = match ]; then
-      NM_RUNS_MATCH_STATUS=$st
+    # Strict matching walks newest-first and stops at the first row whose head
+    # this repo cannot resolve at all. Such a row is UNKNOWN attribution, not a
+    # proven mismatch, so continuing past it would let an older, superseded row
+    # answer for a run that has already moved on. A resolvable mismatch is a
+    # proven non-match and keeps the scan going, exactly as before.
+    if [ -z "$NM_RUNS_MATCH_STATUS" ] && [ "$match_closed" = 0 ]; then
+      case "$(fm_nm_head_relation "$WT" "$sha")" in
+        match) NM_RUNS_MATCH_STATUS=$st ;;
+        unresolvable) match_closed=1 ;;
+      esac
     fi
   done <<< "$out"
   [ "$total" -ge "$FM_CREW_STATE_RUNS_LIMIT" ] && NM_RUNS_INCOMPLETE=1
@@ -727,9 +737,9 @@ if [ "$KIND" = ship ] && [ -n "$CREW_BRANCH" ] && command -v no-mistakes >/dev/n
     if [ -n "$run_branch" ] && [ "$run_branch" = "$CREW_BRANCH" ] && nm_run_attributes_here; then
       HAVE_RUN=1
     else
-      # The active-or-most-recent run is for another branch, or same branch with
-      # a rewritten/diverged head (the CLI is alive and answered; only the
-      # attribution missed) - try the coarse fallback.
+      # The active-or-most-recent run is for another branch, or its same-branch
+      # attribution failed (the CLI is alive and answered) - try the coarse
+      # fallback.
       # Deliberately nested inside `[ -n "$RUN_OUT" ]`: an empty/timed-out
       # primary call means the CLI itself did not respond, so retrying it
       # immediately with a second bounded call would just double the wait
@@ -806,8 +816,9 @@ if [ "$HAVE_RUN" = 1 ]; then
     # gets full detail once `axi status` reports its own branch again (e.g.
     # once its own step is the most-recently-touched one), and its own
     # needs-decision/blocked status-log append (a captain-relevant VERB) is
-    # surfaced through signal_reason_is_actionable regardless of this
-    # coarse-vs-full distinction, so a real gate is never silently missed.
+    # surfaced by each supervisor's span classification (fm-classify-lib.sh's
+    # status_span_first_actionable) regardless of this coarse-vs-full
+    # distinction, so a real gate is never silently missed.
     case "$COARSE_STATUS" in
       running)   RUN_STATE=working; RUN_DETAIL="validating (background run)" ;;
       completed) RUN_STATE="done";  RUN_DETAIL="run completed" ;;
