@@ -232,6 +232,17 @@ stage_or_die() {  # <slot> <json> - stage_json, reporting the slot it lost
     || { echo "fm-fleet-snapshot: could not stage $1 for output" >&2; return 1; }
 }
 
+# The same cap binds single strings, and a task's strings come out of files this
+# script does not control: a metadata value and a status line are each as long
+# as whoever wrote them made them. Carry those through --rawfile, which
+# reproduces the staged bytes exactly, rather than dropping a task or refusing a
+# whole fleet read over one long line. RAW is the shared slot prefix; a caller
+# stages under its own slot names and reads them back at "$RAW.<slot>".
+RAW="$SNAPSHOT_TMP/raw"
+stage_raw() {  # <slot> <value> - hold <value> verbatim for --rawfile
+  printf '%s' "$2" > "$RAW.$1" || return 1
+}
+
 bool_json() {
   if [ "$1" = 1 ]; then printf 'true'; else printf 'false'; fi
 }
@@ -239,7 +250,8 @@ bool_json() {
 path_present_json() {  # <path>
   local present=0
   [ -e "$1" ] && present=1
-  jq -n --arg path "$1" --argjson present "$(bool_json "$present")" \
+  stage_raw pp.path "$1" || return 1
+  jq -n --rawfile path "$RAW.pp.path" --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present}'
 }
 
@@ -287,7 +299,12 @@ crew_state_json() {  # <id>
       esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
+  stage_raw cs.raw "$raw" || return 1
+  stage_raw cs.state "$state" || return 1
+  stage_raw cs.source "$source" || return 1
+  stage_raw cs.detail "$detail" || return 1
+  jq -n --rawfile raw "$RAW.cs.raw" --rawfile state "$RAW.cs.state" \
+    --rawfile source "$RAW.cs.source" --rawfile detail "$RAW.cs.detail" \
     '{state:$state,source:$source,detail:$detail,raw:$raw}'
 }
 
@@ -299,11 +316,14 @@ status_event_json() {  # <status-log>
     verb=$(status_line_verb "$raw")
     note=$(status_line_note "$raw")
   fi
+  stage_raw se.raw "$raw" || return 1
+  stage_raw se.verb "$verb" || return 1
+  stage_raw se.note "$note" || return 1
   jq -n \
     --arg path "$log" \
-    --arg raw "$raw" \
-    --arg verb "$verb" \
-    --arg note "$note" \
+    --rawfile raw "$RAW.se.raw" \
+    --rawfile verb "$RAW.se.verb" \
+    --rawfile note "$RAW.se.note" \
     --argjson present "$(bool_json "$present")" \
     '{path:$path,present:$present,kind:"event_history",last_event:{state:$verb,note:$note,raw:$raw}}'
 }
@@ -474,6 +494,13 @@ task_json_lines() {
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json open_decisions_file
+  local current_state_file meta_path_file status_log_file report_file worktree_path_file home_path_file
+  # Rows land in a file rather than a pipe into `jq -s`: a pipeline would put
+  # this loop in a subshell whose failures the sink swallows, so one unusable
+  # row would leave a task silently missing from a snapshot that still exits 0.
+  # Live task metadata is inventory truth; losing a row must fail the read.
+  local rows_file="$SNAPSHOT_TMP/task-rows.json"
+  : > "$rows_file" || return 1
 
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -586,50 +613,89 @@ task_json_lines() {
     fi
 
     [ -f "$report_path" ] && report_present=1 || report_present=0
-    meta_json=$(path_present_json "$meta")
+    meta_json=$(path_present_json "$meta") || return 1
     status_json=$event_json
-    report_json=$(path_present_json "$report_path")
-    if [ -n "$worktree" ]; then worktree_json=$(path_present_json "$worktree"); else worktree_json=$(jq -n '{path:null,present:false}'); fi
-    if [ -n "$home" ] && [ -n "$remote_host" ]; then
-      home_json=$(jq -n --arg path "$home" --argjson present "$remote_home_present" '{path:$path,present:$present}')
-    elif [ -n "$home" ]; then
-      home_json=$(path_present_json "$home")
+    report_json=$(path_present_json "$report_path") || return 1
+    if [ -n "$worktree" ]; then
+      worktree_json=$(path_present_json "$worktree") || return 1
     else
-      home_json=$(jq -n '{path:null,present:false}')
+      worktree_json=$(jq -n '{path:null,present:false}') || return 1
+    fi
+    if [ -n "$home" ] && [ -n "$remote_host" ]; then
+      stage_raw task.home_path "$home" || return 1
+      home_json=$(jq -n --rawfile path "$RAW.task.home_path" \
+        --argjson present "$remote_home_present" '{path:$path,present:$present}') || return 1
+    elif [ -n "$home" ]; then
+      home_json=$(path_present_json "$home") || return 1
+    else
+      home_json=$(jq -n '{path:null,present:false}') || return 1
     fi
 
+    # Every value below that a metadata file or a status log supplied is staged;
+    # only ids bounded by a filename, this script's own literals, and its
+    # observation clock stay on argv.
+    stage_raw task.kind "$kind" || return 1
+    stage_raw task.harness "$harness" || return 1
+    stage_raw task.mode "$mode" || return 1
+    stage_raw task.yolo "$yolo" || return 1
+    stage_raw task.project "$project" || return 1
+    stage_raw task.worktree "$worktree" || return 1
+    stage_raw task.home "$home" || return 1
+    stage_raw task.projects "$projects" || return 1
+    stage_raw task.spawn_gen "$spawn_gen" || return 1
+    stage_raw task.backend "$backend" || return 1
+    stage_raw task.target "$target" || return 1
+    stage_raw task.remote_host "$remote_host" || return 1
+    stage_raw task.remote_root "$remote_root" || return 1
+    stage_raw task.pr "$pr" || return 1
+    stage_raw task.agent_alive "$agent_alive" || return 1
+    stage_raw task.last_event_raw "$last_event_raw" || return 1
+    # The composed sub-objects carry those same file-supplied strings, so they
+    # travel by file too; only the small booleans below stay on argv.
+    current_state_file=$(stage_json task.current_state "$current_json") || return 1
+    meta_path_file=$(stage_json task.meta_path "$meta_json") || return 1
+    status_log_file=$(stage_json task.status_log "$status_json") || return 1
+    report_file=$(stage_json task.report "$report_json") || return 1
+    worktree_path_file=$(stage_json task.worktree_path "$worktree_json") || return 1
+    home_path_file=$(stage_json task.home_path_obj "$home_json") || return 1
     jq -n \
       --arg id "$id" \
-      --arg kind "$kind" \
-      --arg harness "$harness" \
-      --arg mode "$mode" \
-      --arg yolo "$yolo" \
-      --arg project "$project" \
-      --arg worktree "$worktree" \
-      --arg home "$home" \
-      --arg projects "$projects" \
-      --arg spawn_gen "$spawn_gen" \
-      --arg backend "$backend" \
-      --arg target "$target" \
-      --arg remote_host "$remote_host" \
-      --arg remote_root "$remote_root" \
-      --arg pr "$pr" \
+      --rawfile kind "$RAW.task.kind" \
+      --rawfile harness "$RAW.task.harness" \
+      --rawfile mode "$RAW.task.mode" \
+      --rawfile yolo "$RAW.task.yolo" \
+      --rawfile project "$RAW.task.project" \
+      --rawfile worktree "$RAW.task.worktree" \
+      --rawfile home "$RAW.task.home" \
+      --rawfile projects "$RAW.task.projects" \
+      --rawfile spawn_gen "$RAW.task.spawn_gen" \
+      --rawfile backend "$RAW.task.backend" \
+      --rawfile target "$RAW.task.target" \
+      --rawfile remote_host "$RAW.task.remote_host" \
+      --rawfile remote_root "$RAW.task.remote_root" \
+      --rawfile pr "$RAW.task.pr" \
       --arg pr_source "$pr_source" \
-      --arg agent_alive "$agent_alive" \
+      --rawfile agent_alive "$RAW.task.agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
-      --arg last_event_raw "$last_event_raw" \
-      --argjson current_state "$current_json" \
-      --argjson meta_path "$meta_json" \
-      --argjson status_log "$status_json" \
-      --argjson report "$report_json" \
-      --argjson worktree_path "$worktree_json" \
-      --argjson home_path "$home_json" \
+      --rawfile last_event_raw "$RAW.task.last_event_raw" \
+      --slurpfile current_state_in "$current_state_file" \
+      --slurpfile meta_path_in "$meta_path_file" \
+      --slurpfile status_log_in "$status_log_file" \
+      --slurpfile report_in "$report_file" \
+      --slurpfile worktree_path_in "$worktree_path_file" \
+      --slurpfile home_path_in "$home_path_file" \
       --argjson endpoint_exists "$endpoint_exists" \
       --slurpfile open_decisions_in "$open_decisions_file" \
       --argjson pending_decision "$(bool_json "$pending_decision")" \
       --argjson blocked_event "$(bool_json "$blocked_event")" \
       --argjson report_present "$(bool_json "$report_present")" \
       '($open_decisions_in[0]) as $open_decisions
+      | ($current_state_in[0]) as $current_state
+      | ($meta_path_in[0]) as $meta_path
+      | ($status_log_in[0]) as $status_log
+      | ($report_in[0]) as $report
+      | ($worktree_path_in[0]) as $worktree_path
+      | ($home_path_in[0]) as $home_path
       | {
         id:$id,
         kind:$kind,
@@ -672,8 +738,9 @@ task_json_lines() {
              steer:"bin/fm-send.sh fm-\($id) \u0027<instruction>\u0027",
              return_channel_note:null}
           end)
-      }'
-  done | jq -s 'sort_by(.id)'
+      }' >> "$rows_file" || return 1
+  done
+  jq -s 'sort_by(.id)' < "$rows_file"
 }
 
 # Main-home current-inventory validity: same orphan / unstructured-current checks
@@ -1213,6 +1280,18 @@ parent_evidence_reconciliation_json() {  # <summary-json> <activities-json> <dec
        inconclusive:any(($activity_results + $decision_results)[]; .verdict == "inconclusive")}'
 }
 
+# A registered row's identity and event text come from the registry table, task
+# metadata, and a status line, so the same per-string cap applies here as in the
+# task producer. Both record shapes stage the values they share.
+stage_row_strings() {
+  stage_raw row.id "$id" || return 1
+  stage_raw row.home "$home" || return 1
+  stage_raw row.host "$host" || return 1
+  stage_raw row.spawn_gen "$sampled_spawn_gen" || return 1
+  stage_raw row.event_raw "$event_raw" || return 1
+  stage_raw row.event_note "$event_note" || return 1
+}
+
 secondmate_current_json() {  # <parent-tasks-json>
   local tasks=$1 registry union rows total_registered total shown truncated
   local row id home host remote registered registry_error task sampled_spawn_gen status_file event_raw event_note event_epoch event_age
@@ -1360,7 +1439,10 @@ secondmate_current_json() {  # <parent-tasks-json>
       fi
       reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
-      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --arg note "$event_note" '
+      # The note being matched is a status line, so it reaches jq by file like
+      # every other status-supplied string; stage_row_strings restages it below.
+      stage_raw row.event_note "$event_note" || return 1
+      terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --rawfile note "$RAW.row.event_note" '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
         terminal=$(terminal_evidence_json "$task" "$event_note" true)
@@ -1374,13 +1456,16 @@ secondmate_current_json() {  # <parent-tasks-json>
       activities_file=$(stage_json record.activities "$activities") || return 1
       activity_scan_file=$(stage_json record.activity-scan "$activity_scan") || return 1
       reconciliation_file=$(stage_json record.reconciliation "$reconciliation") || return 1
+      stage_row_strings || return 1
+      stage_raw row.state "$state" || return 1
+      stage_raw row.current_reason "$current_reason" || return 1
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg state "$state" --arg current_reason "$current_reason" --arg observed "$SNAPSHOT_NOW" \
-        --arg spawn_gen "$sampled_spawn_gen" \
+        --rawfile id "$RAW.row.id" --rawfile home "$RAW.row.home" --rawfile host "$RAW.row.host" --argjson remote "$remote" --rawfile state "$RAW.row.state" --rawfile current_reason "$RAW.row.current_reason" --arg observed "$SNAPSHOT_NOW" \
+        --rawfile spawn_gen "$RAW.row.spawn_gen" \
         --argjson registered "$registered" --slurpfile summary_in "$summary_file" --argjson summary_valid "$summary_valid" --slurpfile decisions_in "$decisions_file" \
         --slurpfile activities_in "$activities_file" --slurpfile activity_scan_in "$activity_scan_file" \
         --slurpfile reconciliation_in "$reconciliation_file" --argjson terminal "$terminal" --argjson contradiction "$contradiction" \
-        --arg event_raw "$event_raw" --arg event_note "$event_note" --argjson event_age "$event_age" '
+        --rawfile event_raw "$RAW.row.event_raw" --rawfile event_note "$RAW.row.event_note" --argjson event_age "$event_age" '
         ($summary_in[0]) as $summary
         | ($decisions_in[0]) as $decisions
         | ($activities_in[0]) as $activities
@@ -1397,7 +1482,7 @@ secondmate_current_json() {  # <parent-tasks-json>
          decisions_open:$summary.decisions_open,holds:$summary.holds,queued:$summary.queued,
          landed:$summary.landed,endpoints:$summary.endpoints,counts:$summary.counts,omitted:$summary.omitted,
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan,reconciliation:$reconciliation},
-         terminal_evidence:$terminal,contradiction:$contradiction}')
+         terminal_evidence:$terminal,contradiction:$contradiction}') || return 1
     else
       if [ -n "$event_raw" ]; then
         provenance='parent-event-fallback'
@@ -1416,10 +1501,12 @@ secondmate_current_json() {  # <parent-tasks-json>
       decisions_file=$(stage_json record.decisions "$decisions") || return 1
       activities_file=$(stage_json record.activities "$activities") || return 1
       activity_scan_file=$(stage_json record.activity-scan "$activity_scan") || return 1
+      stage_row_strings || return 1
+      stage_raw row.reason "$reason" || return 1
       record=$(jq -n \
-        --arg id "$id" --arg home "$home" --arg host "$host" --argjson remote "$remote" --arg reason "$reason" --arg observed "$SNAPSHOT_NOW" \
-        --arg spawn_gen "$sampled_spawn_gen" \
-        --arg provenance "$provenance" --arg freshness "$freshness" --arg event_raw "$event_raw" --arg event_note "$event_note" \
+        --rawfile id "$RAW.row.id" --rawfile home "$RAW.row.home" --rawfile host "$RAW.row.host" --argjson remote "$remote" --rawfile reason "$RAW.row.reason" --arg observed "$SNAPSHOT_NOW" \
+        --rawfile spawn_gen "$RAW.row.spawn_gen" \
+        --arg provenance "$provenance" --arg freshness "$freshness" --rawfile event_raw "$RAW.row.event_raw" --rawfile event_note "$RAW.row.event_note" \
         --argjson registered "$registered" --argjson event_age "$event_age" --slurpfile activities_in "$activities_file" --slurpfile activity_scan_in "$activity_scan_file" \
         --slurpfile decisions_in "$decisions_file" --argjson terminal "$terminal" --slurpfile summary_in "$summary_file" --argjson summary_sampled "$summary_sampled" '
         ($summary_in[0]) as $summary
@@ -1434,12 +1521,12 @@ secondmate_current_json() {  # <parent-tasks-json>
          freshness:{status:$freshness,observed_at:$observed,age_seconds:$event_age},
          active_children:[],decisions_open:[],holds:[],queued:[],landed:[],endpoints:[],counts:{active_children:0,decisions_open:0,holds:0,queued:0,landed:0,endpoints:0},omitted:[],
          parent_event:{raw:$event_raw,note:$event_note,age_seconds:$event_age,open_activities:$activities,open_decisions:$decisions,activity_scan:$activity_scan},
-         terminal_evidence:$terminal,contradiction:false}')
+         terminal_evidence:$terminal,contradiction:false}') || return 1
     fi
     records_file=$(stage_json records.accumulated "$records") || return 1
     record_file=$(stage_json records.item "$record") || return 1
     records=$(jq -n --slurpfile records_in "$records_file" --slurpfile record_in "$record_file" \
-      '$records_in[0] + [$record_in[0]]')
+      '$records_in[0] + [$record_in[0]]') || return 1
   done <<EOF
 $rows
 EOF

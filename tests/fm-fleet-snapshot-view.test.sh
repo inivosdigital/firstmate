@@ -10,6 +10,12 @@ SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh"
 VIEW="$ROOT/bin/fm-fleet-view.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fleet-snapshot)
 
+# Each fixture run sets only FM_HOME, but the snapshot gives an ambient
+# operational-root override precedence over that home. A run inherited from a
+# live firstmate session would then read the real fleet instead of the fixture,
+# so clear them once here and keep every case hermetic.
+unset FM_STATE_OVERRIDE FM_DATA_OVERRIDE FM_CONFIG_OVERRIDE FM_PROJECTS_OVERRIDE FM_ROOT_OVERRIDE
+
 command -v jq >/dev/null 2>&1 || { echo "skip: jq not found"; exit 0; }
 
 make_fakebin() {  # <dir>
@@ -491,6 +497,100 @@ test_oversized_backlog_survives_argv_limit() {
   pass "both snapshot modes survive a backlog past the per-argument cap"
 }
 
+# A task's own strings come out of files nobody bounds: a metadata value and a
+# status line are each as long as whoever wrote them made them. Such a task must
+# still be reported in full, and must never go missing from a run that exits 0 -
+# a fleet read that drops live task metadata while reporting success is worse
+# than one that fails.
+OVERSIZED_VALUE_BYTES=140010
+
+oversized_value() {  # a distinctive payload past the cap, so faithfulness shows
+  printf 'HEAD-'
+  head -c $((OVERSIZED_VALUE_BYTES - 10)) /dev/zero | tr '\0' 'x'
+  printf -- '-TAIL'
+}
+
+write_two_task_home() {  # <home> - one oversized task beside one ordinary task
+  local home=$1
+  fm_write_meta "$home/state/small-task.meta" \
+    "window=firstmate:fm-small-task" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: ordinary line\n' > "$home/state/small-task.status"
+}
+
+# The snapshot lands in a caller-named file rather than on stdout: a helper read
+# through $(...) runs in a subshell, where fail's exit would end the substitution
+# and leave the case reporting a pass right after its own "not ok".
+assert_both_tasks_present() {  # <home> <fakebin> <label> <json-out-file>
+  local home=$1 fakebin=$2 label=$3 out_file=$4 out summary
+  PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --json > "$out_file" \
+    || fail "$label: --json must not fail on an oversized task value"
+  out=$(cat "$out_file")
+  printf '%s' "$out" | jq -e '
+    (.tasks | length) == 2
+      and ([.tasks[].id] | sort) == ["big-task","small-task"]
+  ' >/dev/null \
+    || fail "$label: --json dropped a task instead of reporting it: $(printf '%s' "$out" | jq -c '[.tasks[].id]')"
+  summary=$(PATH="$fakebin:$PATH" FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "$label: home summary must not fail on an oversized task value"
+  printf '%s' "$summary" | jq -e '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .counts.endpoints == 2
+      and ([.endpoints[].id] | sort) == ["big-task","small-task"]
+  ' >/dev/null \
+    || fail "$label: home summary dropped a task: $(printf '%s' "$summary" | jq -c '.counts')"
+}
+
+test_oversized_task_metadata_is_carried() {
+  local home fakebin out out_file="$TMP_ROOT/oversized-meta.json"
+  home=$(make_home oversized-meta)
+  write_two_task_home "$home"
+  fm_write_meta "$home/state/big-task.meta" \
+    "window=firstmate:fm-big-task" \
+    "project=$(oversized_value)" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  fakebin=$(make_fakebin "$home")
+  assert_both_tasks_present "$home" "$fakebin" "oversized metadata" "$out_file"
+  out=$(cat "$out_file")
+  printf '%s' "$out" | jq -e --argjson n "$OVERSIZED_VALUE_BYTES" '
+    .tasks[] | select(.id == "big-task")
+    | (.project | length) == $n
+      and (.project | startswith("HEAD-"))
+      and (.project | endswith("-TAIL"))
+  ' >/dev/null || fail "an oversized metadata value must round-trip byte for byte"
+  pass "an oversized task metadata value is carried, never silently dropped"
+}
+
+test_oversized_status_line_is_carried() {
+  local home fakebin out out_file="$TMP_ROOT/oversized-status.json"
+  home=$(make_home oversized-status)
+  write_two_task_home "$home"
+  fm_write_meta "$home/state/big-task.meta" \
+    "window=firstmate:fm-big-task" \
+    "project=alpha" \
+    "harness=claude" \
+    "kind=ship" \
+    "mode=ship"
+  printf 'working: %s\n' "$(oversized_value)" > "$home/state/big-task.status"
+  fakebin=$(make_fakebin "$home")
+  assert_both_tasks_present "$home" "$fakebin" "oversized status line" "$out_file"
+  out=$(cat "$out_file")
+  printf '%s' "$out" | jq -e --argjson n "$OVERSIZED_VALUE_BYTES" '
+    .tasks[] | select(.id == "big-task")
+    | .paths.status_log.last_event.state == "working"
+      and (.paths.status_log.last_event.raw | length) == ($n + 9)
+      and (.paths.status_log.last_event.note | length) == $n
+      and (.paths.status_log.last_event.note | endswith("-TAIL"))
+      and (.hints.last_event_text | endswith("-TAIL"))
+  ' >/dev/null || fail "an oversized status line must round-trip byte for byte"
+  pass "an oversized status line is carried, never silently dropped"
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -863,6 +963,8 @@ test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
 test_oversized_backlog_survives_argv_limit
+test_oversized_task_metadata_is_carried
+test_oversized_status_line_is_carried
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
