@@ -440,6 +440,57 @@ EOF
   pass "snapshot includes durable scout reports after teardown"
 }
 
+# Linux caps one argv element at MAX_ARG_STRLEN (128 KiB), so a real backlog
+# that outgrows that cap must still snapshot: the aggregates have to reach jq
+# through files rather than through --argjson.
+ARGV_ELEMENT_CAP=131072
+
+write_oversized_backlog() {  # <home> - a backlog whose derived JSON clears the cap
+  local home=$1 i=0
+  {
+    printf '## In flight\n'
+    printf -- '- [ ] live-task - Live Task (repo: alpha) (kind: ship) (since 2026-07-07)\n'
+    printf '\n## Done\n'
+    while [ "$i" -lt 900 ]; do
+      printf -- '- [x] done-%04d - Done Task %04d (repo: alpha) (kind: ship) (merged 2026-07-06)\n' "$i" "$i"
+      printf '  Body line for done-%04d adding durable bulk to the derived backlog aggregate, the way a real note under a landed row carries its own detail across a reconcile.\n' "$i"
+      i=$((i + 1))
+    done
+  } > "$home/data/backlog.md"
+}
+
+test_oversized_backlog_survives_argv_limit() {
+  local home fixture_bytes out summary
+  home=$(make_home oversized-backlog)
+  write_oversized_backlog "$home"
+  fixture_bytes=$(LC_ALL=C wc -c < "$home/data/backlog.md" | tr -d ' ')
+  [ "$fixture_bytes" -gt 204800 ] \
+    || fail "oversized fixture must exceed 200KB, got $fixture_bytes bytes"
+
+  out=$(FM_HOME="$home" "$SNAPSHOT" --json) \
+    || fail "--json must survive a backlog larger than the per-argument cap"
+  printf '%s' "$out" | jq -e . >/dev/null \
+    || fail "--json output must stay valid JSON on an oversized backlog"
+  # Without this the case could pass vacuously if the derived aggregate ever
+  # shrank back under the cap it is meant to exercise.
+  printf '%s' "$out" | jq -e --argjson cap "$ARGV_ELEMENT_CAP" '
+    (.backlog | tojson | length) > $cap
+      and (.backlog.records | length) == 901
+      and .main_inventory.orphan_in_flight == ["live-task"]
+  ' >/dev/null || fail "oversized backlog must stay over the cap and parse completely"
+
+  summary=$(FM_HOME="$home" "$SNAPSHOT" --secondmate-home-summary) \
+    || fail "--secondmate-home-summary must survive a backlog larger than the cap"
+  printf '%s' "$summary" | jq -e --argjson cap "$ARGV_ELEMENT_CAP" '
+    .schema == "fm-secondmate-home-summary.v1"
+      and .valid == false
+      and .invalidity.kind == "orphan_in_flight"
+      and .counts.landed == 900
+      and (.landed | length) == 10
+  ' >/dev/null || fail "oversized home summary wrong: $(printf '%s' "$summary" | head -c 400)"
+  pass "both snapshot modes survive a backlog past the per-argument cap"
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -811,6 +862,7 @@ test_open_decision_clears_on_keyed_resolution
 test_completed_scout_report_is_pointer_not_pending
 test_parked_scout_decision_stays_pending
 test_scout_reports_include_teardown_reports
+test_oversized_backlog_survives_argv_limit
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status
