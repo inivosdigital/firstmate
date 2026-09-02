@@ -591,6 +591,61 @@ test_oversized_status_line_is_carried() {
   pass "an oversized status line is carried, never silently dropped"
 }
 
+# A staged write can fail for reasons this script does not control - a full
+# disk, a temp directory someone else owns - and a helper that reports that
+# failure is only useful if its caller stops. The shim below hands the snapshot
+# a private directory in which one named slot already exists as a directory, so
+# exactly one staged write fails while every other one succeeds.
+make_stage_sabotage_bin() {  # <dir> - a PATH entry whose mktemp poisons one slot
+  local fb real
+  fb=$1/sabotage-bin
+  mkdir -p "$fb"
+  real=$(command -v mktemp)
+  cat > "$fb/mktemp" <<SH
+#!/usr/bin/env bash
+set -u
+case "\$*" in
+  *fm-fleet-snapshot.XXXXXX*)
+    rm -rf "\$FM_TEST_STAGE_DIR"
+    mkdir -p "\$FM_TEST_STAGE_DIR/\$FM_TEST_STAGE_SLOT" || exit 1
+    printf '%s\n' "\$FM_TEST_STAGE_DIR"
+    ;;
+  *) exec $real "\$@" ;;
+esac
+SH
+  chmod +x "$fb/mktemp"
+  printf '%s' "$fb"
+}
+
+test_helper_stage_failure_fails_the_read() {
+  local home fakebin sabotage stage slot mode out rc
+  home=$(make_home stage-failure)
+  write_two_task_home "$home"
+  fakebin=$(make_fakebin "$home")
+  sabotage=$(make_stage_sabotage_bin "$TMP_ROOT")
+  stage="$TMP_ROOT/stage-failure-tmp"
+  # Control first: with nothing poisoned the shim still yields a whole read, so
+  # a later refusal is the injected fault and not the shim itself.
+  out=$(PATH="$sabotage:$fakebin:$PATH" FM_HOME="$home" \
+    FM_TEST_STAGE_DIR="$stage" FM_TEST_STAGE_SLOT=unpoisoned "$SNAPSHOT" --json) \
+    || fail "staged-write control: an unpoisoned run must still succeed"
+  printf '%s' "$out" | jq -e '(.tasks | length) == 1' >/dev/null \
+    || fail "staged-write control: the fixture must produce one task row"
+  for slot in raw.cs.raw raw.se.raw; do
+    for mode in --json --secondmate-home-summary; do
+      out=$(PATH="$sabotage:$fakebin:$PATH" FM_HOME="$home" \
+        FM_TEST_STAGE_DIR="$stage" FM_TEST_STAGE_SLOT="$slot" \
+        "$SNAPSHOT" "$mode" 2>/dev/null)
+      rc=$?
+      [ "$rc" -ne 0 ] \
+        || fail "$slot $mode: a failed staged write must fail the read, not default the row"
+      [ -z "$out" ] \
+        || fail "$slot $mode: a failed staged write must emit no output, got: $out"
+    done
+  done
+  pass "a failed staged write fails the read instead of defaulting a row"
+}
+
 test_backlog_tasks_axi_forms_and_overrides() {
   local home data projects fakebin out view
   home=$(make_home overrides)
@@ -965,6 +1020,7 @@ test_scout_reports_include_teardown_reports
 test_oversized_backlog_survives_argv_limit
 test_oversized_task_metadata_is_carried
 test_oversized_status_line_is_carried
+test_helper_stage_failure_fails_the_read
 test_backlog_tasks_axi_forms_and_overrides
 test_view_renders_snapshot
 test_view_renders_dead_secondmate_agent_status

@@ -539,8 +539,11 @@ task_json_lines() {
       pr_source=absent
     fi
 
-    current_json=$(crew_state_json "$id")
-    event_json=$(status_event_json "$status_log")
+    # A helper that reports a staged-write failure only helps if its caller
+    # stops: an unchecked capture turns that failure into an empty string, and
+    # the row is then assembled with defaulted fields and reported as fact.
+    current_json=$(crew_state_json "$id") || return 1
+    event_json=$(status_event_json "$status_log") || return 1
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
@@ -1338,7 +1341,7 @@ secondmate_current_json() {  # <parent-tasks-json>
     status_file=$(printf '%s' "$task" | jq -r '.paths.status_log.path // ""')
     event_raw=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.raw // ""')
     event_note=$(printf '%s' "$task" | jq -r '.paths.status_log.last_event.note // ""')
-    activity_scan=$(bounded_parent_activities_json "$status_file")
+    activity_scan=$(bounded_parent_activities_json "$status_file") || return 1
     activities=$(printf '%s' "$activity_scan" | jq -c '.records')
     decisions=$(printf '%s' "$task" | jq -c '.hints.open_decisions // []')
     event_epoch=$(file_mtime_epoch "$status_file")
@@ -1437,7 +1440,7 @@ secondmate_current_json() {  # <parent-tasks-json>
       if [ "$summary_valid" != true ]; then
         current_reason="structured home state invalid: $(printf '%s' "$summary" | jq -r '.reason // "unknown reason"')"
       fi
-      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions")
+      reconciliation=$(parent_evidence_reconciliation_json "$summary" "$activities" "$decisions") || return 1
       contradiction=$(printf '%s' "$reconciliation" | jq -r '.contradiction')
       # The note being matched is a status line, so it reaches jq by file like
       # every other status-supplied string; stage_row_strings restages it below.
@@ -1445,7 +1448,7 @@ secondmate_current_json() {  # <parent-tasks-json>
       terminal_contradiction=$(printf '%s' "$reconciliation" | jq -r --rawfile note "$RAW.row.event_note" '
         any(.activities[]; .verdict == "contradicts" and .summary == $note)')
       if [ "$terminal_contradiction" = true ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" true)
+        terminal=$(terminal_evidence_json "$task" "$event_note" true) || return 1
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no useful contradiction check",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
@@ -1492,7 +1495,7 @@ secondmate_current_json() {  # <parent-tasks-json>
         freshness=unknown
       fi
       if [ -n "$event_raw" ]; then
-        terminal=$(terminal_evidence_json "$task" "$event_note" false)
+        terminal=$(terminal_evidence_json "$task" "$event_note" false) || return 1
       else
         terminal=$(jq -n --arg observed "$SNAPSHOT_NOW" \
           '{provenance:"parent-direct-report-terminal",trust:"untrusted-supplement",captured:false,observed_at:$observed,freshness:"not-collected",reason:"no parent event to compare",lines:0,bytes:0,event_note_seen:false,contradiction:false}')
@@ -1590,7 +1593,8 @@ if [ "$OUTPUT_MODE" = secondmate-home-summary ]; then
   exit 0
 fi
 
-SCOUT_REPORTS_JSON=$(scout_report_lines)
+SCOUT_REPORTS_JSON=$(scout_report_lines) \
+  || { echo "fm-fleet-snapshot: scout report scan failed" >&2; exit 1; }
 MAIN_INVENTORY_JSON=$(main_inventory_json "$BACKLOG_JSON" "$TASKS_JSON") \
   || { echo "fm-fleet-snapshot: main inventory summary failed" >&2; exit 1; }
 SECONDMATE_CURRENT_JSON=$(secondmate_current_json "$TASKS_JSON") \
