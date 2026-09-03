@@ -1319,7 +1319,9 @@ launch_template() {
     # Do not copy the primary's two-var form (WINDOW=1000000 + PCT_OVERRIDE=20):
     # that pair assumes a 1M window and is not safe for a harness/account
     # combination with a smaller one. See the harness-adapters skill's claude
-    # section for the dated /context verification.
+    # section for the dated /context verification. This template only ever sets
+    # WINDOW, never PCT_OVERRIDE - the assembly step below explicitly clears any
+    # inherited PCT_OVERRIDE so ambient environment cannot reintroduce it.
     claude) printf '%s' 'CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude --dangerously-skip-permissions __MODELFLAG____EFFORTFLAG__"$(__OPINPUT__ encode launch-brief < __BRIEF__)"' ;;
     codex)
       if [ "$kind" = secondmate ]; then
@@ -3162,7 +3164,27 @@ case "$HARNESS" in
 esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
-  claude|codex|opencode|pi|pi-signed|grok|kimi|muse)
+  # claude gets two extra clears codex/opencode/pi/grok/kimi/muse do not need,
+  # because only claude's own launch_template case reads either var's name and
+  # only claude workers inherit them from firstmate's own primary process.
+  # CLAUDE_AUTOCOMPACT_PCT_OVERRIDE is the primary's auto-compact percentage
+  # override, paired in its own .claude/settings.local.json with a 1M-token
+  # window (see the launch_template comment above). Ordinary environment
+  # inheritance through the launching daemon carries it onto every claude
+  # worker regardless of that pairing, silently shrinking a worker's
+  # 300000-token window by that percentage instead of leaving the launch's own
+  # intent in place, and thrashing a worker whose task needs more than the
+  # shrunk fraction. CLAUDE_CODE_CHILD_SESSION marks firstmate's own primary as
+  # a subagent child; inherited the same way, it makes a worker think it is a
+  # subagent too and skip transcript persistence, breaking `claude --resume`
+  # crash recovery. Clearing both here, at the one place every claude launch
+  # line is assembled, makes the launch not depend on what happens to be in the
+  # launching shell or daemon's environment - fm-spawn-pct-override-leak,
+  # data/learnings.md (2026-09-03).
+  claude)
+    LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDE_AUTOCOMPACT_PCT_OVERRIDE -u CLAUDE_CODE_CHILD_SESSION $LAUNCH"
+    ;;
+  codex|opencode|pi|pi-signed|grok|kimi|muse)
     LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS $LAUNCH"
     ;;
 esac

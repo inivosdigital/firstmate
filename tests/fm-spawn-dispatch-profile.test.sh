@@ -138,7 +138,7 @@ test_no_profile_keeps_claude_profile_defaults() {
   assert_meta_profile "$HOME_DIR/state/$id.meta" claude default default
 
   launch=$(cat "$LAUNCH_LOG")
-  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDE_AUTOCOMPACT_PCT_OVERRIDE -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
   [ "$launch" = "$expected" ] || fail "no-profile claude launch changed"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and keeps the claude launch env prefix and canonical launch-brief encoding intact"
 }
@@ -157,6 +157,48 @@ test_non_cursor_launch_clears_inherited_cursor_markers() {
   assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS" \
     "non-cursor launch must clear both inherited Cursor identity markers"
   pass "non-cursor launches clear inherited Cursor identity markers"
+}
+
+# fm-spawn-pct-override-leak (data/learnings.md, 2026-09-03): the primary's own
+# CLAUDE_AUTOCOMPACT_PCT_OVERRIDE and CLAUDE_CODE_CHILD_SESSION reach every claude
+# worker through ordinary environment inheritance from the launching daemon,
+# shrinking a worker's effective compaction window to a fraction of the intended
+# 300000 and breaking crash-recovery transcript persistence. Reproduce that exact
+# inheritance, then prove the RESOLVED worker environment - not just the captured
+# prefix text - never carries either var, by actually running the captured launch
+# line with a stub claude that dumps its own environment.
+test_claude_launch_strips_inherited_autocompact_pct_override_and_child_session() {
+  local rec id out status launch envfile resolved
+  id=profile-claude-autocompact-leak-z1c
+  rec=$(make_spawn_case profile-claude-autocompact-leak claude "$id")
+  read_case_record "$rec"
+
+  out=$(CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=30 CLAUDE_CODE_CHILD_SESSION=1 \
+    run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR")
+  status=$?
+  expect_code 0 "$status" "claude spawn under an inherited PCT_OVERRIDE/CHILD_SESSION should still succeed"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDE_AUTOCOMPACT_PCT_OVERRIDE -u CLAUDE_CODE_CHILD_SESSION" \
+    "claude launch must clear both inherited primary-only markers"
+
+  envfile="$CASE_DIR/resolved.env"
+  cat > "$FAKEBIN_DIR/claude" <<SH
+#!/usr/bin/env bash
+env > '$envfile'
+SH
+  chmod +x "$FAKEBIN_DIR/claude"
+  PATH="$FAKEBIN_DIR:$PATH" CLAUDE_AUTOCOMPACT_PCT_OVERRIDE=30 CLAUDE_CODE_CHILD_SESSION=1 \
+    bash -c "$launch" >/dev/null
+  resolved=$(cat "$envfile")
+  case "$resolved" in
+    *CLAUDE_AUTOCOMPACT_PCT_OVERRIDE*) fail "resolved worker environment still carries CLAUDE_AUTOCOMPACT_PCT_OVERRIDE" ;;
+  esac
+  case "$resolved" in
+    *CLAUDE_CODE_CHILD_SESSION*) fail "resolved worker environment still carries CLAUDE_CODE_CHILD_SESSION" ;;
+  esac
+  assert_contains "$resolved" "CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000" \
+    "resolved worker environment lost its own intended compaction window"
+  pass "claude launch strips inherited CLAUDE_AUTOCOMPACT_PCT_OVERRIDE and CLAUDE_CODE_CHILD_SESSION from the resolved worker environment"
 }
 
 test_relative_home_overrides_launch_with_absolute_cross_process_paths() {
@@ -799,7 +841,7 @@ test_claude_forwards_firstmate_config_dir_when_set() {
   status=$?
   expect_code 0 "$status" "claude spawn with CLAUDE_CONFIG_DIR set should succeed"
   launch=$(cat "$LAUNCH_LOG")
-  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude" \
+  assert_contains "$launch" "CLAUDE_CONFIG_DIR='/opt/test/claude-work' env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u CLAUDE_AUTOCOMPACT_PCT_OVERRIDE -u CLAUDE_CODE_CHILD_SESSION CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 claude" \
     "claude launch did not forward firstmate's CLAUDE_CONFIG_DIR to the crewmate pane"
   pass "claude forwards firstmate's CLAUDE_CONFIG_DIR so the crewmate uses the same credential store"
 }
@@ -857,6 +899,7 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 
 test_no_profile_keeps_claude_profile_defaults
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_claude_launch_strips_inherited_autocompact_pct_override_and_child_session
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
