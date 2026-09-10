@@ -134,6 +134,7 @@ state/               runtime records and signals; gitignored
   public-followup/   generated private transport for promised public replies: retained open-loop registrations, typed terminal-result inbox, accepted/rejected ledgers, and retirement receipts (section 14; bin/fm-public-followup.sh)
   x-poll.error x-poll.claim-error  generated Relay and offer-claim diagnostic dedupe markers
   .startup-network.*  status, report, per-step elapsed timings, inline-print claim, and lock for the deferred network stage session start runs off its blocking path; bin/fm-startup-network.sh
+  upstream-sync/     scheduled upstream-template sweep records; written only by bin/fm-upstream-sync.sh, which detects drift and queues one de-duplicated reconciliation request but never merges, spawns, or writes the backlog (docs/configuration.md "Upstream drift watch")
   tmp-sweep.log      generated /tmp sweep removal/skip log, tab-separated, capped at 5000 lines (docs/configuration.md "/tmp sweep and cleanup"; bin/fm-tmp-sweep.sh); machine-scoped, only the primary checkout runs the sweep
   .wake-queue        durable queued wakes retained until post-handling acknowledgement: epoch<TAB>seq<TAB>kind<TAB>key<TAB>payload
   .watcher-down      private generation-bound recovery state coupling watcher downtime, durable wake presentation, and post-handling acknowledgement; never touch
@@ -584,6 +585,7 @@ These skills are not captain-invocable; load them only at their precise triggers
 - `fmx-respond` - load on an `x-mention <request_id>` `check:` wake to handle the mention, on an `x-mode-error ...` `check:` wake to report the Relay configuration blocker, on a `public-followup ...` `check:` wake or a startup-surfaced public commitment, and on any milestone or terminal wake for a Relay-linked task before posting its completion follow-up; relevant only when Relay is on.
 - `firstmate-codexapp` - load before coordinating a visible Codex Desktop thread, evaluating a Codex App backend request, or reconciling Codex Desktop host-tool smoke evidence for Firstmate work.
 - `firstmate-coding-guidelines` - load before changing firstmate's shared, tracked material, as defined by section 1's list, whether editing directly or briefing a crewmate for a firstmate-repo task.
+- `upstream-reconciliation` - load on an `[upstream-sync:intake]` inbox note, when the captain asks to reconcile the read-only upstream template, and before dispatching or working the `upstream-drift-alert` backlog item.
 - `verify-trivial` - load before authoring or filling in a Light-tier brief's Task section (a brief scaffolded with `bin/fm-brief.sh --light-verify`, section 11) and before advancing such a task to PR-ready.
 
 ## 14. Relay

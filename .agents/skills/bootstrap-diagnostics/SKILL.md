@@ -86,5 +86,6 @@ When any diagnostic needs captain attention, report the plain consequence and re
   It prints every session; record it silently like any capability fact and take no action while the wording stays FYI.
   It only reports - the network fetch that refreshes the ref runs in the locked fleet-sync sweep, and reconciling upstream is never a bootstrap side effect.
 - `UPSTREAM_DRIFT: this repo's upstream sync needs attention - ...` - the escalated variant (local main more than ~30 commits behind `upstream/main`, or the merge-base older than 10 days).
+  The reconciliation procedure itself is owned by the `upstream-reconciliation` skill; the scheduled sweep in `bin/fm-upstream-sync.sh` raises the same work as an `[upstream-sync:intake]` inbox note.
   Surface it to the captain in plain outcome language and, on their go-ahead, dispatch a deliberately-reviewed firstmate-repo reconciliation ship task - fetch `upstream`, merge it into local `main`, resolve conflicts, and land local-only (`AGENTS.md` section 1) - the same shape that reconciled the divergence before.
   Never automate the merge; keeping the gap small also keeps the pipeline's opportunistic upstream PR's diff clean (`AGENTS.md` section 1).

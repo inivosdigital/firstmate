@@ -237,6 +237,10 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/upstream-reconciliation/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/verify-trivial/SKILL.md",
       "audience": "agent-runtime"
     },
@@ -342,6 +346,10 @@
     },
     {
       "path": "docs/examples/tmp-alert-threshold",
+      "audience": "operator-example"
+    },
+    {
+      "path": "docs/examples/upstream-semantic-merge-fixture.sh",
       "audience": "operator-example"
     },
     {

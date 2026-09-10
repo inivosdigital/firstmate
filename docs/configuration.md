@@ -296,6 +296,30 @@ The wording escalates to `UPSTREAM_DRIFT: this repo's upstream sync needs attent
 Either way the line only reports - reconciling upstream (fetch, merge into local `main`, resolve conflicts, land local-only) stays a deliberately dispatched, reviewed ship task, never automated.
 It is a no-op without an `upstream` remote, an `upstream/main` ref, or a local `main` branch.
 
+`bin/fm-upstream-sync.sh` is the scheduled half of the same watch, and it is separate from that session FYI in every respect: it fetches, it runs from cron rather than from a session, and it has no thresholds, because its job is daily review preparation rather than a nag past a limit.
+A sweep fetches under a bound, records the outcome durably under `state/upstream-sync/`, and queues at most one reconciliation request.
+No new upstream commits is a success recorded as `result=no-change`; a fetch that fails or times out is recorded as a failure with its own reason and never reports no-change, so an offline host is never mistaken for a synchronized fork.
+The first failure of an episode is announced once and later identical failures stay durable without re-announcing, which keeps a week offline from becoming a week of noise.
+
+Intake de-duplication reads the existing owners rather than keeping a second copy of the task's state: an upstream head this routine already reported, a still-unacknowledged intake note in the inbox, or a filed and unheld backlog item under the reconciliation id (`upstream-drift-alert` by default) each suppress a new request.
+A pending failure note is deliberately not one of them, so a stuck error report never stands in for a reconciliation request that was never made.
+A HELD item is also not one of them: suppressing on a hold would leave the sweep inert for as long as the hold stands, and converting a held reminder into one actionable request is the point of the routine.
+That is reporting only, and the sweep has no authority over the hold - the same id can be held as a legacy drift reminder or as a landing or decision gate on a reconciliation already under review, so the note repeats the hold's own recorded kind, reason and date verbatim and routes the reader to `captain-hold-lifecycle` rather than asking for a release.
+The head check still bounds a held item to one note per upstream head.
+When the backlog backend cannot be read at all, that is recorded and said in the note as `unknown` rather than assumed to mean nothing is filed.
+A scheduled sweep holds no session lock, so it never writes the backlog itself - it queues a note and firstmate files the item.
+The reconciliation that follows is agent work, not cron work; `.agents/skills/upstream-reconciliation/SKILL.md` owns that procedure.
+
+Install or migrate the schedule with `bin/fm-upstream-sync.sh install-cron` (add `--dry-run` to see the exact crontab it would write first).
+It replaces the legacy `~/.local/bin/fm-upstream-drift-check.sh` job, preserves every unrelated crontab entry byte-for-byte, is idempotent across repeated runs, names every line it removed, and reports whatever reconciliation backlog item already exists rather than silently taking it over.
+A job is matched by command structure, not by naming a file: the schedule fields and any inline `VAR=value` prefix are skipped and the command word's basename must be exactly the managed or legacy script, so a backup job or environment assignment that merely mentions one of those names survives, and a surviving mention is reported as something to check by hand.
+`crontab -l` exits non-zero both for a user with no crontab and for a spool read failure, so only the known no-crontab wording is treated as an established empty crontab; anything else refuses to install rather than replacing entries this run could not read.
+The installed line carries an explicit `PATH`, scoped to that one command rather than written as a crontab-wide assignment that would change unrelated jobs, because cron's own minimal PATH would not find a node-managed `tasks-axi` and every sweep would then report the backlog as unreadable.
+That PATH is the installing shell's own, reduced to the directories that actually provide something a sweep needs - `git`, the coreutils it calls, `tasks-axi`, `gh-axi`, and the repository's configured git credential helper - kept in their original order, which drops the duplication a nested agent host accumulates without substituting guessed platform directories for working ones.
+Before anything is written, the resulting PATH is resolved the way cron resolves it (`/bin/sh` with a cron-shaped environment); a PATH that cannot resolve a required binary refuses the install, and an optional tool it cannot resolve is reported with what the sweep loses. `FM_UPSTREAM_SYNC_CRON_PATH` overrides the whole calculation and is verified the same way.
+The installed line appends to `state/upstream-sync/cron.log` instead of discarding its output, so a run that fails before the script can record anything still leaves evidence.
+`bin/fm-upstream-sync.sh status` prints the durable records without touching the network; the script's own header owns the exact flags, environment variables, and record fields.
+
 ## Away-mode wedge alarm channels (config/wedge-alarm)
 
 When away-mode injection wedges past `FM_MAX_DEFER_SECS`, the sub-supervisor raises a loud, rate-limited alarm.
