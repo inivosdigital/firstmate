@@ -17,6 +17,14 @@
 #   ask     Answer a side question with a one-shot model call that never touches
 #           firstmate, the backlog, or the wake queue. A side question is not
 #           fleet work and must not become fleet work.
+#   wake    Re-announce a note that is SAVED but was never announced. `note`
+#           writes the record before it appends the wake and exits non-zero if
+#           that append fails, so a note can sit here with nothing in the wake
+#           queue pointing at it and firstmate never learning it exists. Nothing
+#           else in the fleet retries that: the watcher re-rings WORKER steering
+#           inboxes, not these. This is the retry for exactly that state. It
+#           announces an EXISTING pending note and writes no new record, so it
+#           can never turn a delivery failure into a duplicate request.
 #
 # Usage:
 #   fm-inbox.sh note <text>...          | fm-inbox.sh note -   (body from stdin)
@@ -24,6 +32,7 @@
 #   fm-inbox.sh status
 #   fm-inbox.sh ask  <question>...
 #   fm-inbox.sh list
+#   fm-inbox.sh wake <id>
 #   fm-inbox.sh drain [--ack <id>...]
 #
 # Configuration. A region, a model id and an AWS profile name somebody's account
@@ -41,7 +50,7 @@
 # An absent profile means the call uses whatever credentials are already in the
 # environment, which is also what FM_INBOX_PROFILE= (empty) forces.
 #
-# `note`, `status`, `list` and `drain` need NO configuration at all, because they
+# `note`, `status`, `list`, `wake` and `drain` need NO configuration at all, because they
 # make no model call. The voice handover depends on `note`, so it keeps working in
 # a home that has configured nothing.
 #
@@ -49,7 +58,7 @@
 #   FM_HOME              operational home whose state/ and data/ are used.
 #
 # PRIVACY: `say` sends your audio and `ask` sends your question to Bedrock.
-# `note`, `status`, `list` and `drain` make no network call at all.
+# `note`, `status`, `list`, `wake` and `drain` make no network call at all.
 #
 # `note` is also the queueing half of the spoken interface: when the voice agent
 # in bin/fm-voice-relay.py hands real work over to firstmate, it runs this
@@ -149,18 +158,51 @@ aws_call() {
 
 # ---------------------------------------------------------------- note
 
-# Append exactly one wake so firstmate picks the note up at its next drain.
-# Failure to wake is NOT allowed to lose the note: the record is already on
-# disk, so we report the wake failure and still exit non-zero loudly.
-wake_for() {
-  local id=$1 summary=$2 lib="$FM_ROOT/bin/fm-wake-lib.sh"
+# Loaded once and shared by every wake path below, so the wake payload and the
+# queue it lands in keep exactly one owner.
+load_wake_lib() {
+  local lib="$FM_ROOT/bin/fm-wake-lib.sh"
+  command -v fm_wake_append >/dev/null 2>&1 && return 0
   if [ ! -r "$lib" ]; then
     printf 'fm-inbox: note saved but NOT announced (missing %s)\n' "$lib" >&2
     return 1
   fi
   # shellcheck source=/dev/null
   FM_ROOT_OVERRIDE="$FM_ROOT" FM_HOME="$FM_HOME" STATE="$STATE" . "$lib"
+}
+
+# Append exactly one wake so firstmate picks the note up at its next drain.
+# Failure to wake is NOT allowed to lose the note: the record is already on
+# disk, so we report the wake failure and still exit non-zero loudly.
+wake_for() {
+  local id=$1 summary=$2
+  load_wake_lib || return 1
   fm_wake_append check "inbox:$id" "check: captain inbox note $id - $summary"
+}
+
+# True when a wake for this note is already queued and unacknowledged, so a
+# retry adds nothing. The durable queue is the authority on that, not this
+# script's memory of what it once appended.
+wake_already_queued() {
+  local id=$1 keys
+  load_wake_lib || return 1
+  keys=$(fm_wake_queued_keys check 2>/dev/null) || return 1
+  # Matched without a pipeline: a `grep -q` that exits on its first hit can
+  # SIGPIPE the producer, and under pipefail that reads as "no match".
+  case "
+$keys
+" in
+    *"
+inbox:$id
+"*) return 0 ;;
+  esac
+  return 1
+}
+
+# The one-line summary the wake payload carries, from the note's own body.
+note_summary() {
+  sed -n '/^--$/,$p' "$1" | tail -n +2 | tr '\n\t' '  ' \
+    | sed 's/[[:space:]]*$//' | cut -c1-100
 }
 
 queue_note() {
@@ -185,7 +227,7 @@ queue_note() {
   mv "$tmp" "$INBOX/$id.note"
 
   # One-line summary for the wake payload; the full body stays in the file.
-  summary=$(printf '%s' "$body" | tr '\n\t' '  ' | cut -c1-100)
+  summary=$(note_summary "$INBOX/$id.note")
   printf 'queued %s\n' "$id"
   printf '  %s\n' "$summary"
   if wake_for "$id" "$summary"; then
@@ -343,6 +385,33 @@ PY
     || die "ask failed"
 }
 
+# ---------------------------------------------------------------- wake
+
+cmd_wake() {
+  local id=${1:-} note summary
+  [ -n "$id" ] || die "usage: fm-inbox.sh wake <id>"
+  case "$id" in
+    *[!A-Za-z0-9._-]*|.|..) die "invalid note id: $id" ;;
+  esac
+  note="$INBOX/$id.note"
+  # A note that is gone has either been acknowledged or was never written, and
+  # in both cases there is nothing here to announce. Say which rather than
+  # inventing a record to wake firstmate for.
+  [ -f "$note" ] || die "no pending note $id (already acknowledged, or never saved)"
+  if wake_already_queued "$id"; then
+    printf 'already-announced %s\n' "$id"
+    return 0
+  fi
+  summary=$(note_summary "$note")
+  printf 'announcing %s\n' "$id"
+  printf '  %s\n' "$summary"
+  if wake_for "$id" "$summary"; then
+    printf '  firstmate will pick this up at its next check.\n'
+  else
+    die "note $id is saved at $note but firstmate was NOT woken"
+  fi
+}
+
 # ---------------------------------------------------------------- list / drain
 
 cmd_list() {
@@ -385,6 +454,7 @@ case "${1:-}" in
   status) shift; cmd_status ;;
   ask)    shift; cmd_ask "$@" ;;
   list)   shift; cmd_list ;;
+  wake)   shift; cmd_wake "$@" ;;
   drain)  shift; cmd_drain "$@" ;;
   ''|-h|--help|help)
     # The whole header block, found rather than counted: everything after the

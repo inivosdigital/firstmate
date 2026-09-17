@@ -514,6 +514,216 @@ test_unpublishable_intake_is_retried_by_the_next_sweep() {
   pass "an interrupted intake publication is retried, not silently dropped"
 }
 
+# --- saved versus announced -------------------------------------------------
+
+# Break only the WAKE. bin/fm-inbox.sh writes the note record first and appends
+# the wake second, so this is the real shape of the failure: the note exists,
+# firstmate was never told, and nothing else in the fleet retries an unwoken
+# captain note. Counting that note as "a request is already waiting" is what
+# turns a detection routine permanently silent.
+break_wake_queue() { mkdir -p "$1/home/state/.wake-queue"; }
+repair_wake_queue() { rmdir "$1/home/state/.wake-queue" 2>/dev/null || true; }
+
+test_saved_but_unannounced_intake_is_reannounced_not_counted_as_delivered() {
+  local world sync out status saved
+  world=$(make_world intake-unannounced)
+  sync=$(state_of "$world")
+  upstream_commit "$world" upstream-one
+  break_wake_queue "$world"
+  set +e
+  out=$(sweep "$world")
+  status=$?
+  set -e
+  repair_wake_queue "$world"
+
+  expect_code 2 "$status" "an intake note that could not be announced"
+  [ "$(wake_count "$world")" = 0 ] || fail "a wake was queued despite the broken queue"
+  [ -f "$sync/last-intake" ] && fail "last-intake claimed a request firstmate was never woken for"
+  [ -f "$sync/unannounced-intake" ] || fail "the saved-but-silent note was not recorded for retry"
+  saved=$(record_field "$sync/unannounced-intake" note)
+  [ -n "$saved" ] || fail "the retry record does not name the saved note"
+  [ -f "$world/home/state/inbox/$saved.note" ] || fail "the saved note is not in the inbox"
+
+  # The next sweep must re-announce THAT note, not publish a second copy of it
+  # and not report a quiet success over it.
+  out=$(sweep "$world") || fail "the recovery sweep failed: $out"
+  assert_contains "$out" "recovered" "the recovery sweep says it announced the saved note"
+  [ "$(wake_count "$world")" -ge 1 ] || fail "the saved note is still unannounced"
+  [ "$(record_field "$sync/last-intake" note)" = "$saved" ] \
+    || fail "the receipt does not point at the note that was actually announced"
+  [ -f "$sync/unannounced-intake" ] && fail "the retry record survived a successful announcement"
+  [ "$(grep -lF '[upstream-sync:intake]' "$world"/home/state/inbox/*.note | wc -l)" = 1 ] \
+    || fail "recovery published a duplicate intake note instead of announcing the saved one"
+  pass "a saved but unannounced intake is re-announced instead of counted as delivered"
+}
+
+# --- execution bounds -------------------------------------------------------
+
+# The fetch is not the only thing that waits. A backlog read has no deadline of
+# its own and runs while this sweep holds the lock every later sweep needs.
+test_a_stalled_backlog_read_is_bounded() {
+  local world out fakebin started elapsed body
+  world=$(make_world backlog-stall)
+  fakebin=$(fm_fakebin "$world")
+  cat > "$fakebin/tasks-axi" <<'SH'
+#!/usr/bin/env bash
+sleep 120
+SH
+  chmod +x "$fakebin/tasks-axi"
+  : > "$world/home/data/backlog.md"
+  upstream_commit "$world" upstream-one
+  started=$(date +%s)
+  out=$(sweep "$world" PATH="$fakebin:$PATH" \
+    FM_UPSTREAM_SYNC_STEP_TIMEOUT=2 FM_UPSTREAM_SYNC_FETCH_KILL_GRACE=2) \
+    || fail "a stalled backlog read stopped the sweep entirely: $out"
+  elapsed=$(( $(date +%s) - started ))
+
+  [ "$elapsed" -lt 60 ] || fail "the sweep ran ${elapsed}s on a backlog read with a 2s bound"
+  assert_contains "$out" "intake-published" "a stalled backlog read did not suppress the request"
+  [ "$(record_field "$(state_of "$world")/last-success" backlog_item)" = unknown ] \
+    || fail "a backlog read that never answered was recorded as a definite state"
+  body=$(cat "$world"/home/state/inbox/*.note)
+  assert_contains "$body" "could not be read" "the note discloses that the backlog was not checked"
+  pass "a backlog read that never answers is bounded and disclosed, not waited on"
+}
+
+# The other unbounded wait: appending the wake takes the shared queue lock, and
+# fm_lock_acquire_wait has no deadline. A sweep stuck there holds its own lock
+# too, so every later scheduled run is blocked out behind it.
+test_a_contended_wake_queue_is_bounded_and_the_sweep_lock_is_released() {
+  local world sync out status started elapsed holder
+  world=$(make_world queue-lock-contention)
+  sync=$(state_of "$world")
+  upstream_commit "$world" upstream-one
+  mkdir -p "$world/home/state"
+  # A live process holding the real lock through the real library, not a
+  # hand-made lock directory that the owner might reclaim as stale.
+  # shellcheck disable=SC2016 # $0/$1 must expand in the holder, not here.
+  env FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
+      FM_STATE_OVERRIDE="$world/home/state" bash -c '
+        . "$0/bin/fm-wake-lib.sh"
+        fm_lock_acquire_wait "$1"
+        sleep 45
+      ' "$ROOT" "$world/home/state/.wake-queue.lock" >/dev/null 2>&1 &
+  holder=$!
+  sleep 2
+
+  started=$(date +%s)
+  set +e
+  out=$(sweep "$world" FM_UPSTREAM_SYNC_STEP_TIMEOUT=2 FM_UPSTREAM_SYNC_FETCH_KILL_GRACE=2)
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  rm -rf "$world/home/state/.wake-queue.lock"
+
+  expect_code 2 "$status" "a sweep whose notification could not take the queue lock"
+  [ "$elapsed" -lt 60 ] || fail "the sweep waited ${elapsed}s on a contended queue lock"
+  assert_contains "$out" "FAILED" "a sweep that could not notify anyone reports a failure"
+  [ -f "$sync/last-failure" ] || fail "the blocked notification left no durable failure"
+  [ -f "$sync/last-success" ] && fail "a sweep that notified nobody recorded a success"
+
+  # And the lock it took is gone, so the next scheduled run is not locked out.
+  out=$(sweep "$world") || fail "the sweep after a bounded failure could not run: $out"
+  assert_not_contains "$out" "already running" \
+    "a bounded failure left the sweep lock behind for every later run"
+  pass "a contended wake queue is bounded, reported, and never strands the sweep lock"
+}
+
+# The whole operation is bounded, not only the fetch: a total budget smaller
+# than the fetch bound stops the run and says which bound it was.
+test_the_whole_sweep_is_bounded_not_only_the_fetch() {
+  local world out status sync fakebin started elapsed
+  world=$(make_world total-budget)
+  sync=$(state_of "$world")
+  fakebin=$(install_git_stub "$world" stall)
+  started=$(date +%s)
+  set +e
+  out=$(sweep "$world" PATH="$fakebin:$PATH" \
+    FM_UPSTREAM_SYNC_FETCH_TIMEOUT=120 FM_UPSTREAM_SYNC_TOTAL_TIMEOUT=2 \
+    FM_UPSTREAM_SYNC_FETCH_KILL_GRACE=2)
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+
+  expect_code 2 "$status" "a sweep that ran out of its total budget"
+  [ "$elapsed" -lt 60 ] || fail "a 2s sweep budget did not stop a 120s fetch after ${elapsed}s"
+  [ "$(record_field "$sync/last-failure" reason)" = sweep-timeout ] \
+    || fail "the total-budget stop was not recorded as sweep-timeout"
+  [ "$(note_count "$world")" = 1 ] \
+    || fail "a sweep that ran out of budget could not report why"
+  pass "the sweep budget bounds the whole operation, not just the fetch"
+}
+
+# An advertised compatibility path: a timeout(1) that rejects -k. Its plain form
+# sends SIGTERM and then waits forever, so it is no bound at all here.
+test_a_timeout_tool_without_kill_support_falls_back_to_the_escalating_bound() {
+  local world out status sync fakebin started elapsed
+  world=$(make_world no-kill-flag)
+  sync=$(state_of "$world")
+  fakebin=$(install_git_stub "$world" stall-hard)
+  cat > "$fakebin/timeout" <<SH
+#!/usr/bin/env bash
+# A timeout(1) that does not understand -k, the way older builds do not.
+[ "\${1:-}" = -k ] && exit 125
+exec /usr/bin/timeout "\$@"
+SH
+  chmod +x "$fakebin/timeout"
+  started=$(date +%s)
+  set +e
+  out=$(sweep "$world" PATH="$fakebin:$PATH" \
+    FM_UPSTREAM_SYNC_TIMEOUT_TOOL=timeout \
+    FM_UPSTREAM_SYNC_FETCH_TIMEOUT=2 FM_UPSTREAM_SYNC_FETCH_KILL_GRACE=2)
+  status=$?
+  set -e
+  elapsed=$(( $(date +%s) - started ))
+
+  expect_code 2 "$status" "a TERM-ignoring fetch under a timeout(1) without -k"
+  assert_contains "$out" "fetch-timeout" "the bound is still reported as a timeout"
+  [ "$(record_field "$sync/last-failure" reason)" = fetch-timeout ] \
+    || fail "last-failure did not record reason=fetch-timeout"
+  [ "$elapsed" -lt 30 ] || fail \
+    "a timeout without -k waited ${elapsed}s for a fetch that ignores SIGTERM"
+  pass "a timeout tool without -k uses the escalating fallback instead of waiting forever"
+}
+
+# --- configuration refusals -------------------------------------------------
+
+# The refusal lives inside a helper the sweep calls from a command substitution,
+# where errexit is suppressed. Swallowed, it becomes an empty tool name, the
+# silent fallback, and a clean-looking result.
+test_an_invalid_timeout_selector_refuses_instead_of_reporting_success() {
+  local world out status sync
+  world=$(make_world bad-selector)
+  sync=$(state_of "$world")
+  set +e
+  out=$(sweep "$world" FM_UPSTREAM_SYNC_TIMEOUT_TOOL=bogus)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "an unusable timeout selector"
+  assert_contains "$out" "must be auto, timeout, gtimeout or none" \
+    "the refusal names what the setting accepts"
+  assert_not_contains "$out" "no-change" "a refused run never reports a clean upstream"
+  [ -f "$sync/last-success" ] && fail "a refused run recorded a successful sweep"
+  pass "an invalid timeout selector refuses the run instead of reporting no-change"
+}
+
+test_an_invalid_bound_refuses_before_anything_runs() {
+  local world out status
+  world=$(make_world bad-bound)
+  set +e
+  out=$(sweep "$world" FM_UPSTREAM_SYNC_FETCH_TIMEOUT=soon)
+  status=$?
+  set -e
+
+  expect_code 1 "$status" "a non-numeric fetch bound"
+  assert_contains "$out" "whole number of seconds" "the refusal says what the value must be"
+  assert_absent "$(state_of "$world")" "a refused run created durable records"
+  pass "a bound that is not a number refuses before the sweep touches anything"
+}
+
 test_concurrent_sweeps_do_not_both_run() {
   local world fakebin out status sync
   world=$(make_world concurrent)
@@ -568,12 +778,32 @@ test_status_reports_records_without_touching_the_network() {
 
 # --- cron migration ---------------------------------------------------------
 
+# A legacy drift-check script that declares which checkout it serves. Ownership
+# is what lets install-cron tell this home's legacy job from another home's, so
+# the fixture has to carry that declaration the way the real script does.
+install_legacy_script() { # <world> <declared FM_ROOT> [dirname] -> echoes the path
+  local world=$1 root=$2 dir=${3:-legacy-bin} path
+  mkdir -p "$world/$dir"
+  path="$world/$dir/fm-upstream-drift-check.sh"
+  cat > "$path" <<SH
+#!/usr/bin/env bash
+set -euo pipefail
+FM_ROOT=$root
+TASK_ID=upstream-drift-alert
+exit 0
+SH
+  chmod +x "$path"
+  printf '%s\n' "$path"
+}
+
 # Written as exact bytes, including the two trailing blank lines, because
 # install-cron claims to preserve every unrelated line byte-for-byte and a
 # variable round-trip would quietly drop trailing newlines before the test
-# could check that claim.
-write_cron_fixture() { # <file>
-  cat > "$1" <<'CRON'
+# could check that claim. Only the legacy script path is interpolated; the
+# fixture contains no other shell metacharacter.
+write_cron_fixture() { # <file> <legacy script path>
+  local legacy=$2
+  cat > "$1" <<CRON
 TZ=America/New_York
 PATH=/home/orangepi/.local/bin:/usr/local/bin:/usr/bin:/bin
 
@@ -584,11 +814,11 @@ PATH=/home/orangepi/.local/bin:/usr/local/bin:/usr/bin:/bin
 15 4 * * 0 /home/orangepi/.local/bin/uiux-skill-drift-check.sh >/dev/null 2>&1
 
 # Daily firstmate upstream-template drift sweep (detection only)
-35 4 * * * /home/orangepi/.local/bin/fm-upstream-drift-check.sh >/dev/null 2>&1
+35 4 * * * $legacy >/dev/null 2>&1
 
 # Archive the old checker rather than run it
 LEGACY_TOOL=fm-upstream-drift-check.sh
-0 5 * * * cp /home/orangepi/.local/bin/fm-upstream-drift-check.sh /mnt/nas/backups/
+0 5 * * * cp $legacy /mnt/nas/backups/
 
 # Nightly WealthSync deploy
 30 2 * * * /home/orangepi/.local/bin/wealthsync-autodeploy.sh >/dev/null 2>&1
@@ -604,12 +834,13 @@ CRON
 #   unreadable  a backend failure: non-zero with nothing on either stream, the
 #               shape that must never be mistaken for an empty crontab
 install_crontab_stub() { # <world> [mode] -> echoes the fakebin
-  local world=$1 mode=${2:-fixture} fakebin store
+  local world=$1 mode=${2:-fixture} fakebin store legacy
   fakebin=$(fm_fakebin "$world")
   store="$world/crontab.txt"
   rm -f "$store" "$world/crontab.unreadable"
+  legacy=$(install_legacy_script "$world" "$world/fork")
   case "$mode" in
-    fixture) write_cron_fixture "$store" ;;
+    fixture) write_cron_fixture "$store" "$legacy" ;;
     none) : ;;
     unreadable) : > "$world/crontab.unreadable" ;;
     *) fail "unknown crontab stub mode: $mode" ;;
@@ -648,9 +879,10 @@ run_install() { # <world> <fakebin> [args...]
 }
 
 test_install_cron_preserves_unrelated_entries_and_is_idempotent() {
-  local world fakebin out installed second expected preserved
+  local world fakebin out installed second expected preserved legacy
   world=$(make_world cron-install)
   fakebin=$(install_crontab_stub "$world")
+  legacy="$world/legacy-bin/fm-upstream-drift-check.sh"
   out=$(run_install "$world" "$fakebin") || fail "install-cron failed: $out"
   installed=$(cat "$world/crontab.txt")
 
@@ -662,12 +894,18 @@ test_install_cron_preserves_unrelated_entries_and_is_idempotent() {
   assert_contains "$installed" "Weekly upstream-drift check for the pinned ui-ux-pro-max skill" \
     "the surviving job kept its own comment"
   assert_contains "$installed" "wealthsync-autodeploy.sh" "the nightly deploy survived"
-  assert_not_contains "$installed" "35 4 * * * /home/orangepi/.local/bin/fm-upstream-drift-check.sh" \
-    "the legacy job was removed"
+  assert_not_contains "$installed" "35 4 * * * $legacy >/dev/null" \
+    "the legacy job for this checkout was removed"
   assert_not_contains "$installed" "Daily firstmate upstream-template drift sweep" \
     "the legacy job's own comment was removed with it"
-  assert_contains "$installed" "35 4 * * * PATH='$CRON_PATH_FIXTURE' $world/fork/bin/fm-upstream-sync.sh sweep" \
+  assert_contains "$installed" "35 4 * * * PATH='$CRON_PATH_FIXTURE' " \
     "the managed line kept the legacy schedule and carries a usable PATH"
+  assert_contains "$installed" "$SYNC sweep" \
+    "the managed line invokes this checkout's own sweep by its real path"
+  assert_contains "$installed" "FM_HOME='$world/home'" \
+    "the managed line carries the operational home it was installed for"
+  assert_contains "$installed" "FM_ROOT_OVERRIDE='$world/fork'" \
+    "the managed line carries the checkout it was installed to sweep"
   assert_contains "$installed" "upstream-sync/cron.log" \
     "the managed line records its output instead of discarding it"
   assert_contains "$out" "migrated off the legacy" "the migration is reported"
@@ -676,7 +914,7 @@ test_install_cron_preserves_unrelated_entries_and_is_idempotent() {
   # An entry that merely NAMES the legacy script is not a scheduled call of it.
   assert_contains "$installed" "LEGACY_TOOL=fm-upstream-drift-check.sh" \
     "an environment assignment naming the legacy script survived"
-  assert_contains "$installed" "cp /home/orangepi/.local/bin/fm-upstream-drift-check.sh" \
+  assert_contains "$installed" "cp $legacy /mnt/nas/backups/" \
     "a backup job naming the legacy script survived"
   assert_contains "$out" "still mentions fm-upstream-drift-check.sh" \
     "a surviving mention of the legacy script is disclosed rather than assumed clean"
@@ -685,9 +923,11 @@ test_install_cron_preserves_unrelated_entries_and_is_idempotent() {
   # order, including the fixture's trailing blank lines.
   expected="$world/expected.txt"
   preserved="$world/preserved.txt"
-  write_cron_fixture "$expected"
-  sed -i '/^# Daily firstmate upstream-template drift sweep/d;
-          /^35 4 \* \* \* \/home\/orangepi\/\.local\/bin\/fm-upstream-drift-check\.sh/d' "$expected"
+  write_cron_fixture "$world/fixture.txt" "$legacy"
+  awk -v job="35 4 * * * $legacy >/dev/null 2>&1" '
+    $0 == job { next }
+    /^# Daily firstmate upstream-template drift sweep/ { next }
+    { print }' "$world/fixture.txt" > "$expected"
   head -n -2 "$world/crontab.txt" > "$preserved"
   diff -u "$expected" "$preserved" >/dev/null \
     || fail "unrelated crontab bytes were not preserved"$'\n'"$(diff -u "$expected" "$preserved")"
@@ -697,6 +937,87 @@ test_install_cron_preserves_unrelated_entries_and_is_idempotent() {
   [ "$installed" = "$second" ] || fail \
     "install-cron is not idempotent"$'\n'"--- first ---"$'\n'"$installed"$'\n'"--- second ---"$'\n'"$second"
   pass "install-cron preserves unrelated entries byte-for-byte, migrates the legacy job, and is idempotent"
+}
+
+# A user crontab is shared by every job this user has, including a SECOND
+# firstmate home's own sweep. Matching on "the same script name plus sweep"
+# deletes that valid, unrelated schedule.
+test_install_cron_leaves_another_homes_sweep_in_place() {
+  local world fakebin out installed foreign_legacy
+  world=$(make_world cron-foreign-entries)
+  fakebin=$(install_crontab_stub "$world")
+  foreign_legacy=$(install_legacy_script "$world" "$world/other-fork" other-legacy-bin)
+  cat >> "$world/crontab.txt" <<CRON
+# fm-upstream-sync home=$world/other-home (managed by bin/fm-upstream-sync.sh install-cron)
+17 3 * * * PATH='/usr/bin:/bin' FM_HOME='$world/other-home' $SYNC sweep >> $world/other-home/state/upstream-sync/cron.log 2>&1
+
+# Another checkout's legacy drift check
+5 4 * * * $foreign_legacy >/dev/null 2>&1
+CRON
+  out=$(run_install "$world" "$fakebin") || fail "install-cron failed: $out"
+  installed=$(cat "$world/crontab.txt")
+
+  assert_contains "$installed" "FM_HOME='$world/other-home' $SYNC sweep" \
+    "another home's scheduled sweep was deleted by this home's install"
+  assert_contains "$installed" "# fm-upstream-sync home=$world/other-home" \
+    "another home's managed marker was deleted"
+  assert_contains "$installed" "5 4 * * * $foreign_legacy" \
+    "a legacy job belonging to another checkout was deleted"
+  assert_contains "$installed" "Another checkout's legacy drift check" \
+    "that job's own comment was deleted with it"
+  assert_contains "$out" "LEFT IN PLACE" "the entries this install does not own are named"
+  assert_contains "$out" "another home" "the report says why they were left"
+
+  # This home's own legacy job is still migrated.
+  assert_not_contains "$installed" "35 4 * * * $world/legacy-bin/fm-upstream-drift-check.sh" \
+    "this home's own legacy job was not migrated"
+  pass "install-cron replaces only entries that provably belong to this home"
+}
+
+# An unprovable match is not a match: a legacy job whose script cannot be read
+# says nothing about which home it serves.
+test_install_cron_leaves_an_unbindable_legacy_job_in_place() {
+  local world fakebin out installed
+  world=$(make_world cron-unbindable-legacy)
+  fakebin=$(install_crontab_stub "$world")
+  cat >> "$world/crontab.txt" <<CRON
+
+# A legacy checker whose script is already gone
+45 4 * * * $world/vanished-bin/fm-upstream-drift-check.sh >/dev/null 2>&1
+CRON
+  out=$(run_install "$world" "$fakebin") || fail "install-cron failed: $out"
+  installed=$(cat "$world/crontab.txt")
+
+  assert_contains "$installed" "45 4 * * * $world/vanished-bin/fm-upstream-drift-check.sh" \
+    "a legacy job this install could not bind to a checkout was deleted anyway"
+  assert_contains "$out" "could not bind" "the unprovable entry is reported, not silently kept"
+  pass "a legacy job that cannot be bound to this checkout is preserved and reported"
+}
+
+# cron hands a job almost no environment. A dropped FM_HOME sweeps one home's
+# checkout while recording into another's, and the log redirect still points at
+# the home that installed it, so nothing looks wrong.
+test_the_installed_command_carries_the_operational_home() {
+  local world fakebin out line command
+  world=$(make_world cron-carries-home)
+  fakebin=$(install_crontab_stub "$world")
+  out=$(env FM_ROOT_OVERRIDE="$world/fork" FM_HOME="$world/home" \
+    FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
+    PATH="$fakebin:$PATH" "$SYNC" install-cron 2>&1) \
+    || fail "install-cron failed: $out"
+  line=$(grep -m1 "fm-upstream-sync.sh sweep" "$world/crontab.txt")
+  assert_contains "$line" "FM_HOME='$world/home'" "the installed line does not carry its home"
+
+  # Run exactly what cron would run, with none of this shell's environment.
+  command=$(printf '%s\n' "$line" | cut -d' ' -f6-)
+  env -i HOME="${HOME:-/}" SHELL=/bin/sh /bin/sh -c "$command" \
+    || fail "the installed command failed under a cron-shaped environment"
+
+  assert_present "$world/home/state/upstream-sync/last-success" \
+    "the scheduled command recorded nothing in the home it was installed for"
+  assert_absent "$world/fork/state/upstream-sync" \
+    "the scheduled command recorded into the checkout instead of the selected home"
+  pass "the installed command carries the operational home it was installed for"
 }
 
 test_install_cron_dry_run_changes_nothing() {
@@ -745,8 +1066,8 @@ test_install_cron_on_a_user_with_no_crontab() {
 
   assert_contains "$installed" "fm-upstream-sync.sh sweep" "the managed line was installed"
   [ "$(printf '%s\n' "$installed" | head -1)" = \
-    "# fm-upstream-sync (managed by bin/fm-upstream-sync.sh install-cron)" ] \
-    || fail "a first crontab gained leading blank lines"
+    "# fm-upstream-sync home=$world/home (managed by bin/fm-upstream-sync.sh install-cron)" ] \
+    || fail "a first crontab gained leading blank lines, or lost its home-scoped marker"
   pass "install-cron works for a user who has no crontab yet"
 }
 
@@ -854,10 +1175,20 @@ test_pending_failure_note_does_not_suppress_intake
 test_stalled_fetch_is_bounded_and_reported_as_a_timeout
 test_fetch_bound_holds_when_the_fetch_ignores_sigterm
 test_unpublishable_intake_is_retried_by_the_next_sweep
+test_saved_but_unannounced_intake_is_reannounced_not_counted_as_delivered
+test_a_stalled_backlog_read_is_bounded
+test_a_contended_wake_queue_is_bounded_and_the_sweep_lock_is_released
+test_the_whole_sweep_is_bounded_not_only_the_fetch
+test_a_timeout_tool_without_kill_support_falls_back_to_the_escalating_bound
+test_an_invalid_timeout_selector_refuses_instead_of_reporting_success
+test_an_invalid_bound_refuses_before_anything_runs
 test_concurrent_sweeps_do_not_both_run
 test_sweep_never_writes_the_backlog
 test_status_reports_records_without_touching_the_network
 test_install_cron_preserves_unrelated_entries_and_is_idempotent
+test_install_cron_leaves_another_homes_sweep_in_place
+test_install_cron_leaves_an_unbindable_legacy_job_in_place
+test_the_installed_command_carries_the_operational_home
 test_install_cron_dry_run_changes_nothing
 test_install_cron_reports_the_held_reconciliation_item
 test_install_cron_on_a_user_with_no_crontab
